@@ -17,7 +17,10 @@ STATE_DIR = Path.home() / ".local" / "state" / "mdl"
 STATE = STATE_DIR / "state.json"
 DEFAULT_BIN = "llama-server"
 DEFAULT_PORT = 8080
-READY = re.compile(r"server is listening|HTTP server listening|starting the main loop")
+# Wording differs across llama.cpp builds: older ones say "server is listening on
+# http://...", build 10424+ says "llama_server: listening on http://...".
+READY = re.compile(r"listening on http|server is listening|HTTP server listening"
+                   r"|starting the main loop")
 READY_TIMEOUT = 300
 
 KNOWN = {"model", "ngl", "n_cpu_moe", "ctx", "flash_attn", "kv_type", "parallel", "port", "args"}
