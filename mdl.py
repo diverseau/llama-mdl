@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """mdl - run one local llama.cpp server from a config file."""
 
+import ctypes
 import json
 import os
 import re
@@ -64,14 +65,29 @@ def build_argv(name, cfg, binary):
     return argv + [str(a) for a in extra]
 
 
-def alive(pid):
-    try:
-        os.kill(pid, 0)
-    except PermissionError:
+if os.name == "nt":
+    def alive(pid):
+        """True if pid is a live process. os.kill(pid, 0) lies on Windows."""
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.OpenProcess(0x1000, False, pid)  # QUERY_LIMITED_INFORMATION
+        if not handle:
+            return False
+        try:
+            code = ctypes.c_ulong()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                return False
+            return code.value == 259  # STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(handle)
+else:
+    def alive(pid):
+        try:
+            os.kill(pid, 0)
+        except PermissionError:
+            return True
+        except OSError:
+            return False
         return True
-    except OSError:
-        return False
-    return True
 
 
 def read_state():
@@ -177,7 +193,7 @@ def cmd_stop(args):
         time.sleep(0.1)
     else:
         try:
-            os.kill(pid, signal.SIGKILL)
+            os.kill(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
         except OSError:
             pass
         time.sleep(0.5)

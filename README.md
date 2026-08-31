@@ -3,10 +3,12 @@
 A small CLI for running one local [llama.cpp](https://github.com/ggml-org/llama.cpp)
 server at a time from a config file, instead of pasting flag soup into your shell.
 
-Single file, Python 3.11+ (needs `tomllib`), standard library only. POSIX only —
-it uses process groups and signals.
+Single file, Python 3.11+ (needs `tomllib`), standard library only.
+Runs on Linux, macOS and Windows.
 
 ## Install
+
+Linux / macOS:
 
 ```sh
 git clone <this repo> ~/src/mdl
@@ -14,11 +16,21 @@ chmod +x ~/src/mdl/mdl.py
 sudo ln -s ~/src/mdl/mdl.py /usr/local/bin/mdl
 ```
 
+Windows has no symlink worth relying on, so drop a `mdl.cmd` shim somewhere on
+your PATH:
+
+```
+@echo off
+python "%USERPROFILE%\src\mdl\mdl.py" %*
+```
+
 Then write a config:
 
 ```sh
 mkdir -p ~/.config/mdl && $EDITOR ~/.config/mdl/models.toml
 ```
+
+On Windows that is `%USERPROFILE%\.config\mdl\models.toml`.
 
 ## Config
 
@@ -46,6 +58,9 @@ ngl = 99
 ctx = 16384
 port = 8080
 ```
+
+On Windows, write paths with forward slashes (`C:/models/foo.gguf`) or double
+the backslashes, since TOML treats `\` as an escape character.
 
 ### Keys
 
@@ -82,9 +97,9 @@ qwen-small  /srv/models/Qwen3-8B-Q5_K_M.gguf
 
 $ mdl run ornith
 starting ornith (pid 48812), log /home/leon/.local/state/mdl/ornith.log
-load_tensors: offloading 99 repeating layers to GPU
-...
-main: server is listening on http://0.0.0.0:8080 - starting the main loop
+load_tensors: offloaded 43/43 layers to GPU
+llama_context: n_ctx = 65536
+main: server is listening on http://127.0.0.1:8080
 ready: ornith on http://127.0.0.1:8080 (pid 48812)
 
 $ mdl ps
@@ -102,16 +117,21 @@ stopped ornith (pid 48812)
 ~/.local/state/mdl/<name>.log   server stdout+stderr, truncated on each run
 ```
 
+Same layout on Windows, under `%USERPROFILE%`.
+
 ## Behaviour notes
 
 - **One server at a time.** `run` while something is up is an error telling you
   to `stop` first.
-- **Stale state self-heals.** If the pid in `state.json` is gone — crash, reboot,
-  `kill -9` — the file is removed and `ps` reports nothing running.
+- **Stale state self-heals.** If the pid in `state.json` is gone (crash, reboot,
+  `kill -9`) the file is removed and `ps` reports nothing running.
 - **If the server exits during startup,** `run` reports its exit status, removes
   the state file, and exits 1. The log has the reason.
-- **If it doesn't report ready within 300s,** `run` exits 1 but leaves the server
-  running, since it may still be loading. Check the log, or `mdl stop`.
+- **If it does not report ready within 300s,** `run` exits 1 but leaves the
+  server running, since it may still be loading. Check the log, or `mdl stop`.
+- **Pid reuse is not guarded against.** If the OS recycles a dead server's pid,
+  `ps` will report it as still running. Rare, and the cure costs more than the
+  disease.
 - Errors are one line on stderr and a non-zero exit. No tracebacks.
 
 ## Deliberately not included
