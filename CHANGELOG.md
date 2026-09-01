@@ -4,6 +4,20 @@ Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- The UI's prompt pane (`p`) is a conversation rather than a series of
+  unrelated one-shots: it keeps context across turns, `ctrl+l` clears it.
+- Reasoning is shown dimmed and inset and timed on its own, from either
+  a `reasoning_content` delta or inline `<think>` tags (which can
+  straddle a chunk boundary).
+- Live state while it works: what it is doing - reading the prompt,
+  reasoning, generating - with a spinner, a running token count and
+  tok/s, then a final line with tok/s, time to first token and time
+  spent reasoning. Server-reported timings win over our own count.
+- `esc` interrupts a reply by closing the socket, so it stops now rather
+  than at the next token, and reports it as interrupted, not failed.
+
 ## [0.1.0]
 
 First release.

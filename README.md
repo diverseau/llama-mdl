@@ -159,8 +159,7 @@ state file. Anything you do in it is visible to the CLI and vice versa.
 Idle, it lists your models with a status dot, shows the selected model's
 parameters, and previews the exact `llama-server` command it would run.
 `e` edits those parameters and saves them back to `models.toml`, leaving
-your comments and layout alone. `p` prompts the running model and streams
-the reply.
+your comments and layout alone.
 Running, it swaps in live telemetry: VRAM, KV-cache use, a tokens/sec
 sparkline, busy slots, and a colour-coded log tail.
 
@@ -180,6 +179,38 @@ sparkline, busy slots, and a colour-coded log tail.
 ```
 
 Quitting never stops a server; `s` is the only thing that does.
+
+### Talking to the model
+
+`p` opens a chat with whatever is running, without leaving the UI.
+
+```
+ ● gemma12  ·  127.0.0.1:8080  ·  generating
+
+ ▌ you
+ in one sentence, what is a GGUF file?
+
+ ▌ gemma12
+   ⟩ reasoning
+   The user wants one sentence, so lead with the format and...
+
+ A GGUF file is a standardised, optimised format for storing an LLM...
+
+   451 tok  ·  45.3 tok/s  ·  ttft 0.40s  ·  9.0s reasoning
+
+ ⠹ generating  38 tok  ·  44.1 tok/s   esc to interrupt
+```
+
+It keeps the conversation, so follow-up questions have context; `ctrl+l`
+starts a fresh one. Reasoning is shown dimmed and inset, and timed
+separately, whether the server hands it back in its own field or inline
+as `<think>` tags. `esc` interrupts a running reply - it closes the
+socket rather than waiting for the next token - and closes the pane once
+nothing is streaming.
+
+The rate is the server's own `tok/s` when it reports timings, and ours
+otherwise. `ttft` is time to first token, which is the number that tells
+you whether a long context is hurting.
 
 ### Animation
 

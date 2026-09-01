@@ -587,53 +587,219 @@ class EditScreen(ModalScreen):
             self.dismiss(cfg)
 
 
+SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+THINK_OPEN, THINK_CLOSE = "<think>", "</think>"
+BUSY = ("waiting", "thinking", "typing")
+PHASES = {"idle":     ("#565f89", "ready"),
+          "waiting":  ("#e0af68", "reading the prompt"),
+          "thinking": ("#bb7af7", "reasoning"),
+          "typing":   ("#9ece6a", "generating"),
+          "done":     ("#565f89", "done"),
+          "stopped":  ("#e0af68", "interrupted"),
+          "error":    ("#f7768e", "failed")}
+
+
+def partial_tag(s, tag):
+    """How many trailing characters of s could be the start of tag."""
+    for n in range(min(len(tag) - 1, len(s)), 0, -1):
+        if tag.startswith(s[-n:]):
+            return n
+    return 0
+
+
 class PromptScreen(ModalScreen):
-    """Send one completion to the running server without leaving the UI."""
+    """A conversation with the running server.
 
-    BINDINGS = [Binding("escape", "dismiss", "close")]
+    The server is a whole process away, so the only honest thing to show
+    while it works is what it is actually doing - reading the prompt,
+    reasoning, or emitting - and how fast. Twenty silent seconds in a box
+    reads as a hang, which is how the first version of this felt.
+    """
 
-    def __init__(self, port):
+    BINDINGS = [Binding("escape", "close", "close"),
+                Binding("ctrl+l", "clear", "clear")]
+
+    def __init__(self, port, model="model"):
         super().__init__()
-        self.port = port
+        self.port, self.model = port, model
+        self.history = []              # the whole exchange, so it has context
+        self.transcript = Text()
+        self.phase = "idle"
+        self.frame = 0
+        self.cancel = False
+        self.stream = None
+        self._reset()
 
+    def _reset(self):
+        self.buf, self.thinking = "", False
+        self.tokens = self.reasoned = 0
+        self.began = self.first = self.think_at = 0.0
+        self.think_secs = 0.0
+        self.timings = {}
+        self.reply = []
+
+    # -- layout ------------------------------------------------------------
     def compose(self) -> ComposeResult:
         with Vertical(id="prompt-box"):
-            yield Label(Text(" prompt the model ", style="bold #bb7af7"))
-            yield Input(placeholder="ask something, enter to send",
-                        id="prompt-input")
+            yield Static(id="chat-head")
             with VerticalScroll(id="prompt-scroll"):
                 yield Static(id="prompt-out")
+            yield Static(id="chat-stats")
+            yield Input(placeholder="ask something, enter to send",
+                        id="prompt-input")
 
     def on_mount(self):
-        self.log_text = Text()
+        self._paint()
+        self.set_interval(0.08, self._tick)
         self.query_one("#prompt-input", Input).focus()
 
-    def say(self, text, style=""):
-        self.log_text.append(text, style=style)
-        self.query_one("#prompt-out", Static).update(self.log_text)
+    def _tick(self):
+        self.frame += 1
+        if self.phase in BUSY:
+            self._paint()
+
+    def _paint(self):
+        colour, label = PHASES[self.phase]
+        self.query_one("#chat-head", Static).update(Text.assemble(
+            ("● ", colour), (self.model, "bold #c0caf5"), ("  ·  ", "#1f2430"),
+            ("127.0.0.1:%d" % self.port, "#565f89"), ("  ·  ", "#1f2430"),
+            (label, colour)))
+        body = self.transcript.copy()
+        if self.phase in ("thinking", "typing") and self.frame % 8 < 5:
+            body.append("▌", "#bb7af7")
+        self.query_one("#prompt-out", Static).update(body)
+        self.query_one("#chat-stats", Static).update(self._stats())
+
+    def _rate(self):
+        return self.tokens / max(time.time() - self.first, 1e-6) if self.first else 0
+
+    def _summary(self):
+        bits = ["%d tok" % self.tokens]
+        rate = self.timings.get("predicted_per_second") or self._rate()
+        if rate:
+            bits.append("%.1f tok/s" % rate)
+        if self.first:
+            bits.append("ttft %.2fs" % (self.first - self.began))
+        if self.think_secs:
+            bits.append("%.1fs reasoning" % self.think_secs)
+        return "  ·  ".join(bits)
+
+    def _stats(self):
+        if self.phase not in BUSY:      # the summary is in the transcript
+            return Text("enter to send  ·  ctrl+l to clear  ·  esc to close",
+                        "#3b4261")
+        spin = SPINNER[self.frame % len(SPINNER)]
+        label = "interrupting" if self.cancel else PHASES[self.phase][1]
+        bits = [(spin + " ", "#7aa2f7"), (label, "#7aa2f7")]
+        if self.phase == "waiting":
+            bits.append(("  %.1fs" % (time.time() - self.began), "#565f89"))
+        else:
+            bits.append(("  %d tok  ·  %.1f tok/s" % (self.tokens, self._rate()),
+                         "#565f89"))
+        bits.append(("   esc to interrupt", "#3b4261"))
+        return Text.assemble(*bits)
+
+    # -- streaming ---------------------------------------------------------
+    def _split(self, piece):
+        """(kind, text) pairs, honouring <think> tags split across chunks.
+
+        Some builds hand reasoning back in its own delta field; others just
+        emit the tags inline, and a tag can straddle two chunks.
+        """
+        self.buf += piece
+        out = []
+        while True:
+            tag = THINK_CLOSE if self.thinking else THINK_OPEN
+            kind = "reason" if self.thinking else "text"
+            i = self.buf.find(tag)
+            if i < 0:
+                keep = len(self.buf) - partial_tag(self.buf, tag)
+                text, self.buf = self.buf[:keep], self.buf[keep:]
+                if text:
+                    out.append((kind, text))
+                return out
+            if i:
+                out.append((kind, self.buf[:i]))
+            self.buf = self.buf[i + len(tag):]
+            self.thinking = not self.thinking
+
+    def _feed(self, kind, text):
+        if not self.first:
+            self.first = time.time()
+        if kind == "reason":
+            if not self.reasoned:
+                self.transcript.append("  ⟩ reasoning" + NEWLINE, "italic #565f89")
+                self.think_at = time.time()
+            self.phase = "thinking"
+            # Only the first chunk needs the indent; every later one
+            # inherits it from the newline it follows.
+            head = "  " if not self.reasoned else ""
+            self.reasoned += 1
+            self.transcript.append(
+                head + text.replace(NEWLINE, NEWLINE + "  "), "italic #4b5478")
+        else:
+            if self.phase == "thinking":
+                self.think_secs = time.time() - self.think_at
+                self.transcript.append(NEWLINE)
+            self.phase = "typing"
+            self.reply.append(text)
+            self.transcript.append(text, "#c0caf5")
+        self.tokens += 1
+        self._paint()
+        self.query_one("#prompt-scroll").scroll_end(animate=False)
+
+    def _finish(self, phase, note=""):
+        self.phase = phase
+        style = {"error": "#f7768e", "stopped": "#e0af68"}.get(phase, "#3b4261")
+        self.transcript.append(NEWLINE * 2 + "  " + (note or self._summary())
+                               + NEWLINE, style)
+        reply = "".join(self.reply).strip()
+        if reply:
+            self.history.append({"role": "assistant", "content": reply})
+        box = self.query_one("#prompt-input", Input)
+        box.disabled = False
+        box.placeholder = "ask something, enter to send"
+        box.focus()
+        self._paint()
         self.query_one("#prompt-scroll").scroll_end(animate=False)
 
     def on_input_submitted(self, event):
         text = event.value.strip()
-        if not text:
+        if not text or self.phase in BUSY:
             return
-        self.query_one("#prompt-input", Input).value = ""
-        self.say("> " + text + NEWLINE, "#7aa2f7")
-        self._send(text)
+        box = self.query_one("#prompt-input", Input)
+        box.value = ""
+        box.disabled = True
+        box.placeholder = "streaming, esc to interrupt"
+        if self.transcript.plain:
+            self.transcript.append(NEWLINE)
+        self.transcript.append("▌ you" + NEWLINE, "bold #7aa2f7")
+        self.transcript.append(text + NEWLINE * 2, "#7aa2f7")
+        self.transcript.append("▌ " + self.model + NEWLINE, "bold #bb7af7")
+        self.history.append({"role": "user", "content": text})
+        self._reset()
+        self.began = time.time()
+        self.cancel = False
+        self.phase = "waiting"
+        self._paint()
+        self._send()
 
     @work(thread=True)
-    def _send(self, text):
-        """Stream the reply token by token; a 200-token wait reads as a hang."""
-        body = json.dumps({"messages": [{"role": "user", "content": text}],
-                           "max_tokens": 512, "temperature": 0.7,
-                           "stream": True}).encode()
+    def _send(self):
+        """Stream the reply. Runs off the UI thread so the spinner keeps up."""
+        body = json.dumps({"messages": self.history, "max_tokens": 1024,
+                           "temperature": 0.7, "stream": True,
+                           "timings_per_token": True}).encode()
         req = urllib.request.Request(
             "http://127.0.0.1:%d/v1/chat/completions" % self.port, data=body,
             headers={"Content-Type": "application/json"}, method="POST")
-        started, tokens = time.time(), 0
+        call = self.app.call_from_thread
         try:
-            with urllib.request.urlopen(req, timeout=180) as response:
+            with urllib.request.urlopen(req, timeout=300) as response:
+                self.stream = response
                 for raw in response:
+                    if self.cancel:
+                        break
                     line = raw.decode("utf-8", "replace").strip()
                     if not line.startswith("data:"):
                         continue
@@ -641,21 +807,47 @@ class PromptScreen(ModalScreen):
                     if payload == "[DONE]":
                         break
                     try:
-                        delta = json.loads(payload)["choices"][0]["delta"]
+                        chunk = json.loads(payload)
+                        delta = chunk["choices"][0]["delta"]
                     except (ValueError, KeyError, IndexError):
                         continue
-                    piece = delta.get("content") or ""
-                    if piece:
-                        tokens += 1
-                        self.app.call_from_thread(self.say, piece, "#c0caf5")
-        except Exception as e:                       # noqa: BLE001 - shown, not raised
-            self.app.call_from_thread(self.say, NEWLINE + "  failed: %s" % e,
-                                      "#f7768e")
+                    self.timings = chunk.get("timings") or self.timings
+                    think = delta.get("reasoning_content") or ""
+                    if think:
+                        call(self._feed, "reason", think)
+                    for kind, text in self._split(delta.get("content") or ""):
+                        call(self._feed, kind, text)
+        except Exception as e:                   # noqa: BLE001 - shown, not raised
+            if not self.cancel:                  # a cancel closes the socket
+                call(self._finish, "error", "failed: %s" % e)
+                return
+        finally:
+            self.stream = None
+        if self.cancel:
+            call(self._finish, "stopped", "interrupted  ·  " + self._summary())
+        else:
+            call(self._finish, "done")
+
+    # -- keys --------------------------------------------------------------
+    def action_close(self):
+        if self.phase not in BUSY:
+            self.dismiss()
             return
-        rate = tokens / max(time.time() - started, 1e-6)
-        self.app.call_from_thread(
-            self.say, NEWLINE + "  %d chunks - %.1f/s" % (tokens, rate) + NEWLINE * 2,
-            "#565f89")
+        self.cancel = True
+        if self.stream is not None:              # cut it off now, not next token
+            try:
+                self.stream.close()
+            except Exception:                    # noqa: BLE001
+                pass
+
+    def action_clear(self):
+        if self.phase in BUSY:
+            return
+        self.history.clear()
+        self.transcript = Text()
+        self.phase = "idle"
+        self._reset()
+        self._paint()
 
 
 # --------------------------------------------------------------------------
@@ -682,10 +874,16 @@ class MdlApp(App):
     #status { height: 1; background: #10141c; color: #565f89; padding: 0 1; }
     #help-box { width: 62; height: auto; padding: 1 2; background: #151a23;
                 border: round #7aa2f7; }
-    #edit-box, #prompt-box { width: 66; height: auto; padding: 1 2;
+    #edit-box { width: 66; height: auto; padding: 1 2;
                 background: #151a23; border: round #7aa2f7; }
-    #prompt-scroll { height: 14; background: #0b0e14; margin-top: 1; }
+    #prompt-box { width: 88; height: auto; padding: 1 2;
+                background: #151a23; border: round #bb7af7; }
+    #chat-head { height: 1; padding: 0 1; }
+    #prompt-scroll { height: 18; background: #0b0e14; margin-top: 1;
+                border: round #1f2430; }
     #prompt-out { padding: 0 1; }
+    #chat-stats { height: 1; padding: 0 1; margin-top: 1; }
+    #prompt-input { margin-top: 1; }
     .edit-row { height: 3; }
     .edit-label { padding: 1 0 0 0; color: #565f89; width: 12; }
     .edit-input { width: 1fr; }
@@ -996,7 +1194,7 @@ class MdlApp(App):
         if not state:
             self.notify("nothing is running", severity="warning")
             return
-        self.push_screen(PromptScreen(state["port"]))
+        self.push_screen(PromptScreen(state["port"], state["name"]))
 
     def action_run(self):
         name = self._selected()
