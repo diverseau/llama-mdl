@@ -286,6 +286,28 @@ def terminate(pid, sig):
         os.kill(pid, sig)                # not a group leader after all
 
 
+def write_atomic(path, text, keep_backup=False):
+    """Replace a file in one step, never leaving it half written.
+
+    models.toml is hand-edited and lives in nobody's git, so a write cut
+    short by a crash, a full disk or a Ctrl-C has to leave the old file
+    untouched rather than truncated. Writing a sibling temp file and
+    renaming it over gives that: the rename is atomic, so a reader sees
+    either the whole old file or the whole new one.
+    """
+    if keep_backup and path.exists():
+        shutil.copy2(path, path.with_name(path.name + ".bak"))
+    tmp = path.with_name(path.name + ".tmp%d" % os.getpid())
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())    # the rename is no use if the data is not down
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)  # nothing half-written left lying about
+
+
 def rotate(log, keep=KEEP_LOGS):
     """Shuffle <name>.log along to .1, .2, ... so a crash stays readable."""
     if not log.exists():
@@ -330,9 +352,9 @@ def spawn(name, models, binary):
         die(f"cannot start {binary}: {e}")
     finally:
         handle.close()
-    STATE.write_text(json.dumps({"name": name, "pid": proc.pid, "port": port,
-                                 "started": time.time(), "log": str(log),
-                                 "born": proc_started(proc.pid)}))
+    write_atomic(STATE, json.dumps(
+        {"name": name, "pid": proc.pid, "port": port, "started": time.time(),
+         "log": str(log), "born": proc_started(proc.pid)}))
     return proc, log, port
 
 
@@ -440,8 +462,7 @@ def cmd_init(args):
     found = shutil.which(DEFAULT_BIN) or "/path/to/llama-server"
     try:
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-        CONFIG.write_text(STARTER % found.replace(chr(92), "/"),
-                          encoding="utf-8")
+        write_atomic(CONFIG, STARTER % found.replace(chr(92), "/"))
     except OSError as e:
         die(f"cannot write {CONFIG}: {e}")
     print(f"wrote {CONFIG}")
@@ -478,8 +499,8 @@ def cmd_add(args):
         f'kv_type = "q8_0"{chr(10)}parallel = 1{chr(10)}port = {port}{chr(10)}'
         f'args = ["--metrics"]{chr(10)}')
     try:
-        with open(CONFIG, "a", encoding="utf-8") as fh:
-            fh.write(block)
+        current = CONFIG.read_text(encoding="utf-8")
+        write_atomic(CONFIG, current + block, keep_backup=True)
     except OSError as e:
         die(f"cannot write {CONFIG}: {e}")
     print(f"added [{name}] to {CONFIG}")

@@ -4,5 +4,7 @@ __pycache__/
 *.log
 .DS_Store
 
-# conversation exports
-*-build-a-small-cli-tool-called-mdl-*.txt
+# Conversation exports. Broad on purpose: the tool ships no .txt, and a
+# transcript landing here is worse than a .txt being missed.
+*.txt
+!requirements*.txt

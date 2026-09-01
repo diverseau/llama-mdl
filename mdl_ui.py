@@ -92,7 +92,9 @@ def write_params(name, cfg, path=None):
             body.insert(insert_at, "%s = %s" % (key, toml_value(cfg[key])))
             insert_at += 1
     lines[head + 1:tail] = body
-    path.write_text(NEWLINE.join(lines), encoding="utf-8")
+    # Atomic, with a .bak: this is the user's own file, and the UI
+    # rewrites it on every save.
+    mdl.write_atomic(path, NEWLINE.join(lines), keep_backup=True)
 
 
 def fx_period(override=None):
@@ -979,7 +981,7 @@ class MdlApp(App):
     def _save_marks(self):
         try:
             mdl.STATE_DIR.mkdir(parents=True, exist_ok=True)
-            self._marks_path().write_text(json.dumps(self.marks))
+            mdl.write_atomic(self._marks_path(), json.dumps(self.marks))
         except OSError:
             pass
 
