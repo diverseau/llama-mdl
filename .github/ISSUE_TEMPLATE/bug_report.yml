@@ -1,0 +1,68 @@
+name: Bug report
+description: Something does not work the way it says it does
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please do not report security issues here - use
+        [a private advisory](https://github.com/contactsturnover-prog/llama-mdl/security/advisories/new)
+        instead.
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you ran, what you expected, what you got instead.
+      placeholder: |
+        $ mdl run qwen-small
+        mdl: ...
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: mdl version
+      description: The output of `mdl --version`.
+      placeholder: mdl 0.1.0
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: OS and Python
+      placeholder: Windows 11, Python 3.13
+    validations:
+      required: true
+
+  - type: input
+    id: llama
+    attributes:
+      label: llama-server build
+      description: The first line of the log, or the build number.
+      placeholder: b10424
+    validations:
+      required: false
+
+  - type: textarea
+    id: check
+    attributes:
+      label: mdl check
+      description: Its output, if the problem is with a config or a launch.
+      render: text
+    validations:
+      required: false
+
+  - type: textarea
+    id: log
+    attributes:
+      label: Relevant log
+      description: >
+        From `~/.local/state/mdl/<name>.log`. The last 30 lines are usually
+        enough. Paths in it may identify you - trim what you would rather not
+        publish.
+      render: text
+    validations:
+      required: false

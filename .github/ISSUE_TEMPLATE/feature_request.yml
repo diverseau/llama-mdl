@@ -1,0 +1,39 @@
+name: Feature request
+description: Suggest something mdl should do
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        mdl runs **one** local llama.cpp server from a config file. It will not
+        grow a daemon, model downloading, hot-swapping, auto-unload, several
+        servers at once, or a web UI - see
+        [CONTRIBUTING.md](https://github.com/contactsturnover-prog/llama-mdl/blob/main/CONTRIBUTING.md).
+        Anything else is fair game.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do
+      description: >
+        The problem, not the solution. What were you doing when you wanted
+        this, and what did you do instead?
+    validations:
+      required: true
+
+  - type: textarea
+    id: idea
+    attributes:
+      label: What you have in mind
+      description: If you have a shape in mind, what would the command look like?
+      placeholder: mdl list --json
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope
+      options:
+        - label: This is not a daemon, a downloader, a hot-swap, or a second server
+          required: true

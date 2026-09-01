@@ -303,15 +303,20 @@ and [Ollama](https://ollama.com) are good and solve different problems.
 
 ## Contributing
 
-Run the tests before opening a pull request:
+See [CONTRIBUTING.md](CONTRIBUTING.md). Short version: open an issue first,
+keep `mdl.py` free of dependencies, and run the tests.
 
 ```sh
 python tests/run.py
+ruff check .
 ```
 
-CI runs them on Linux, macOS and Windows against Python 3.11 and 3.13, plus
-the POSIX process suite and a wheel build. Keep `mdl.py` free of
-dependencies - only the dashboard is allowed any.
+CI runs the suites on Linux, macOS and Windows across Python 3.11-3.13, the
+pinned Textual floor and the current release, Ruff, the POSIX process suite,
+and a packaging check on both the wheel and the sdist.
+
+Security issues go through [SECURITY.md](SECURITY.md), privately, rather
+than the public tracker.
 
 ## License
 
