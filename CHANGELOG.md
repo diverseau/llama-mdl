@@ -6,8 +6,10 @@ Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
 
 ### Changed
 
-- `mdl check` no longer counts the `[example]` table `mdl init` writes
-  as a problem. It is a to-do, so a freshly initialised config passes.
+- `mdl check` no longer counts the model path in the `[example]` table
+  `mdl init` writes as a problem. It is a to-do, and it says so.
+  A missing `llama_server` is still reported, because that one you
+  cannot run anything without.
 - The Textual requirement is `>=3,<9`. The old `>=0.80` was a guess:
   0.80, 1.0 and 2.0 all fail the suite and 3.0 is the first that does
   not, and CI now runs the floor as well as the current release.

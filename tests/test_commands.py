@@ -1,6 +1,7 @@
 """add / check / ps --json / log rotation / pid-reuse / ready_timeout."""
 import json
 import os
+import re
 import sys
 import tomllib
 from pathlib import Path
@@ -110,8 +111,16 @@ teardown(root)
 root, port = sandbox()
 mdl.CONFIG.unlink()
 run(mdl.cmd_init, [])
+# init fills llama_server from PATH, so on a machine without llama-server
+# it leaves a placeholder there too - a real problem, and not the one
+# under test. Point it at something that certainly exists.
+mdl.CONFIG.write_text(
+    re.sub(r'^llama_server = .*$',
+           'llama_server = "%s"' % sys.executable.replace(chr(92), '/'),
+           mdl.CONFIG.read_text(encoding='utf-8'), count=1, flags=re.M),
+    encoding='utf-8')
 out, err, code = run(mdl.cmd_check, [])
-check("a freshly initialised config passes check", code, 0)
+check("a freshly initialised config passes check", (code, err), (0, ""))
 check("the placeholder is called out as a to-do",
       "not filled in yet" in out, True)
 check("the starter really does use the placeholder path",
