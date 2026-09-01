@@ -23,6 +23,10 @@ part that needs a dependency — [Textual](https://textual.textualize.io/) —
 and the CLI never imports it, so every command but `ui` stays
 dependency-free.
 
+In practice, it lets you manage llama.cpp servers through named model presets:
+start llama-server from a config file, switch between GGUF models, or run
+multiple llama-server instances at once.
+
 ## Install
 
 ```sh
@@ -291,6 +295,11 @@ docker run --rm -v "$PWD:/repo:ro" python:3.12-slim \
     sh -c 'cp -r /repo /w && cd /w && python3 tests/integration_posix.py'
 ```
 
+## How this compares
+
+[llama-swap](https://github.com/mostlygeek/llama-swap) is automatic and proxied: it swaps models on demand behind one endpoint. Pick it when you want requests to choose and load models for you.
+[Ollama](https://ollama.com) uses its own model format and registry, so it is a different thing entirely. Pick it when you want that managed model ecosystem instead of running GGUF files through llama-server yourself.
+
 ## Non-goals
 
 These are deliberate, and issues asking for them will be closed with a link
@@ -301,9 +310,6 @@ here. `mdl` starts servers, stops them, and tells you what is running.
 - **No hot-swap or auto-unload.** Nothing is unloaded to make room for
   something else; what you started stays started until you stop it.
 - **No web UI.** llama-server already ships one.
-
-If you want these, [llama-swap](https://github.com/mostlygeek/llama-swap)
-and [Ollama](https://ollama.com) are good and solve different problems.
 
 ## Contributing
 
