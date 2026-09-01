@@ -53,14 +53,16 @@ def procstat(pid):
 # --- detach: the server must outlive the mdl process that started it -------
 r = mdl("run", "demo")
 check("run exits 0", r.returncode, 0)
-check("run reports ready", r.stdout.strip().split("\n")[-1].startswith("ready: demo"), True)
+check("run reports ready", r.stdout.strip().split("\n")[-1].startswith("ready: demo"),
+      True)
 pid = json.loads(STATE.read_text())["pid"]
 st = procstat(pid)
 check("server alive after mdl exited", st is not None and st["state"] != "Z", True)
 check("start_new_session made it a session leader", st and st["session"], pid)
 check("reparented away from the dead mdl", st and st["ppid"], 1)
 check("ps sees it", mdl("ps").stdout.startswith("demo  pid %d" % pid), True)
-check("logs -f is not required to read it", "offloaded 33/33" in mdl("logs").stdout, True)
+check("logs -f is not required to read it", "offloaded 33/33" in mdl("logs").stdout,
+      True)
 
 # --- orphan self-heal ------------------------------------------------------
 os.kill(pid, 9)
@@ -83,7 +85,8 @@ elapsed = time.time() - t0
 check("stop succeeded", (r.returncode, r.stdout.strip()),
       (0, "stopped demo (pid %d)" % pid))
 check("stop waited ~10s then escalated", 9.0 < elapsed < 14.0, True)
-check("stubborn process is gone", procstat(pid) is None or procstat(pid)["state"] == "Z",
+check("stubborn process is gone",
+      procstat(pid) is None or procstat(pid)["state"] == "Z",
       True)
 check("state cleaned up", STATE.exists(), False)
 

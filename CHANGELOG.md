@@ -2,48 +2,52 @@
 
 Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
 
-## [Unreleased]
-
-### Changed
-
-- The UI's prompt pane (`p`) is a conversation rather than a series of
-  unrelated one-shots: it keeps context across turns, `ctrl+l` clears it.
-- Reasoning is shown dimmed and inset and timed on its own, from either
-  a `reasoning_content` delta or inline `<think>` tags (which can
-  straddle a chunk boundary).
-- Live state while it works: what it is doing - reading the prompt,
-  reasoning, generating - with a spinner, a running token count and
-  tok/s, then a final line with tok/s, time to first token and time
-  spent reasoning. Server-reported timings win over our own count.
-- `esc` interrupts a reply by closing the socket, so it stops now rather
-  than at the next token, and reports it as interrupted, not failed.
-
 ## [0.1.0]
 
 First release.
 
-### Added
+### Commands
 
 - `mdl run`, `stop`, `ps`, `list` - one llama.cpp server at a time, driven
   from `~/.config/mdl/models.toml`.
 - `mdl init` writes a commented starter config and finds `llama-server` on
   your PATH if it is there.
-- `mdl logs [-f] [name]` prints or follows a server's log.
 - `mdl add <model.gguf> [name] [port]` appends a config entry with sane
   defaults, naming it after the file and reporting its layer count.
 - `mdl check` validates every model - binary, model files, unknown keys,
   `ngl` below the layer count - without launching anything.
+- `mdl logs [-f] [name]` prints or follows a server's log.
 - `mdl ps --json` for scripts and status bars.
-- `ready_timeout` in the config, for a model that takes longer than 300s.
-- Logs rotate: `<name>.log` shuffles to `.1` and `.2` on each run.
-- `mdl ui` (and bare `mdl`) - a terminal dashboard over the same config and
-  state file: model list, live `llama-server` command preview, VRAM and
-  KV-cache meters, a tokens/sec sparkline, a colour-coded log tail, inline
-  parameter editing that saves back to the config, and a streaming prompt
-  pane. Needs `pip install "llama-mdl[ui]"`; the four commands need nothing.
-- `--version`, and `$XDG_CONFIG_HOME` / `$XDG_STATE_HOME` support.
+- `mdl --version`.
+
+### The dashboard
+
+- `mdl ui`, and bare `mdl`, open a terminal dashboard over the same config
+  and state file: model list, live `llama-server` command preview, VRAM and
+  KV-cache meters, a tokens/sec sparkline, a colour-coded log tail, and
+  inline parameter editing that saves back to the config, comments intact.
+- `p` opens a conversation with the running model. It keeps context across
+  turns, and `ctrl+l` clears it.
+- Reasoning is shown dimmed and inset and timed on its own, from either a
+  `reasoning_content` delta or inline `<think>` tags, which can straddle a
+  chunk boundary.
+- While it works it says which part it is on - reading the prompt,
+  reasoning, generating - with a spinner, a running token count and tok/s,
+  then a final line with tok/s, time to first token and time spent
+  reasoning. Server-reported timings win over our own count.
+- `esc` interrupts a reply by closing the socket, so it stops now rather
+  than at the next token, and reports it as interrupted, not failed.
+- Needs `pip install "llama-mdl[ui]"`. Every other command needs nothing.
+
+### Behaviour
+
+- Config writes are atomic and keep a `.bak`, so a crash, a full disk or a
+  Ctrl-C cannot leave `models.toml` truncated.
 - Pre-flight checks: a missing binary, a missing model file or a busy port
   fails in milliseconds with one line, rather than after a model load.
+- `ready_timeout` in the config, for a model that takes longer than 300s.
+- Logs rotate: `<name>.log` shuffles to `.1` and `.2` on each run.
+- `$XDG_CONFIG_HOME` and `$XDG_STATE_HOME` are honoured.
 - Test suites in `tests/`, including POSIX process semantics and an opt-in
   suite that drives a real model.
 
@@ -55,7 +59,8 @@ First release.
   script, signalling only the recorded pid orphans the real server and
   leaves the port held.
 - The state file records the OS process creation time, so a recycled pid
-  is not mistaken for a running server.
+  is not mistaken for a running server. macOS has no cheap way to read
+  that, so it falls back to the pid alone.
 - On POSIX a server stopped from inside `mdl ui` is reaped rather than
   left a zombie, which `kill(pid, 0)` reports as still alive.
 - Python 3.11+ (for `tomllib`). Older versions exit with one line.

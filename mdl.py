@@ -14,7 +14,7 @@ import time
 try:
     import tomllib
 except ImportError:                      # 3.10 and older
-    raise SystemExit("mdl: needs Python 3.11 or newer (tomllib)")
+    raise SystemExit("mdl: needs Python 3.11 or newer (tomllib)") from None
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -43,7 +43,8 @@ READY = re.compile(r"listening on http|server is listening|HTTP server listening
 READY_TIMEOUT = 300      # seconds; ready_timeout in the config overrides
 
 KEEP_LOGS = 3            # <name>.log plus .1 .. .N-1
-KNOWN = {"model", "ngl", "n_cpu_moe", "ctx", "flash_attn", "kv_type", "parallel", "port", "args"}
+KNOWN = {"model", "ngl", "n_cpu_moe", "ctx", "flash_attn", "kv_type",
+         "parallel", "port", "args"}
 SIMPLE = (("ngl", "-ngl"), ("n_cpu_moe", "--n-cpu-moe"), ("ctx", "-c"),
           ("parallel", "-np"), ("port", "--port"))
 
@@ -88,7 +89,8 @@ def load_config():
     global CONFIG_DATA
     CONFIG_DATA = data
     models = {k: v for k, v in data.items() if isinstance(v, dict)}
-    binary = os.environ.get("MDL_LLAMA_SERVER") or data.get("llama_server") or DEFAULT_BIN
+    binary = (os.environ.get("MDL_LLAMA_SERVER")
+              or data.get("llama_server") or DEFAULT_BIN)
     return models, str(binary)
 
 
@@ -260,7 +262,8 @@ def tail_until_ready(proc, log, name, port):
                 if pending:
                     print(pending, flush=True)
                 STATE.unlink(missing_ok=True)
-                die(f"{name} exited with status {proc.returncode} during startup; see {log}")
+                die(f"{name} exited with status {proc.returncode} "
+                    f"during startup; see {log}")
             if time.monotonic() > deadline:
                 die(f"{name} not ready after {limit:g}s; still running, see {log} "
                     f"or run 'mdl stop'")

@@ -10,7 +10,8 @@ only. Runs on Linux, macOS and Windows.
 
 `mdl_ui.py` adds an optional terminal dashboard (`mdl ui`). It is the only
 part that needs a dependency — [Textual](https://textual.textualize.io/) —
-and the CLI never imports it, so the four commands stay dependency-free.
+and the CLI never imports it, so every command but `ui` stays
+dependency-free.
 
 ## Install
 
@@ -20,13 +21,13 @@ pipx install "llama-mdl[ui]"    # with the terminal dashboard
 ```
 
 The package is `llama-mdl`; the command it installs is `mdl`. (Plain `mdl`
-on PyPI is an unrelated project.) The four commands need no dependencies at
-all; only the dashboard pulls in [Textual](https://textual.textualize.io/).
+on PyPI is an unrelated project.) Nothing but the dashboard has a
+dependency, and that is [Textual](https://textual.textualize.io/).
 
 Or run it straight from a clone - it is two files and a standard library:
 
 ```sh
-git clone <this repo> ~/src/mdl
+git clone https://github.com/contactsturnover-prog/llama-mdl ~/src/mdl
 python ~/src/mdl/mdl.py --help
 ```
 
@@ -184,25 +185,10 @@ Quitting never stops a server; `s` is the only thing that does.
 
 `p` opens a chat with whatever is running, without leaving the UI.
 
-```
- ● gemma12  ·  127.0.0.1:8080  ·  generating
-
- ▌ you
- in one sentence, what is a GGUF file?
-
- ▌ gemma12
-   ⟩ reasoning
-   The user wants one sentence, so lead with the format and...
-
- A GGUF file is a standardised, optimised format for storing an LLM...
-
-   451 tok  ·  45.3 tok/s  ·  ttft 0.40s  ·  9.0s reasoning
-
- ⠹ generating  38 tok  ·  44.1 tok/s   esc to interrupt
-```
+![the chat pane](docs/chat.svg)
 
 It keeps the conversation, so follow-up questions have context; `ctrl+l`
-starts a fresh one. Reasoning is shown dimmed and inset, and timed
+starts a fresh one. Reasoning is shown dimmed and timed
 separately, whether the server hands it back in its own field or inline
 as `<think>` tags. `esc` interrupts a running reply - it closes the
 socket rather than waiting for the next token - and closes the pane once

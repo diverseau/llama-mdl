@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
-"""Render docs/screenshot.svg from the real TUI, against a demo config.
+"""Render docs/screenshot.svg and docs/chat.svg from the real TUI.
 
-Uses invented models so the image does not depend on whatever happens to be
-on the author's disk. Run it after any visual change:
+Uses invented models and a scripted reply, so the images do not depend on
+whatever happens to be on the author's disk, and do not need a server.
+Run it after any visual change:
 
     python tools/screenshot.py
 """
 import asyncio
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -18,7 +20,7 @@ sys.path.insert(0, str(ROOT / "tests"))
 import mdl        # noqa: E402
 import mdl_ui     # noqa: E402
 from mdl_ui import MdlApp                     # noqa: E402
-from textual.widgets import DataTable         # noqa: E402
+from textual.widgets import DataTable, Input  # noqa: E402
 
 DEMO = '''llama_server = "/opt/llama.cpp/build/bin/llama-server"
 
@@ -53,6 +55,20 @@ SIZES = {"ornith": 21_400_000_000, "qwen-small": 5_800_000_000,
          "gemma-12b": 7_300_000_000}
 MARKS = {"ornith": "ok", "qwen-small": "ok", "gemma-12b": "new"}
 
+QUESTION = "in one sentence, what is a GGUF file?"
+REASONING = [
+    "The user asked for one sentence, so no preamble. Lead with what the ",
+    "format actually is - a container for the weights - then the part they ",
+    "care about: it is what lets a quantised model load quickly and run on ",
+    "hardware they already own. Expanding the acronym would spend the ",
+    "sentence on trivia they did not ask for.",
+]
+ANSWER = [
+    "A GGUF file is a single-file container holding an LLM's weights and ",
+    "the metadata needed to load them, usually quantised so the model fits ",
+    "in memory and runs on ordinary CPUs and consumer GPUs.",
+]
+
 
 async def main():
     root = Path(tempfile.mkdtemp(prefix="mdl-shot-"))
@@ -74,10 +90,41 @@ async def main():
         await pilot.pause()
         app._tick()
         await pilot.pause()
-        out = ROOT / "docs" / "screenshot.svg"
-        out.parent.mkdir(exist_ok=True)
-        out.write_text(app.export_screenshot(title="mdl"), encoding="utf-8")
-        print("wrote %s (%d KB)" % (out, out.stat().st_size // 1024))
+        save(app, "screenshot.svg")
+
+        await chat(app, pilot)
+        save(app, "chat.svg")
+
+
+def save(app, name):
+    out = ROOT / "docs" / name
+    out.parent.mkdir(exist_ok=True)
+    out.write_text(app.export_screenshot(title="mdl"), encoding="utf-8")
+    print("wrote %s (%d KB)" % (out, out.stat().st_size // 1024))
+
+
+async def chat(app, pilot):
+    """Replay a turn straight into the screen, so no server is needed."""
+    screen = mdl_ui.PromptScreen(8080, "ornith")
+    await app.push_screen(screen)
+    await pilot.pause()
+    screen.transcript.append("▌ you" + chr(10), "bold #7aa2f7")
+    screen.transcript.append(QUESTION + chr(10) * 2, "#7aa2f7")
+    screen.transcript.append("▌ ornith" + chr(10), "bold #bb7af7")
+    screen.began = time.time()
+    for chunk in REASONING:
+        screen._feed("reason", chunk)
+    for chunk in ANSWER:
+        screen._feed("text", chunk)
+    # Plausible numbers for a still image; the arithmetic is the real one.
+    screen.tokens, screen.think_secs = 148, 9.4
+    screen.first = time.time() - 3.2
+    screen.phase, screen.frame = "typing", 3
+    box = screen.query_one("#prompt-input", Input)
+    box.disabled = True                   # as it is while a reply streams
+    box.placeholder = "streaming, esc to interrupt"
+    screen._paint()
+    await pilot.pause()
 
 
 asyncio.run(main())

@@ -74,7 +74,8 @@ async def main():
             check("%s: it knows the model" % label, screen.model, "demo")
             check("%s: header names model and port" % label,
                   "demo" in plain(app.screen.query_one("#chat-head", Static))
-                  and str(port) in plain(app.screen.query_one("#chat-head", Static)), True)
+                  and str(port) in plain(
+                      app.screen.query_one("#chat-head", Static)), True)
 
             box = app.screen.query_one("#prompt-input", Input)
             box.value = "hi"

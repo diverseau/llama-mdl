@@ -87,9 +87,11 @@ async def main():
                 code = str(e)
                 await asyncio.sleep(0.5)
         check("server serving", code, 200)
-        check("dashboard visible", await until(pilot, lambda: app.query_one("#dash").display,
+        check("dashboard visible",
+              await until(pilot, lambda: app.query_one("#dash").display,
                                                10), True)
-        check("metrics reachable", await until(pilot, lambda: app._metrics_ok, 15), True)
+        check("metrics reachable",
+              await until(pilot, lambda: app._metrics_ok, 15), True)
 
         # streaming prompt
         await pilot.press("p")
@@ -106,7 +108,8 @@ async def main():
               await until(pilot, lambda: bool(app.tok_history), 15), True)
 
         await pilot.press("s")
-        check("stopped from the UI", await until(pilot, lambda: mdl.read_state() is None,
+        check("stopped from the UI",
+              await until(pilot, lambda: mdl.read_state() is None,
                                                  30), True)
     return t.done()
 

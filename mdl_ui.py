@@ -147,7 +147,7 @@ def colour_at(pos, colors=GRADIENT):
 
 def gradient_text(lines, colors=GRADIENT, phase=0.0):
     """Colour a block of text left-to-right, offset by `phase` (0..1)."""
-    width = max((len(l) for l in lines), default=1)
+    width = max((len(line) for line in lines), default=1)
     out = Text()
     for row, line in enumerate(lines):
         for col, ch in enumerate(line):
@@ -167,7 +167,8 @@ def sparkline(values, width=SPARK_POINTS):
     if not pts:
         return " " * width
     hi = max(pts) or 1.0
-    scaled = [SPARK_CHARS[min(int(v / hi * (len(SPARK_CHARS) - 1)), len(SPARK_CHARS) - 1)]
+    scaled = [SPARK_CHARS[min(int(v / hi * (len(SPARK_CHARS) - 1)),
+              len(SPARK_CHARS) - 1)]
               for v in pts]
     return "".join(scaled).rjust(width)
 
@@ -202,7 +203,8 @@ def human_size(nbytes):
 
 def http_get(port, path, timeout=1.5):
     try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=timeout) as r:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}{path}",
+                                    timeout=timeout) as r:
             return r.read().decode("utf-8", "replace")
     except (urllib.error.URLError, OSError, ValueError):
         return None
@@ -255,7 +257,8 @@ def gpu_memory():
         return None
     try:
         raw = subprocess.run(
-            [exe, "--query-gpu=memory.used,memory.total", "--format=csv,noheader,nounits"],
+            [exe, "--query-gpu=memory.used,memory.total",
+             "--format=csv,noheader,nounits"],
             capture_output=True, text=True, timeout=4,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout
         used, total = raw.strip().splitlines()[0].split(",")
@@ -421,7 +424,8 @@ class ParamPane(VerticalScroll):
         self.query_one("#p-meta", Static).update(meta)
 
         rows = Text()
-        for key in ("ngl", "n_cpu_moe", "ctx", "flash_attn", "kv_type", "parallel", "port"):
+        for key in ("ngl", "n_cpu_moe", "ctx", "flash_attn", "kv_type",
+                    "parallel", "port"):
             if key in cfg:
                 rows.append(f"  {key:<12}", style="#565f89")
                 rows.append(f"{cfg[key]}\n", style="#c0caf5")
@@ -436,7 +440,8 @@ class ParamPane(VerticalScroll):
             frac = min((est + kv) / max(gpu[1], 1), 1.0)
             v.append("est VRAM  ", style="#565f89")
             v.append(bar(frac, 18), style=bar_colour(frac))
-            v.append(f"  {(est + kv) / 1024:.1f} / {gpu[1] / 1024:.1f} G", style="#c0caf5")
+            v.append(f"  {(est + kv) / 1024:.1f} / {gpu[1] / 1024:.1f} G",
+                     style="#c0caf5")
         self.query_one("#p-vram", Static).update(v)
 
 
@@ -456,13 +461,15 @@ class Dashboard(Static):
         head.append(state["name"], style="bold #bb7af7")
         head.append("  ● RUNNING", style="bold #9ece6a")
         up = mdl.uptime(time.time() - state.get("started", 0))
-        head.append(f"   pid {state['pid']} · :{state['port']} · up {up}", style="#565f89")
+        head.append(f"   pid {state['pid']} · :{state['port']} · up {up}",
+                    style="#565f89")
         self.query_one("#d-head", Static).update(head)
 
         if gpu:
             used, total = gpu
             self.query_one("#d-vram", Meter).set_value(
-                "VRAM", used / max(total, 1), f"{used / 1024:.1f} / {total / 1024:.1f} G")
+                "VRAM", used / max(total, 1),
+                                   f"{used / 1024:.1f} / {total / 1024:.1f} G")
         else:
             self.query_one("#d-vram", Meter).set_value("VRAM", None, "no nvidia-smi")
 
@@ -525,7 +532,8 @@ class HelpScreen(ModalScreen):
         for key, what in self.ROWS:
             body.append(f"  {key:<12}", style="#7aa2f7")
             body.append(f"{what}\n", style="#c0caf5")
-        body.append("\n  quitting never stops a server. use s for that.\n", style="#565f89")
+        body.append("\n  quitting never stops a server. use s for that.\n",
+                    style="#565f89")
         yield Static(body, id="help-box")
 
 
@@ -552,7 +560,8 @@ class EditScreen(ModalScreen):
                 yield Label(f"{'flash_attn':<11}", classes="edit-label")
                 yield Input(value="on" if self.cfg.get("flash_attn") else "off",
                             id="f-flash_attn", classes="edit-input")
-            yield Label(Text(" enter saves to models.toml · esc cancels", style="#565f89"))
+            yield Label(Text(" enter saves to models.toml · esc cancels",
+                        style="#565f89"))
             yield Button("apply", variant="primary", id="apply")
 
     def _collect(self):
@@ -730,15 +739,14 @@ class PromptScreen(ModalScreen):
             self.first = time.time()
         if kind == "reason":
             if not self.reasoned:
-                self.transcript.append("  ⟩ reasoning" + NEWLINE, "italic #565f89")
+                self.transcript.append("⟩ reasoning" + NEWLINE,
+                                       "italic #565f89")
                 self.think_at = time.time()
             self.phase = "thinking"
-            # Only the first chunk needs the indent; every later one
-            # inherits it from the newline it follows.
-            head = "  " if not self.reasoned else ""
             self.reasoned += 1
-            self.transcript.append(
-                head + text.replace(NEWLINE, NEWLINE + "  "), "italic #4b5478")
+            # Flush left, not inset: the pane wraps, so an indent would
+            # land on the first line only and read as a stray one.
+            self.transcript.append(text, "italic #4b5478")
         else:
             if self.phase == "thinking":
                 self.think_secs = time.time() - self.think_at
@@ -1021,7 +1029,8 @@ class MdlApp(App):
     def _sysinfo(self):
         gpu = gpu_memory()
         t = Text()
-        t.append(Path(self.binary).name if self.binary else "no binary", style="#9ece6a")
+        t.append(Path(self.binary).name if self.binary else "no binary",
+                 style="#9ece6a")
         t.append("\n")
         if gpu:
             t.append(f"{gpu[1] / 1024:.0f} GB VRAM", style="#565f89")

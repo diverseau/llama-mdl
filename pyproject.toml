@@ -4,12 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "llama-mdl"        # the command is mdl; that name was taken
-version = "0.1.0"
+dynamic = ["version"]
 description = "Run one local llama.cpp server from a config file, with an optional terminal dashboard"
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.11"
-authors = [{ name = "leon" }]
+authors = [{ name = "diverse" }]
 keywords = ["llama.cpp", "llm", "gguf", "cli", "tui", "local-ai"]
 classifiers = [
     "Environment :: Console",
@@ -23,13 +23,35 @@ classifiers = [
 ]
 dependencies = []
 
-# The four commands need nothing. Only the dashboard has a dependency, and
-# mdl.py never imports it, so `pip install llama-mdl` stays dependency-free.
+[project.urls]
+Homepage = "https://github.com/contactsturnover-prog/llama-mdl"
+Repository = "https://github.com/contactsturnover-prog/llama-mdl"
+Issues = "https://github.com/contactsturnover-prog/llama-mdl/issues"
+Changelog = "https://github.com/contactsturnover-prog/llama-mdl/blob/main/CHANGELOG.md"
+
+# Only the dashboard has a dependency, and mdl.py never imports it, so
+# `pip install llama-mdl` stays dependency-free.
 [project.optional-dependencies]
-ui = ["textual>=0.80"]
+# Tested floor, not a guess: 2.x fails the suite, 3.0 passes. Capped at
+# the next major because a TUI is exactly the kind of dependency that
+# breaks quietly.
+ui = ["textual>=3,<9"]
 
 [project.scripts]
 mdl = "mdl:main"
 
 [tool.setuptools]
 py-modules = ["mdl", "mdl_ui"]
+
+[tool.setuptools.dynamic]
+version = { attr = "mdl.VERSION" }
+
+[tool.ruff]
+line-length = 88
+
+[tool.ruff.lint]
+# pycodestyle, pyflakes, bugbear: the rules that catch mistakes.
+# Deliberately not isort - the test files set sys.path before importing
+# mdl, and reordering those imports breaks them - and not pyupgrade,
+# which would rewrite most of the % formatting for no behaviour change.
+select = ["E", "F", "W", "B"]

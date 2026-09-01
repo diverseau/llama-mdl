@@ -65,7 +65,8 @@ check("check passes a good config", (out.strip().endswith("ok"), code), (True, 0
 out, _, _ = run(mdl.cmd_ps, ["--json"])
 check("ps --json when idle", out.strip(), "null")
 _, err, code = run(mdl.cmd_ps, ["--bogus"])
-check("ps rejects unknown flags", (err.strip(), code), ("mdl: usage: mdl ps [--json]", 1))
+check("ps rejects unknown flags", (err.strip(), code),
+      ("mdl: usage: mdl ps [--json]", 1))
 
 # ------------------------------------------- run: rotation, born, timeout ---
 run(mdl.cmd_run, ["demo"])

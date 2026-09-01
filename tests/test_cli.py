@@ -82,7 +82,8 @@ check("uptime formatting", [mdl.uptime(x) for x in (0, 45, 201, 3720, 90061, -5)
       ["0s", "45s", "3m21s", "1h02m", "25h01m", "0s"])
 
 # ------------------------------------------------------------- pre-flight ---
-_, err, code = run(mdl.spawn, "demo", {"demo": dict(models["demo"], model="/no/such.gguf")},
+_, err, code = run(mdl.spawn, "demo",
+                   {"demo": dict(models["demo"], model="/no/such.gguf")},
                    binary)
 check("missing model file is caught before launch",
       (err.strip(), code), ("mdl: model file not found: /no/such.gguf", 1))
@@ -117,11 +118,14 @@ check("second run refused",
       (err.startswith("mdl: 'demo' is already running"), "mdl stop" in err, code),
       (True, True, 1))
 _, err, code = run(mdl.cmd_run, ["nope"])
-check("unknown model", (err.strip().endswith("no model named 'nope' in %s" % mdl.CONFIG),
+check("unknown model",
+      (err.strip().endswith("no model named 'nope' in %s" % mdl.CONFIG),
                         code), (True, 1))
 
 out, _, _ = run(mdl.cmd_ps, [])
-check("ps shows it", out.startswith("demo  pid %d  port %d  up " % (state["pid"], port)),
+check("ps shows it",
+      out.startswith("demo  pid %d  port %d  up "
+                     % (state["pid"], port)),
       True)
 out, _, _ = run(mdl.cmd_logs, [])
 check("logs shows the running server's log", "offloaded 33/33" in out, True)
@@ -163,7 +167,8 @@ if state:
 teardown(root)
 
 # ------------------------------------------------------- init / paths ---
-import tempfile, tomllib  # noqa: E402
+import tempfile  # noqa: E402
+import tomllib  # noqa: E402
 
 home = Path(tempfile.mkdtemp(prefix="mdl-init-"))
 os.environ["XDG_CONFIG_HOME"] = str(home / "cfg")
