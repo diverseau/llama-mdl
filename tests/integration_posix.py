@@ -37,8 +37,14 @@ ENV = dict(os.environ, HOME=str(HOME))
 
 def mdl(*args, mode=""):
     env = dict(ENV, MDL_FAKE_MODE=mode)
-    return subprocess.run([sys.executable, str(ROOT / "mdl.py")] + list(args),
-                          capture_output=True, text=True, env=env)
+    r = subprocess.run([sys.executable, str(ROOT / "mdl.py")] + list(args),
+                       capture_output=True, text=True, env=env)
+    if r.returncode and r.stderr.strip():
+        # Otherwise a CI failure here is a bare 'expected 0, got 1'.
+        print("      (mdl %s -> %d: %s)"
+              % (" ".join(args), r.returncode,
+                 r.stderr.strip().splitlines()[-1]))
+    return r
 
 
 def procstat(pid):
