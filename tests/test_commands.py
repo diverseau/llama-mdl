@@ -105,4 +105,17 @@ check("a bad ready_timeout falls back", mdl.ready_timeout(), mdl.READY_TIMEOUT)
 mdl.CONFIG_DATA.pop("ready_timeout")
 teardown(root)
 
+# --------------------------------------------------- a fresh config ----
+# mdl init then mdl check is the first thing anyone does. It must pass.
+root, port = sandbox()
+mdl.CONFIG.unlink()
+run(mdl.cmd_init, [])
+out, err, code = run(mdl.cmd_check, [])
+check("a freshly initialised config passes check", code, 0)
+check("the placeholder is called out as a to-do",
+      "not filled in yet" in out, True)
+check("the starter really does use the placeholder path",
+      mdl.PLACEHOLDER in mdl.STARTER, True)
+teardown(root)
+
 sys.exit(t.done())

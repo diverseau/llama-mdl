@@ -51,6 +51,10 @@ SIMPLE = (("ngl", "-ngl"), ("n_cpu_moe", "--n-cpu-moe"), ("ctx", "-c"),
 USAGE = ("usage: mdl {init|add <model.gguf>|check|list|run <name>|stop|"
          "ps [--json]|logs [-f] [name]|ui [--no-fx]} [--version]")
 
+# The model path mdl init leaves behind. check knows to treat it as a
+# to-do rather than a fault; tests keep the two in step.
+PLACEHOLDER = "/path/to/your-model.gguf"
+
 STARTER = '''# mdl config. One table per model; the table name is what you
 # pass to `mdl run`. Use forward slashes in paths on Windows - TOML
 # treats a backslash as an escape character.
@@ -532,14 +536,18 @@ def cmd_check(args):
             build_argv(name, cfg, binary)
         except MdlError as e:
             notes.append(str(e).split(': ', 1)[-1])
-        model = Path(str(cfg.get("model", "")))
-        if not model.is_file():
+        raw = str(cfg.get("model", ""))
+        blank = raw == PLACEHOLDER   # straight out of mdl init
+        model = Path(raw)            # compare raw: Path flips the slashes
+        if not model.is_file() and not blank:
             notes.append("model file not found")
         else:
             layers = gguf_layers(model)
             if layers and isinstance(cfg.get("ngl"), int) and 0 < cfg["ngl"] < layers:
                 notes.append(f"ngl {cfg['ngl']} < {layers} layers, partial offload")
         problems += len(notes)
+        if blank:            # a to-do, so it must not fail the check
+            notes.append("not filled in yet; edit it or delete it")
         status = "ok" if not notes else "; ".join(notes)
         print(f"{name.ljust(max(len(n) for n in models))}  {status}")
     if problems:
