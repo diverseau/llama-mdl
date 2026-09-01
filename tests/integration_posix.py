@@ -33,6 +33,10 @@ PORT = support.free_port()
     % (launcher, support.FAKE, PORT))
 
 ENV = dict(os.environ, HOME=str(HOME))
+for _var in ("XDG_CONFIG_HOME", "XDG_STATE_HOME"):
+    # CI sets these, and mdl rightly prefers them to HOME - so the
+    # sandbox has to clear them or the suite reads the real config.
+    ENV.pop(_var, None)
 
 
 def mdl(*args, mode=""):
