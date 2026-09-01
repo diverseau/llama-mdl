@@ -78,7 +78,7 @@ port = 8080
 model = "/srv/models/Qwen3-8B-Q5_K_M.gguf"
 ngl = 99
 ctx = 16384
-port = 8080
+port = 8081
 ```
 
 On Windows, write paths with forward slashes (`C:/models/foo.gguf`) or double
@@ -152,7 +152,8 @@ main: server is listening on http://127.0.0.1:8080
 ready: ornith on http://127.0.0.1:8080 (pid 48812)
 
 $ mdl ps
-ornith  pid 48812  port 8080  up 1h04m
+ornith      pid 48812  port 8080  up 1h04m
+qwen-small  pid 49107  port 8081  up 12m
 
 $ mdl stop
 stopped ornith (pid 48812)
@@ -191,7 +192,7 @@ sparkline, busy slots, and a colour-coded log tail.
  key          does
  up/down, j k select a model
  enter, r     run the selected model
- s            stop the running server
+ s            stop the selected model
  R            restart
  e            edit ngl / ctx / kv_type / port, saved to models.toml
  c            copy the llama-server command
@@ -242,7 +243,7 @@ one-off.
 
 ```
 ~/.config/mdl/models.toml        your config
-~/.local/state/mdl/state.json    name, pid, port and start time of the server
+~/.local/state/mdl/run/<name>.json  pid, port and start time of each server
 ~/.local/state/mdl/<name>.log    server stdout+stderr, rotated on each run
 ~/.local/state/mdl/<name>.log.1  the previous run, and .2 before that
 ~/.local/state/mdl/ui-marks.json which models the UI has seen start or fail
@@ -262,8 +263,8 @@ same layout lives under `%USERPROFILE%`.
   this contract has not.
 - **Obvious mistakes fail before launch.** A missing model file, a missing
   binary or a busy port is one line in milliseconds, not a failed model load.
-- **Stale state self-heals.** If the pid in `state.json` is gone (crash, reboot,
-  `kill -9`) the file is removed and `ps` reports nothing running.
+- **Stale state self-heals.** If the pid in `run/<name>.json` is gone (crash,
+  reboot, `kill -9`) the file is removed and `ps` no longer lists that server.
 - **If the server exits during startup,** `run` reports its exit status, removes
   the state file, and exits 1. The log has the reason.
 - **If it does not report ready in time,** `run` exits 1 but leaves the server
