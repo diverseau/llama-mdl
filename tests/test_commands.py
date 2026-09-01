@@ -1,0 +1,107 @@
+"""add / check / ps --json / log rotation / pid-reuse / ready_timeout."""
+import json
+import os
+import sys
+import tomllib
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import support                                   # noqa: E402
+from support import mdl, run, sandbox, teardown  # noqa: E402
+
+t = support.Tally("test_commands")
+check = t.check
+GGUF = support.FAKE          # not a real gguf; layer detection must cope
+
+# ------------------------------------------------------------------ add ----
+root, port = sandbox()
+_, err, code = run(mdl.cmd_add, [])
+check("add needs an argument", ("usage: mdl add" in err, code), (True, 1))
+_, err, code = run(mdl.cmd_add, ["/no/such/model.gguf"])
+check("add rejects a missing file", ("no such file" in err, code), (True, 1))
+
+out, _, code = run(mdl.cmd_add, [str(GGUF), "extra"])
+check("add writes an entry", (code, "added [extra]" in out), (0, True))
+saved = tomllib.loads(mdl.CONFIG.read_text(encoding="utf-8"))
+check("added model is in the config", "extra" in saved, True)
+check("added entry has sane defaults",
+      (saved["extra"]["ngl"], saved["extra"]["flash_attn"], saved["extra"]["port"]),
+      (99, True, 8080))
+check("added entry uses only known keys", set(saved["extra"]) <= mdl.KNOWN, True)
+check("existing model untouched", "demo" in saved, True)
+check("added entry builds a command",
+      "-fa" in mdl.build_argv("extra", saved["extra"], "LS"), True)
+
+_, err, code = run(mdl.cmd_add, [str(GGUF), "extra"])
+check("add refuses a duplicate name", ("already in" in err, code), (True, 1))
+_, err, code = run(mdl.cmd_add, [str(GGUF), "p", "notanumber"])
+check("add validates the port", ("port must be a number" in err, code), (True, 1))
+out, _, _ = run(mdl.cmd_add, [str(GGUF), "ported", "9001"])
+check("add honours an explicit port",
+      tomllib.loads(mdl.CONFIG.read_text(encoding="utf-8"))["ported"]["port"], 9001)
+
+check("gguf_layers returns None for a non-gguf", mdl.gguf_layers(GGUF), None)
+check("human_size", [mdl.human_size(n) for n in (900, 5 << 20, 3 << 30)],
+      ["900B", "5.0M", "3.0G"])
+
+# ---------------------------------------------------------------- check ----
+# everything above wrote *valid* entries, so break one on purpose
+with open(mdl.CONFIG, "a", encoding="utf-8") as fh:
+    fh.write('\n[gone]\nmodel = \"/no/such/model.gguf\"\n')
+
+out, err, code = run(mdl.cmd_check, [])
+check("check flags a missing model file", "model file not found" in out, True)
+check("check exits non-zero when it finds problems", code, 1)
+_, err, code = run(mdl.cmd_check, ["x"])
+check("check takes no arguments", (err.strip(), code), ("mdl: usage: mdl check", 1))
+teardown(root)
+
+# a config where everything is fine
+root, port = sandbox()
+out, err, code = run(mdl.cmd_check, [])
+check("check passes a good config", (out.strip().endswith("ok"), code), (True, 0))
+
+# ------------------------------------------------------------ ps --json ----
+out, _, _ = run(mdl.cmd_ps, ["--json"])
+check("ps --json when idle", out.strip(), "null")
+_, err, code = run(mdl.cmd_ps, ["--bogus"])
+check("ps rejects unknown flags", (err.strip(), code), ("mdl: usage: mdl ps [--json]", 1))
+
+# ------------------------------------------- run: rotation, born, timeout ---
+run(mdl.cmd_run, ["demo"])
+state = mdl.read_state()
+check("state records the process creation time", state.get("born") is not None
+      or os.uname().sysname == "Darwin" if hasattr(os, "uname") else True, True)
+
+out, _, _ = run(mdl.cmd_ps, ["--json"])
+live = json.loads(out)
+check("ps --json while running", (live["name"], live["port"]), ("demo", port))
+check("ps --json includes uptime", "uptime" in live, True)
+
+# a recycled pid: same pid, different creation time
+if state.get("born") is not None:
+    mdl.STATE.write_text(json.dumps(dict(state, born=state["born"] + 999)),
+                         encoding="utf-8")
+    check("a recycled pid is not mistaken for our server", mdl.read_state(), None)
+    check("that stale state is removed", mdl.STATE.exists(), False)
+    mdl.STATE.write_text(json.dumps(state), encoding="utf-8")
+
+run(mdl.cmd_stop, [])
+run(mdl.cmd_run, ["demo"])
+check("previous log kept as .1", (mdl.STATE_DIR / "demo.log.1").is_file(), True)
+run(mdl.cmd_stop, [])
+run(mdl.cmd_run, ["demo"])
+check("rotation shuffles along", (mdl.STATE_DIR / "demo.log.2").is_file(), True)
+run(mdl.cmd_stop, [])
+check("rotation stops at KEEP_LOGS",
+      (mdl.STATE_DIR / ("demo.log.%d" % (mdl.KEEP_LOGS + 1))).exists(), False)
+
+check("ready_timeout defaults to the constant", mdl.ready_timeout(), mdl.READY_TIMEOUT)
+mdl.CONFIG_DATA["ready_timeout"] = 42
+check("ready_timeout is read from the config", mdl.ready_timeout(), 42.0)
+mdl.CONFIG_DATA["ready_timeout"] = "nonsense"
+check("a bad ready_timeout falls back", mdl.ready_timeout(), mdl.READY_TIMEOUT)
+mdl.CONFIG_DATA.pop("ready_timeout")
+teardown(root)
+
+sys.exit(t.done())

@@ -82,6 +82,10 @@ the backslashes, since TOML treats `\` as an escape character.
 | `port` | `--port` | Defaults to 8080. |
 | `args` | passed through verbatim | Array of strings, appended last. |
 
+Two top-level keys sit outside the model tables: `llama_server` (above) and
+`ready_timeout`, the seconds `run` waits for `/health` before giving up.
+It defaults to 300, which a 70B on a slow disk can exceed.
+
 Anything else in a model table is an error, so a typo like `flash_atn` tells you
 instead of silently doing nothing.
 
@@ -92,8 +96,14 @@ mdl run <name>   Start <name> in the background, tail its log until the
                  server answers /health, and exit. The server keeps running
                  after mdl exits.
 mdl stop         SIGTERM the running server, SIGKILL after 10s, clean up.
-mdl ps           name, pid, port and uptime, or "nothing running".
+mdl ps [--json]  name, pid, port and uptime, or "nothing running".
+                 --json prints the state as JSON (null when idle) for
+                 scripts and status bars.
 mdl list         The models defined in the config.
+mdl add <gguf>   Append an entry for a .gguf to the config, with sane
+                 defaults. Takes an optional name and port.
+mdl check        Validate every model in the config without launching
+                 anything. Exits non-zero if it finds a problem.
 mdl init         Write a starter config, if you do not have one.
 mdl --version    The version, for bug reports.
 mdl ui           The dashboard. Bare `mdl` opens it too.
@@ -122,6 +132,23 @@ ornith  pid 48812  port 8080  up 1h04m
 $ mdl stop
 stopped ornith (pid 48812)
 ```
+
+`add` and `check` are the two that save the most time:
+
+```console
+$ mdl add ~/models/Qwen3-8B-Q5_K_M.gguf
+added [qwen3-8b-q5-k-m] to /home/leon/.config/mdl/models.toml
+  Qwen3-8B-Q5_K_M.gguf (5.4G, 37 layers)
+  run it with: mdl run qwen3-8b-q5-k-m
+
+$ mdl check
+ornith      ok
+qwen-small  model file not found
+mdl: 1 problem(s) found
+```
+
+`add` only appends, and `check` never launches anything, so both are safe
+to run against a config you care about.
 
 ## The UI
 
@@ -191,7 +218,8 @@ since nothing is listening yet.
 ```
 ~/.config/mdl/models.toml        your config
 ~/.local/state/mdl/state.json    name, pid, port and start time of the server
-~/.local/state/mdl/<name>.log    server stdout+stderr, truncated on each run
+~/.local/state/mdl/<name>.log    server stdout+stderr, rotated on each run
+~/.local/state/mdl/<name>.log.1  the previous run, and .2 before that
 ~/.local/state/mdl/ui-marks.json which models the UI has seen start or fail
 ```
 
@@ -211,11 +239,17 @@ same layout lives under `%USERPROFILE%`.
   `kill -9`) the file is removed and `ps` reports nothing running.
 - **If the server exits during startup,** `run` reports its exit status, removes
   the state file, and exits 1. The log has the reason.
-- **If it does not report ready within 300s,** `run` exits 1 but leaves the
-  server running, since it may still be loading. Check the log, or `mdl stop`.
-- **Pid reuse is not guarded against.** If the OS recycles a dead server's pid,
-  `ps` will report it as still running. Rare, and the cure costs more than the
-  disease.
+- **If it does not report ready in time,** `run` exits 1 but leaves the server
+  running, since it may still be loading. Check the log, or `mdl stop`. Raise
+  `ready_timeout` if 300s is genuinely not enough.
+- **Pid reuse is guarded against.** The state file records the OS process
+  creation time, so a recycled pid is not mistaken for your server. macOS has
+  no cheap way to read that, so it falls back to the pid alone.
+- **`stop` signals the process tree, not just the pid.** If your `llama_server`
+  is a wrapper script, killing the wrapper alone would orphan the real server
+  and leave the port held.
+- **The last few logs are kept.** `<name>.log` shuffles along to `.1` and `.2`
+  on each run, so the crash you were not watching is still there.
 - Errors are one line on stderr and a non-zero exit. No tracebacks.
 
 ## Tests

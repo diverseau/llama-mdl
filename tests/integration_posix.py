@@ -87,5 +87,31 @@ check("stubborn process is gone", procstat(pid) is None or procstat(pid)["state"
       True)
 check("state cleaned up", STATE.exists(), False)
 
+# --- a wrapper script: stop must reap the tree, not orphan the server ------
+# The launcher above uses exec, so mdl's pid *is* the server. Anyone whose
+# llama_server sets LD_LIBRARY_PATH first has a real grandchild instead.
+kidfile = HOME / "child.pid"
+wrapper = HOME / "wrapper-llama-server"
+wrapper.write_text('#!/bin/sh\n"%s" "%s" "$@" &\necho $! > %s\nwait\n'
+                   % (sys.executable, support.FAKE, kidfile))
+wrapper.chmod(0o755)
+(CONFIG / "models.toml").write_text(
+    'llama_server = "%s"\n\n[demo]\nmodel = "%s"\nport = %d\n'
+    % (wrapper, support.FAKE, PORT))
+
+check("wrapped server started", mdl("run", "demo").returncode, 0)
+kid = int(kidfile.read_text())
+parent = json.loads(STATE.read_text())["pid"]
+check("the server really is a grandchild", kid != parent, True)
+mdl("stop")
+for _ in range(50):
+    if procstat(kid) is None or procstat(kid)["state"] == "Z":
+        break
+    time.sleep(0.1)
+check("stop reaps the whole tree, not just the wrapper",
+      procstat(kid) is None or procstat(kid)["state"] == "Z", True)
+check("run works again straight after", mdl("run", "demo").returncode, 0)
+mdl("stop")
+
 support.teardown(HOME)
 sys.exit(t.done())

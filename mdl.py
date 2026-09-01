@@ -40,14 +40,15 @@ DEFAULT_PORT = 8080
 # Matched only to colour log lines; readiness is decided by server_ready().
 READY = re.compile(r"listening on http|server is listening|HTTP server listening"
                    r"|starting the main loop")
-READY_TIMEOUT = 300
+READY_TIMEOUT = 300      # seconds; ready_timeout in the config overrides
 
+KEEP_LOGS = 3            # <name>.log plus .1 .. .N-1
 KNOWN = {"model", "ngl", "n_cpu_moe", "ctx", "flash_attn", "kv_type", "parallel", "port", "args"}
 SIMPLE = (("ngl", "-ngl"), ("n_cpu_moe", "--n-cpu-moe"), ("ctx", "-c"),
           ("parallel", "-np"), ("port", "--port"))
 
-USAGE = ("usage: mdl {init|ui [--no-fx]|run <name>|stop|ps|list|"
-         "logs [-f] [name]} [--version]")
+USAGE = ("usage: mdl {init|add <model.gguf>|check|list|run <name>|stop|"
+         "ps [--json]|logs [-f] [name]|ui [--no-fx]} [--version]")
 
 STARTER = '''# mdl config. One table per model; the table name is what you
 # pass to `mdl run`. Use forward slashes in paths on Windows - TOML
@@ -112,6 +113,13 @@ def build_argv(name, cfg, binary):
     return argv + [str(a) for a in extra]
 
 
+def ready_timeout():
+    try:
+        return float(CONFIG_DATA.get("ready_timeout", READY_TIMEOUT))
+    except (TypeError, ValueError):
+        return READY_TIMEOUT
+
+
 def server_ready(port):
     """True once the server answers /health. Log wording changes between
     llama.cpp builds; this contract does not."""
@@ -121,6 +129,33 @@ def server_ready(port):
             return r.status == 200
     except (urllib.error.URLError, OSError, ValueError):
         return False
+
+
+def proc_started(pid):
+    """OS process creation time, or None where we cannot cheaply get it.
+
+    Guards against pid reuse: a recycled pid is alive but was created at
+    a different instant, so the state file is stale even though the pid
+    looks fine. macOS has no /proc, so it opts out rather than guess.
+    """
+    if os.name == "nt":
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.OpenProcess(0x1000, False, pid)
+        if not handle:
+            return None
+        try:
+            times = [ctypes.c_ulonglong() for _ in range(4)]
+            if not kernel32.GetProcessTimes(
+                    handle, *[ctypes.byref(x) for x in times]):
+                return None
+            return times[0].value            # creation time
+        finally:
+            kernel32.CloseHandle(handle)
+    try:                                     # Linux: starttime, field 22
+        stat = Path("/proc/%d/stat" % pid).read_text()
+        return int(stat.rsplit(")", 1)[1].split()[19])
+    except (OSError, IndexError, ValueError):
+        return None
 
 
 def port_busy(port):
@@ -165,6 +200,10 @@ def read_state():
     if not isinstance(pid, int) or not alive(pid):
         STATE.unlink(missing_ok=True)
         return None
+    born = state.get("born")
+    if born is not None and proc_started(pid) not in (None, born):
+        STATE.unlink(missing_ok=True)     # pid recycled onto someone else
+        return None
     return state
 
 
@@ -189,7 +228,8 @@ def _drain(fh, pending):
 
 def tail_until_ready(proc, log, name, port):
     """Echo the log until /health answers. Fatal if it dies or times out."""
-    deadline = time.monotonic() + READY_TIMEOUT
+    limit = ready_timeout()
+    deadline = time.monotonic() + limit
     with open(log, "r", errors="replace") as fh:
         pending = ""
         while True:
@@ -207,9 +247,45 @@ def tail_until_ready(proc, log, name, port):
                 STATE.unlink(missing_ok=True)
                 die(f"{name} exited with status {proc.returncode} during startup; see {log}")
             if time.monotonic() > deadline:
-                die(f"{name} not ready after {READY_TIMEOUT}s; still running, see {log} "
+                die(f"{name} not ready after {limit:g}s; still running, see {log} "
                     f"or run 'mdl stop'")
             time.sleep(0.2)
+
+
+def terminate(pid, sig):
+    """Signal the whole process tree, not just the pid we launched.
+
+    If llama_server is a wrapper script - setting LD_LIBRARY_PATH, say -
+    the recorded pid is the wrapper and the real server is its child.
+    Signalling only the wrapper orphans the server and leaves the port
+    held. spawn() puts it in its own session, so the group is the tree.
+    """
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/T", "/F", "/PID", str(pid)],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        return
+    try:
+        os.killpg(os.getpgid(pid), sig)
+    except (ProcessLookupError, PermissionError, OSError):
+        os.kill(pid, sig)                # not a group leader after all
+
+
+def rotate(log, keep=KEEP_LOGS):
+    """Shuffle <name>.log along to .1, .2, ... so a crash stays readable."""
+    if not log.exists():
+        return
+    for i in range(keep - 1, 0, -1):
+        older = log.with_name(log.name + ".%d" % (i + 1))
+        current = log.with_name(log.name + ".%d" % i)
+        if current.exists():
+            current.replace(older)
+    for _ in range(10):                  # a just-killed writer can linger
+        try:
+            return log.replace(log.with_name(log.name + ".1"))
+        except OSError:
+            time.sleep(0.05)
+    print(f"mdl: cannot rotate {log}; overwriting it", file=sys.stderr)
 
 
 def spawn(name, models, binary):
@@ -228,6 +304,7 @@ def spawn(name, models, binary):
     try:
         STATE_DIR.mkdir(parents=True, exist_ok=True)
         log = STATE_DIR / f"{name}.log"
+        rotate(log)
         handle = open(log, "wb")
     except OSError as e:
         die(f"cannot open log in {STATE_DIR}: {e}")
@@ -239,7 +316,8 @@ def spawn(name, models, binary):
     finally:
         handle.close()
     STATE.write_text(json.dumps({"name": name, "pid": proc.pid, "port": port,
-                                 "started": time.time(), "log": str(log)}))
+                                 "started": time.time(), "log": str(log),
+                                 "born": proc_started(proc.pid)}))
     return proc, log, port
 
 
@@ -270,7 +348,7 @@ def cmd_stop(args):
         return
     pid = state["pid"]
     try:
-        os.kill(pid, signal.SIGTERM)
+        terminate(pid, signal.SIGTERM)
     except OSError as e:
         die(f"cannot signal pid {pid}: {e}")
     for _ in range(100):
@@ -279,7 +357,7 @@ def cmd_stop(args):
         time.sleep(0.1)
     else:
         try:
-            os.kill(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
+            terminate(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
         except OSError:
             pass
         time.sleep(0.5)
@@ -288,9 +366,15 @@ def cmd_stop(args):
 
 
 def cmd_ps(args):
-    if args:
-        die("usage: mdl ps")
+    as_json = args == ["--json"]
+    if args and not as_json:
+        die("usage: mdl ps [--json]")
     state = read_state()
+    if as_json:
+        if state:
+            state["uptime"] = round(time.time() - state.get("started", 0))
+        print(json.dumps(state))
+        return
     if not state:
         print("nothing running")
         return
@@ -309,6 +393,30 @@ def cmd_list(args):
         print(f"{name.ljust(width)}  {models[name].get('model', '(no model path)')}")
 
 
+def gguf_layers(path, window=32 << 20):
+    """Highest blk.N index in the tensor table, i.e. the layer count.
+
+    A full GGUF parser would be a hundred lines; the tensor names sit
+    near the front of the file and are all we need.
+    """
+    try:
+        with open(path, "rb") as fh:
+            if fh.read(4) != b"GGUF":
+                return None
+            head = fh.read(window)
+    except OSError:
+        return None
+    blocks = re.findall(rb"blk\.(\d+)\.", head)
+    return max(int(b) for b in blocks) + 1 if blocks else None
+
+
+def human_size(nbytes):
+    for unit, div in (("T", 1 << 40), ("G", 1 << 30), ("M", 1 << 20)):
+        if nbytes >= div:
+            return f"{nbytes / div:.1f}{unit}"
+    return f"{nbytes}B"
+
+
 def cmd_init(args):
     if args:
         die("usage: mdl init")
@@ -325,6 +433,78 @@ def cmd_init(args):
     if not shutil.which(DEFAULT_BIN):
         print("set llama_server in it: llama-server is not on your PATH")
     print("edit it, then run: mdl list")
+
+
+def cmd_add(args):
+    """mdl add <model.gguf> [name] [port]"""
+    if not args or len(args) > 3:
+        die("usage: mdl add <model.gguf> [name] [port]")
+    path = Path(args[0]).expanduser()
+    if not path.is_file():
+        die(f"no such file: {path}")
+    if len(args) > 1:
+        name = args[1]
+    else:                       # Foo-Bar-Q4_K_M.gguf -> foo-bar
+        stem = re.sub(r"[-_.]?(q\d+[_0-9a-z]*|f16|f32|bf16)$", "", path.stem,
+                      flags=re.I)
+        name = re.sub(r"[^A-Za-z0-9_-]+", "-", stem).strip("-").lower()
+    try:
+        port = int(args[2]) if len(args) > 2 else DEFAULT_PORT
+    except ValueError:
+        die(f"port must be a number, not {args[2]!r}")
+    models, _ = load_config()
+    if name in models:
+        die(f"{name} is already in {CONFIG}; pick another name")
+    layers = gguf_layers(path)
+    block = (
+        f"{chr(10)}[{name}]{chr(10)}"
+        f'model = "{str(path).replace(chr(92), "/")}"{chr(10)}'
+        f"ngl = 99{chr(10)}ctx = 8192{chr(10)}flash_attn = true{chr(10)}"
+        f'kv_type = "q8_0"{chr(10)}parallel = 1{chr(10)}port = {port}{chr(10)}'
+        f'args = ["--metrics"]{chr(10)}')
+    try:
+        with open(CONFIG, "a", encoding="utf-8") as fh:
+            fh.write(block)
+    except OSError as e:
+        die(f"cannot write {CONFIG}: {e}")
+    print(f"added [{name}] to {CONFIG}")
+    detail = human_size(path.stat().st_size)
+    if layers:
+        detail += f", {layers} layers"
+    print(f"  {path.name} ({detail})")
+    print(f"  run it with: mdl run {name}")
+
+
+def cmd_check(args):
+    """Validate every model in the config without launching anything."""
+    if args:
+        die("usage: mdl check")
+    models, binary = load_config()
+    if not models:
+        die(f"no models defined in {CONFIG}")
+    problems = 0
+    if not shutil.which(binary) and not Path(binary).is_file():
+        print(f"llama_server: not found: {binary}")
+        problems += 1
+    for name in sorted(models):
+        notes = []
+        cfg = models[name]
+        try:
+            build_argv(name, cfg, binary)
+        except MdlError as e:
+            notes.append(str(e).split(': ', 1)[-1])
+        model = Path(str(cfg.get("model", "")))
+        if not model.is_file():
+            notes.append("model file not found")
+        else:
+            layers = gguf_layers(model)
+            if layers and isinstance(cfg.get("ngl"), int) and 0 < cfg["ngl"] < layers:
+                notes.append(f"ngl {cfg['ngl']} < {layers} layers, partial offload")
+        problems += len(notes)
+        status = "ok" if not notes else "; ".join(notes)
+        print(f"{name.ljust(max(len(n) for n in models))}  {status}")
+    if problems:
+        die(f"{problems} problem(s) found")
 
 
 def cmd_logs(args):
@@ -370,8 +550,9 @@ def cmd_ui(args):
     _launch_ui()
 
 
-COMMANDS = {"init": cmd_init, "ui": cmd_ui, "run": cmd_run, "stop": cmd_stop,
-            "ps": cmd_ps, "list": cmd_list, "logs": cmd_logs}
+COMMANDS = {"init": cmd_init, "add": cmd_add, "check": cmd_check, "ui": cmd_ui,
+            "run": cmd_run, "stop": cmd_stop, "ps": cmd_ps, "list": cmd_list,
+            "logs": cmd_logs}
 
 
 def _dispatch():
@@ -401,6 +582,7 @@ def main():
     try:
         _dispatch()
     except MdlError as e:
+        sys.stdout.flush()               # keep order when stdout is a pipe
         print(f"mdl: {e}", file=sys.stderr)
         sys.exit(1)
     except KeyboardInterrupt:
