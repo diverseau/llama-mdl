@@ -4,12 +4,12 @@ A small CLI for running one local [llama.cpp](https://github.com/ggml-org/llama.
 server at a time from a config file, instead of pasting flag soup into your shell.
 
 ```sh
+# without mdl
 llama-server -m /srv/models/Ornith-1.5-35B-A3B-Q4_K_M.gguf -ngl 99 \
   --n-cpu-moe 24 -c 65536 -fa on --cache-type-k q8_0 \
   --cache-type-v q8_0 -np 1 --port 8080
-```
 
-```sh
+# with mdl
 mdl run ornith
 ```
 
