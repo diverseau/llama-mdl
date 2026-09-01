@@ -18,6 +18,19 @@ Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
 - The dashboard follows the selected model rather than "the" running
   one, and the model list marks everything that is up.
 
+### Fixed
+
+- The tok/s reading was zero for a whole generation and then one
+  spike. It was taken from `llamacpp:predicted_tokens_seconds`, which
+  llama.cpp holds at 0 until a request finishes and then publishes as
+  a single average. `llamacpp:n_decode_total` is the counter that
+  actually moves while a reply streams, so the rate now comes from
+  its delta over the measured interval.
+- The log pane could be squeezed to nothing. The dashboard and command
+  panes had fixed heights and the log took what was left, which on a
+  30-row terminal was zero rows. The command pane now sizes to its
+  content and the log keeps a floor.
+
 ### Changed
 
 - **Breaking: `mdl ps --json` always prints a list**, `[]` when nothing

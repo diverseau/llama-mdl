@@ -890,13 +890,17 @@ class MdlApp(App):
     #left { width: 38; border-right: solid #1f2430; }
     #right { width: 1fr; }
     #models { height: 1fr; background: #0d1017; border: round #1f2430; }
-    #p-argv { height: 9; padding: 0 2; border: round #1f2430; }
+    /* auto so the command pane gives its spare rows to the log on a
+       short terminal, where 1fr used to leave the log with none. */
+    #p-argv { height: auto; max-height: 9; min-height: 3;
+              padding: 0 2; border: round #1f2430; }
     #models > .datatable--cursor { background: #2a3050; color: #c0caf5; }
     #models > .datatable--header { background: #10141c; color: #565f89; }
     ParamPane { padding: 0 2; height: 1fr; border: round #1f2430; }
-    Dashboard { height: 9; padding: 0 2; border: round #2a3050; }
+    Dashboard { height: 8; padding: 0 2; border: round #2a3050; }
     #p-title, #d-head { padding-bottom: 1; }
-    #log { height: 1fr; padding: 0 1; background: #0b0e14; border: round #1f2430; }
+    #log { height: 1fr; min-height: 5; padding: 0 1; background: #0b0e14;
+           border: round #1f2430; }
     #status { height: 1; background: #10141c; color: #565f89; padding: 0 1; }
     #help-box { width: 62; height: auto; padding: 1 2; background: #151a23;
                 border: round #7aa2f7; }
@@ -942,7 +946,7 @@ class MdlApp(App):
         self.marks = {}                # name -> "ok" | "fail" | "new"
         self.sizes = {}
         self.tok_history = deque(maxlen=SPARK_POINTS)
-        self._last_decode = None
+        self._last_decode = self._last_decode_at = None
         self._log_pos = 0
         self._log_path = None
         self._filter = ""
@@ -1069,7 +1073,7 @@ class MdlApp(App):
         if state and state["name"] != self._following:
             self._following = state["name"]   # a different server's rate
             self.tok_history.clear()
-            self._last_decode = None
+            self._last_decode = self._last_decode_at = None
             self._tele = {"metrics": {}, "slots": None, "gpu": None}
         if state:
             dash.display = True
@@ -1086,7 +1090,7 @@ class MdlApp(App):
             params.display = True
             self._following = None
             self.tok_history.clear()
-            self._last_decode = None
+            self._last_decode = self._last_decode_at = None
         self._drain_log()
         name = self._selected()
         if name and name in self.models:
@@ -1112,13 +1116,22 @@ class MdlApp(App):
             slots = None
         gpu = gpu_memory()
 
-        rate = metrics.get("llamacpp:predicted_tokens_seconds")
-        if rate is None:
-            total = metrics.get("llamacpp:tokens_predicted_total")
-            if total is not None and self._last_decode is not None:
-                rate = max(0.0, (total - self._last_decode) / POLL_SECONDS)
-            if total is not None:
-                self._last_decode = total
+        # llamacpp:n_decode_total is the only one of these that moves while
+        # a reply is streaming. predicted_tokens_seconds sits at 0 for the
+        # whole generation and then publishes one average when the request
+        # finishes, and tokens_predicted_total does not move until then
+        # either - which is why this used to draw zeros and a single spike.
+        now = time.monotonic()
+        rate = None
+        total = metrics.get("llamacpp:n_decode_total")
+        if total is not None:
+            if self._last_decode is not None:
+                # Measured elapsed, not POLL_SECONDS: the poll drifts.
+                gap = max(now - self._last_decode_at, 1e-3)
+                rate = max(0.0, (total - self._last_decode) / gap)
+            self._last_decode, self._last_decode_at = total, now
+        if rate is None:      # no counter; the end-of-request average
+            rate = metrics.get("llamacpp:predicted_tokens_seconds")
         if rate is not None:
             self.tok_history.append(rate)
 
