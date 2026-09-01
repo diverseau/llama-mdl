@@ -866,7 +866,23 @@ class PromptScreen(ModalScreen):
 
 class MdlApp(App):
     CSS = """
-    Screen { background: #0d1017; color: #c0caf5; }
+    Screen { background: #0d1017; color: #c0caf5;
+             scrollbar-size-vertical: 1;
+             scrollbar-background: #0d1017; scrollbar-color: #1f2430;
+             scrollbar-background-hover: #0d1017;
+             scrollbar-color-hover: #2a3050;
+             scrollbar-background-active: #0d1017;
+             scrollbar-color-active: #2a3050;
+             scrollbar-corner-color: #0d1017; }
+    /* Textual's own footer theme is a bright blue band; everything
+       else here is hand-picked, and the two did not sit together. */
+    Footer { background: #10141c; }
+    FooterKey { background: #10141c; }
+    FooterKey .footer-key--key { color: #7aa2f7; background: #10141c;
+                                 text-style: bold; }
+    FooterKey .footer-key--description { color: #565f89;
+                                        background: #10141c; }
+    FooterKey:hover { background: #1f2430; }
     #top { height: 8; background: #10141c; border-bottom: solid #1f2430; }
     #wordmark { width: 34; padding: 1 0 0 1; }
     #sysinfo { padding: 2 0 0 2; color: #565f89; }
