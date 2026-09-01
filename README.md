@@ -132,8 +132,9 @@ mdl check        Validate every model in the config without launching
 mdl init         Write a starter config, if you do not have one.
 mdl --version    The version, for bug reports.
 mdl ui           The dashboard. Bare `mdl` opens it too.
-mdl logs [-f]    Print the running server's log; -f follows it.
-                 Takes a model name to read a stopped one's log.
+mdl logs [-f] [name]
+                 Print or follow a server's log. Takes a name when more than
+                 one is up, or to read a stopped one's log.
 ```
 
 Without textual installed, `mdl ui` fails with one line and bare `mdl` prints
@@ -202,8 +203,6 @@ sparkline, busy slots, and a colour-coded log tail.
  ?            help
  q            quit the UI - the server keeps running
 ```
-
-Quitting never stops a server; `s` is the only thing that does.
 
 The telemetry panels need llama.cpp's metrics endpoint, so add `--metrics`
 to a model's `args` to light them up:
