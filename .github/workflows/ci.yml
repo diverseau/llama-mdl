@@ -68,5 +68,6 @@ jobs:
         run: |
           python -m venv /tmp/v
           /tmp/v/bin/pip install dist/*.whl
+          # One line means the wheel brought nothing along with it.
+          test "$(/tmp/v/bin/pip list --format=freeze --exclude pip --exclude setuptools | wc -l)" -eq 1
           /tmp/v/bin/mdl --version
-          test -z "$(/tmp/v/bin/pip list --format=freeze | grep -iv '^mdl==' || true)"

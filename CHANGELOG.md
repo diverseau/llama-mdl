@@ -26,7 +26,7 @@ First release.
   state file: model list, live `llama-server` command preview, VRAM and
   KV-cache meters, a tokens/sec sparkline, a colour-coded log tail, inline
   parameter editing that saves back to the config, and a streaming prompt
-  pane. Needs `pip install "mdl[ui]"`; the four commands need nothing.
+  pane. Needs `pip install "llama-mdl[ui]"`; the four commands need nothing.
 - `--version`, and `$XDG_CONFIG_HOME` / `$XDG_STATE_HOME` support.
 - Pre-flight checks: a missing binary, a missing model file or a busy port
   fails in milliseconds with one line, rather than after a model load.
@@ -42,4 +42,6 @@ First release.
   leaves the port held.
 - The state file records the OS process creation time, so a recycled pid
   is not mistaken for a running server.
+- On POSIX a server stopped from inside `mdl ui` is reaped rather than
+  left a zombie, which `kill(pid, 0)` reports as still alive.
 - Python 3.11+ (for `tomllib`). Older versions exit with one line.

@@ -180,6 +180,21 @@ if os.name == "nt":
             kernel32.CloseHandle(handle)
 else:
     def alive(pid):
+        """True if pid is a live process, zombies excluded.
+
+        A server we started ourselves is our child, so once it dies it
+        stays a zombie until someone reaps it - and a zombie still
+        answers kill(pid, 0). That only bites the in-process callers,
+        mdl ui above all, which would show a stopped server as running
+        for as long as it stayed open.
+        """
+        try:
+            if os.waitpid(pid, os.WNOHANG)[0] == pid:
+                return False
+        except ChildProcessError:
+            pass                         # not ours; nothing to reap
+        except OSError:
+            pass
         try:
             os.kill(pid, 0)
         except PermissionError:
@@ -537,7 +552,7 @@ def _launch_ui(fx=None):
     try:
         from mdl_ui import run_ui
     except ImportError as e:
-        die("mdl ui needs textual: pip install \"mdl[ui]\" ({})".format(e))
+        die("mdl ui needs textual: pip install \"llama-mdl[ui]\" ({})".format(e))
     run_ui(fx)
 
 

@@ -15,12 +15,13 @@ and the CLI never imports it, so the four commands stay dependency-free.
 ## Install
 
 ```sh
-pipx install mdl          # or: pip install mdl
-pipx install "mdl[ui]"    # with the terminal dashboard
+pipx install llama-mdl          # or: pip install llama-mdl
+pipx install "llama-mdl[ui]"    # with the terminal dashboard
 ```
 
-The four commands need no dependencies at all; only the dashboard pulls in
-[Textual](https://textual.textualize.io/).
+The package is `llama-mdl`; the command it installs is `mdl`. (Plain `mdl`
+on PyPI is an unrelated project.) The four commands need no dependencies at
+all; only the dashboard pulls in [Textual](https://textual.textualize.io/).
 
 Or run it straight from a clone - it is two files and a standard library:
 
