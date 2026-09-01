@@ -5,9 +5,9 @@ body:
   - type: markdown
     attributes:
       value: |
-        mdl runs **one** local llama.cpp server from a config file. It will not
-        grow a daemon, model downloading, hot-swapping, auto-unload, several
-        servers at once, or a web UI - see
+        mdl runs local llama.cpp servers from a config file. It will not grow
+        a daemon, model downloading, hot-swapping, auto-unload, or a web UI -
+        see
         [CONTRIBUTING.md](https://github.com/diverseau/llama-mdl/blob/main/CONTRIBUTING.md).
         Anything else is fair game.
 
@@ -35,5 +35,5 @@ body:
     attributes:
       label: Scope
       options:
-        - label: This is not a daemon, a downloader, a hot-swap, or a second server
+        - label: This is not a daemon, a downloader, a hot-swap, or auto-unload
           required: true

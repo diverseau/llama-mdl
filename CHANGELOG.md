@@ -2,6 +2,37 @@
 
 Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
 
+## [0.3.0] - 2026-09-01
+
+### Added
+
+- More than one server at a time. `run` no longer refuses when something
+  else is up; each model needs its own port, and a clash names the model
+  holding it rather than failing vaguely.
+- `mdl run <name> --port N` overrides the config for one run, for a
+  config whose models share a port.
+- `mdl stop <name>` and `mdl stop --all`. `--all` tries every server,
+  reports each, and exits non-zero if any survived.
+- `mdl check` lists models that share a port. It is a note, not a
+  problem: sharing is fine until you want both at once.
+- The dashboard follows the selected model rather than "the" running
+  one, and the model list marks everything that is up.
+
+### Changed
+
+- **Breaking: `mdl ps --json` always prints a list**, `[]` when nothing
+  is running. It used to print a bare object, or `null`. A shape that
+  changes with the number of results breaks the status-bar scripts this
+  flag exists for, and it breaks them silently, the first time someone
+  starts a second server.
+- State moved from `state.json` to one file per server under
+  `~/.local/state/mdl/run/`. Two `mdl run` calls at the same moment would
+  otherwise read, modify and write one file, and one would lose. An
+  existing `state.json` is migrated on first read, so upgrading with a
+  server running keeps control of it.
+- Commands that took no argument still take none while one server is up.
+  `stop` and `logs` ask which only when there is a genuine choice.
+
 ## [0.2.0] - 2026-09-01
 
 ### Changed

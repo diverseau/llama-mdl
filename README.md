@@ -1,7 +1,7 @@
 # mdl
 
-A small CLI for running one local [llama.cpp](https://github.com/ggml-org/llama.cpp)
-server at a time from a config file, instead of pasting flag soup into your shell.
+A small CLI for running local [llama.cpp](https://github.com/ggml-org/llama.cpp)
+servers from a config file, instead of pasting flag soup into your shell.
 
 ```sh
 # without mdl
@@ -80,6 +80,14 @@ port = 8080
 On Windows, write paths with forward slashes (`C:/models/foo.gguf`) or double
 the backslashes, since TOML treats `\` as an escape character.
 
+### Ports
+
+Models may share a port, and it is reasonable for them to: only one can be
+running on it at a time, and `mdl` will say so rather than let you find out
+from llama.cpp. To run two at once, give each its own port - or pass
+`mdl run <name> --port N` for a one-off. `mdl check` lists which models
+share one.
+
 ### Keys
 
 | Key | llama-server flag | Notes |
@@ -106,10 +114,11 @@ instead of silently doing nothing.
 ```
 mdl run <name>   Start <name> in the background, tail its log until the
                  server answers /health, and exit. The server keeps running
-                 after mdl exits.
-mdl stop         SIGTERM the running server, SIGKILL after 10s, clean up.
-mdl ps [--json]  name, pid, port and uptime, or "nothing running".
-                 --json prints the state as JSON (null when idle) for
+                 after mdl exits. --port N overrides the config for one run.
+mdl stop [name]  SIGTERM the server, SIGKILL after 10s, clean up. Takes a
+                 name when more than one is up, or --all for every one.
+mdl ps [--json]  name, pid, port and uptime per server, or "nothing
+                 running". --json prints a JSON list ([] when idle) for
                  scripts and status bars.
 mdl list         The models defined in the config.
 mdl add <gguf>   Append an entry for a .gguf to the config, with sane
@@ -240,8 +249,10 @@ same layout lives under `%USERPROFILE%`.
 
 ## Behaviour notes
 
-- **One server at a time.** `run` while something is up is an error telling you
-  to `stop` first.
+- **As many servers as you have ports and VRAM for.** Each needs its own
+  port; `run` on a port already serving something says which model has it.
+  Commands that took no argument still take none while one server is up,
+  and ask which only when there is a real choice.
 - **Readiness is an HTTP probe, not log scraping.** `run` polls `/health` on
   the configured port. llama.cpp has reworded its startup line between builds;
   this contract has not.
@@ -283,13 +294,12 @@ docker run --rm -v "$PWD:/repo:ro" python:3.12-slim \
 ## Non-goals
 
 These are deliberate, and issues asking for them will be closed with a link
-here. `mdl` starts one server, stops it, and tells you what is running.
+here. `mdl` starts servers, stops them, and tells you what is running.
 
 - **No daemon.** Nothing runs in the background except the server itself.
-- **No multiple concurrent servers.** These models are measured in gigabytes
-  of VRAM; running two is usually a mistake, and refusing is a feature.
 - **No model downloading.** Use `huggingface-cli`, or your browser.
-- **No hot-swap or auto-unload.** `mdl stop && mdl run other` is two words.
+- **No hot-swap or auto-unload.** Nothing is unloaded to make room for
+  something else; what you started stays started until you stop it.
 - **No web UI.** llama-server already ships one.
 
 If you want these, [llama-swap](https://github.com/mostlygeek/llama-swap)

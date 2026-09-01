@@ -31,7 +31,7 @@ CONFIG_DIR = _base("XDG_CONFIG_HOME", ".config") / "mdl"
 CONFIG = CONFIG_DIR / "models.toml"
 STATE_DIR = _base("XDG_STATE_HOME", ".local", "state") / "mdl"
 STATE = STATE_DIR / "state.json"
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 DEFAULT_BIN = "llama-server"
 CONFIG_DATA = {}          # last parsed config, for UI-only settings
 DEFAULT_PORT = 8080
@@ -48,8 +48,9 @@ KNOWN = {"model", "ngl", "n_cpu_moe", "ctx", "flash_attn", "kv_type",
 SIMPLE = (("ngl", "-ngl"), ("n_cpu_moe", "--n-cpu-moe"), ("ctx", "-c"),
           ("parallel", "-np"), ("port", "--port"))
 
-USAGE = ("usage: mdl {init|add <model.gguf>|check|list|run <name>|stop|"
-         "ps [--json]|logs [-f] [name]|ui [--no-fx]} [--version]")
+USAGE = ("usage: mdl {init|add <model.gguf>|check|list|run <name> [--port N]|"
+         "stop [<name>|--all]|ps [--json]|logs [-f] [name]|ui [--no-fx]} "
+         "[--version]")
 
 # The model path mdl init leaves behind. check knows to treat it as a
 # to-do rather than a fault; tests keep the two in step.
@@ -210,22 +211,98 @@ else:
         return True
 
 
-def read_state():
-    """Return the running server's state, or None. Clears a stale state file."""
+def run_dir():
+    """Where the per-server state files live.
+
+    A function, not a constant, so it follows STATE_DIR - which the tests
+    point at a temp directory.
+    """
+    return STATE_DIR / "run"
+
+
+def state_path(name):
+    return run_dir() / f"{name}.json"
+
+
+def migrate_state():
+    """Move a pre-0.3 single state.json into the per-server directory.
+
+    Someone upgrading with a server up should keep control of it rather
+    than be told nothing is running.
+    """
+    if not STATE.exists():
+        return
     try:
-        state = json.loads(STATE.read_text())
-        pid = state["pid"]
+        old = json.loads(STATE.read_text())
+        name = old["name"]
     except (OSError, ValueError, KeyError, TypeError):
         STATE.unlink(missing_ok=True)
+        return
+    try:
+        run_dir().mkdir(parents=True, exist_ok=True)
+        if not state_path(name).exists():
+            write_atomic(state_path(name), json.dumps(old))
+    except OSError:
+        return                           # try again next time; nothing is lost
+    STATE.unlink(missing_ok=True)
+
+
+def live_state(path):
+    """One server's state, or None - clearing the file if it is stale."""
+    try:
+        state = json.loads(path.read_text())
+        pid = state["pid"]
+    except (OSError, ValueError, KeyError, TypeError):
+        path.unlink(missing_ok=True)
         return None
     if not isinstance(pid, int) or not alive(pid):
-        STATE.unlink(missing_ok=True)
+        path.unlink(missing_ok=True)
         return None
     born = state.get("born")
     if born is not None and proc_started(pid) not in (None, born):
-        STATE.unlink(missing_ok=True)     # pid recycled onto someone else
+        path.unlink(missing_ok=True)     # pid recycled onto someone else
         return None
     return state
+
+
+def read_states():
+    """Every server we started that is still alive, keyed by name.
+
+    One file per server rather than one file listing them: two `mdl run`
+    calls at the same moment would otherwise read, modify and write the
+    same file, and one of them would lose.
+    """
+    migrate_state()
+    out = {}
+    try:
+        paths = sorted(run_dir().glob("*.json"))
+    except OSError:
+        return out
+    for path in paths:
+        state = live_state(path)
+        if state:
+            out[state.get("name", path.stem)] = state
+    return out
+
+
+def read_state(name=None):
+    """One server's state.
+
+    Given a name, that server or None. Given nothing, the only running
+    server - which is what keeps every caller written when there could
+    only be one working unchanged - or None if there are none. Several
+    running and no name is genuinely ambiguous, so it says so instead of
+    picking one.
+    """
+    states = read_states()
+    if name is not None:
+        return states.get(name)
+    if not states:
+        return None
+    if len(states) > 1:
+        die("several servers are running (%s); name the one you mean"
+            % ", ".join(sorted(states)))
+    return next(iter(states.values()))
 
 
 def uptime(seconds):
@@ -265,12 +342,12 @@ def tail_until_ready(proc, log, name, port):
                 pending = _drain(fh, pending)
                 if pending:
                     print(pending, flush=True)
-                STATE.unlink(missing_ok=True)
+                state_path(name).unlink(missing_ok=True)
                 die(f"{name} exited with status {proc.returncode} "
                     f"during startup; see {log}")
             if time.monotonic() > deadline:
-                die(f"{name} not ready after {limit:g}s; still running, see {log} "
-                    f"or run 'mdl stop'")
+                die(f"{name} not ready after {limit:g}s; it may still be "
+                    f"loading - see {log}, or run 'mdl stop {name}'")
             time.sleep(0.2)
 
 
@@ -332,21 +409,32 @@ def rotate(log, keep=KEEP_LOGS):
     print(f"mdl: cannot rotate {log}; overwriting it", file=sys.stderr)
 
 
-def spawn(name, models, binary):
-    """Launch <name> detached, write the state file, return (proc, log, port).
+def spawn(name, models, binary, port=None):
+    """Launch <name> detached, write its state file, return (proc, log, port).
 
     Shared by the CLI and the TUI so there is one way to start a server.
+    A port here overrides the config, for `mdl run <name> --port N`; the
+    value that reaches the state file is the one we actually launched
+    with, so ps, the readiness probe and the next pre-flight agree.
     """
-    argv = build_argv(name, models[name], binary)
-    port = models[name].get("port", DEFAULT_PORT)
+    cfg = dict(models[name])
+    if port is not None:
+        cfg["port"] = port
+    argv = build_argv(name, cfg, binary)
+    port = cfg.get("port", DEFAULT_PORT)
     if not shutil.which(binary) and not Path(binary).is_file():
         die(f"llama-server not found: {binary}")
     if not Path(models[name]["model"]).is_file():
         die(f"model file not found: {models[name]['model']}")
     if port_busy(port):
+        owner = next((s["name"] for s in read_states().values()
+                      if s.get("port") == port), None)
+        if owner:
+            die(f"port {port} is already serving '{owner}'; give {name} its "
+                f"own port, or run 'mdl stop {owner}'")
         die(f"port {port} is already in use")
     try:
-        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        run_dir().mkdir(parents=True, exist_ok=True)
         log = STATE_DIR / f"{name}.log"
         rotate(log)
         handle = open(log, "wb")
@@ -359,42 +447,45 @@ def spawn(name, models, binary):
         die(f"cannot start {binary}: {e}")
     finally:
         handle.close()
-    write_atomic(STATE, json.dumps(
+    write_atomic(state_path(name), json.dumps(
         {"name": name, "pid": proc.pid, "port": port, "started": time.time(),
          "log": str(log), "born": proc_started(proc.pid)}))
     return proc, log, port
 
 
 def cmd_run(args):
+    port = None
+    if len(args) == 3 and args[1] == "--port":
+        try:
+            port = int(args[2])
+        except ValueError:
+            die(f"port must be a number, not {args[2]!r}")
+        args = args[:1]
     if len(args) != 1:
-        die("usage: mdl run <name>")
+        die("usage: mdl run <name> [--port N]")
     name = args[0]
     models, binary = load_config()
     if name not in models:
         die(f"no model named '{name}' in {CONFIG}")
-    running = read_state()
+    running = read_state(name)
     if running:
-        die(f"'{running['name']}' is already running (pid {running['pid']}, "
-            f"port {running['port']}); run 'mdl stop' first")
+        die(f"'{name}' is already running (pid {running['pid']}, "
+            f"port {running['port']}); run 'mdl stop {name}' first")
 
-    proc, log, port = spawn(name, models, binary)
+    proc, log, port = spawn(name, models, binary, port)
     print(f"starting {name} (pid {proc.pid}), log {log}", flush=True)
     tail_until_ready(proc, log, name, port)
     print(f"ready: {name} on http://127.0.0.1:{port} (pid {proc.pid})")
 
 
-def cmd_stop(args):
-    if args:
-        die("usage: mdl stop")
-    state = read_state()
-    if not state:
-        print("nothing running")
-        return
+def stop_one(name, state):
+    """SIGTERM, wait, SIGKILL. True if it is gone afterwards."""
     pid = state["pid"]
     try:
         terminate(pid, signal.SIGTERM)
     except OSError as e:
-        die(f"cannot signal pid {pid}: {e}")
+        print(f"mdl: cannot signal {name} (pid {pid}): {e}", file=sys.stderr)
+        return False
     for _ in range(100):
         if not alive(pid):
             break
@@ -405,25 +496,60 @@ def cmd_stop(args):
         except OSError:
             pass
         time.sleep(0.5)
-    STATE.unlink(missing_ok=True)
-    print(f"stopped {state['name']} (pid {pid})")
+    if alive(pid):
+        print(f"mdl: {name} (pid {pid}) would not die", file=sys.stderr)
+        return False
+    state_path(name).unlink(missing_ok=True)
+    print(f"stopped {name} (pid {pid})")
+    return True
+
+
+def cmd_stop(args):
+    """mdl stop [<name>|--all]
+
+    Bare `stop` still means "the one that is running", so it keeps doing
+    what it always did. It only asks which when there is a real choice.
+    """
+    states = read_states()
+    if args == ["--all"]:
+        targets = sorted(states)
+    elif len(args) == 1 and not args[0].startswith("-"):
+        if args[0] not in states:
+            die(f"'{args[0]}' is not running")
+        targets = [args[0]]
+    elif args:
+        die("usage: mdl stop [<name>|--all]")
+    elif len(states) > 1:
+        die("several servers are running (%s); name one, or 'mdl stop --all'"
+            % ", ".join(sorted(states)))
+    else:
+        targets = sorted(states)
+    if not targets:
+        print("nothing running")
+        return
+    # Try every one of them, say what happened to each, and fail if any
+    # survived - stopping two of three is not success.
+    failed = [n for n in targets if not stop_one(n, states[n])]
+    if failed:
+        die(f"{len(failed)} of {len(targets)} did not stop: " + ", ".join(failed))
 
 
 def cmd_ps(args):
     as_json = args == ["--json"]
     if args and not as_json:
         die("usage: mdl ps [--json]")
-    state = read_state()
+    rows = [dict(state, uptime=round(time.time() - state.get("started", 0)))
+            for _, state in sorted(read_states().items())]
     if as_json:
-        if state:
-            state["uptime"] = round(time.time() - state.get("started", 0))
-        print(json.dumps(state))
+        print(json.dumps(rows))          # always a list, [] when idle
         return
-    if not state:
+    if not rows:
         print("nothing running")
         return
-    print(f"{state['name']}  pid {state['pid']}  port {state['port']}  "
-          f"up {uptime(time.time() - state.get('started', 0))}")
+    width = max(len(r["name"]) for r in rows)
+    for r in rows:
+        print(f"{r['name'].ljust(width)}  pid {r['pid']}  port {r['port']}  "
+              f"up {uptime(r['uptime'])}")
 
 
 def cmd_list(args):
@@ -526,6 +652,7 @@ def cmd_check(args):
     if not models:
         die(f"no models defined in {CONFIG}")
     problems = 0
+    ports = {}
     if not shutil.which(binary) and not Path(binary).is_file():
         print(f"llama_server: not found: {binary}")
         problems += 1
@@ -546,10 +673,15 @@ def cmd_check(args):
             if layers and isinstance(cfg.get("ngl"), int) and 0 < cfg["ngl"] < layers:
                 notes.append(f"ngl {cfg['ngl']} < {layers} layers, partial offload")
         problems += len(notes)
+        ports.setdefault(cfg.get("port", DEFAULT_PORT), []).append(name)
         if blank:            # a to-do, so it must not fail the check
             notes.append("not filled in yet; edit it or delete it")
         status = "ok" if not notes else "; ".join(notes)
         print(f"{name.ljust(max(len(n) for n in models))}  {status}")
+    for port, sharing in sorted(ports.items()):
+        if len(sharing) > 1:      # legal; only one of them can be up at once
+            print("note: %s share port %d; only one at a time"
+                  % (", ".join(sharing), port))
     if problems:
         die(f"{problems} problem(s) found")
 
@@ -562,7 +694,7 @@ def cmd_logs(args):
     if rest:
         log = STATE_DIR / (rest[0] + ".log")
     else:
-        state = read_state()
+        state = read_state()          # errors if several are running
         if not state:
             die("nothing running; pass a model name")
         log = Path(state["log"])

@@ -64,7 +64,7 @@ check("check passes a good config", (out.strip().endswith("ok"), code), (True, 0
 
 # ------------------------------------------------------------ ps --json ----
 out, _, _ = run(mdl.cmd_ps, ["--json"])
-check("ps --json when idle", out.strip(), "null")
+check("ps --json is a list even when idle", out.strip(), "[]")
 _, err, code = run(mdl.cmd_ps, ["--bogus"])
 check("ps rejects unknown flags", (err.strip(), code),
       ("mdl: usage: mdl ps [--json]", 1))
@@ -77,16 +77,20 @@ check("state records the process creation time", state.get("born") is not None
 
 out, _, _ = run(mdl.cmd_ps, ["--json"])
 live = json.loads(out)
-check("ps --json while running", (live["name"], live["port"]), ("demo", port))
-check("ps --json includes uptime", "uptime" in live, True)
+check("ps --json is a list of servers", isinstance(live, list), True)
+check("ps --json while running", (live[0]["name"], live[0]["port"]),
+      ("demo", port))
+check("ps --json includes uptime", "uptime" in live[0], True)
 
 # a recycled pid: same pid, different creation time
 if state.get("born") is not None:
-    mdl.STATE.write_text(json.dumps(dict(state, born=state["born"] + 999)),
-                         encoding="utf-8")
-    check("a recycled pid is not mistaken for our server", mdl.read_state(), None)
-    check("that stale state is removed", mdl.STATE.exists(), False)
-    mdl.STATE.write_text(json.dumps(state), encoding="utf-8")
+    path = mdl.state_path("demo")
+    path.write_text(json.dumps(dict(state, born=state["born"] + 999)),
+                    encoding="utf-8")
+    check("a recycled pid is not mistaken for our server",
+          mdl.read_state("demo"), None)
+    check("that stale state is removed", path.exists(), False)
+    path.write_text(json.dumps(state), encoding="utf-8")
 
 run(mdl.cmd_stop, [])
 run(mdl.cmd_run, ["demo"])

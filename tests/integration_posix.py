@@ -22,7 +22,12 @@ check = t.check
 HOME = Path(tempfile.mkdtemp(prefix="mdl-posix-"))
 CONFIG = HOME / ".config" / "mdl"
 CONFIG.mkdir(parents=True)
-STATE = HOME / ".local" / "state" / "mdl" / "state.json"
+RUN = HOME / ".local" / "state" / "mdl" / "run"
+
+
+def state_of(name):
+    """The server's state file, one per server since 0.3."""
+    return RUN / (name + ".json")
 
 launcher = HOME / "fake-llama-server"
 launcher.write_text('#!/bin/sh\nexec "%s" "%s" "$@"\n' % (sys.executable, support.FAKE))
@@ -65,7 +70,7 @@ r = mdl("run", "demo")
 check("run exits 0", r.returncode, 0)
 check("run reports ready", r.stdout.strip().split("\n")[-1].startswith("ready: demo"),
       True)
-pid = json.loads(STATE.read_text())["pid"]
+pid = json.loads(state_of("demo").read_text())["pid"]
 st = procstat(pid)
 check("server alive after mdl exited", st is not None and st["state"] != "Z", True)
 check("start_new_session made it a session leader", st and st["session"], pid)
@@ -81,14 +86,14 @@ for _ in range(50):
         break
     time.sleep(0.1)
 check("ps self-heals after kill -9", mdl("ps").stdout, "nothing running\n")
-check("stale state removed", STATE.exists(), False)
+check("stale state removed", state_of("demo").exists(), False)
 check("run works again after a crash", mdl("run", "demo").returncode, 0)
 mdl("stop")
 
 # --- SIGTERM ignored -> escalate to SIGKILL --------------------------------
 r = mdl("run", "demo", mode="stubborn")
 check("stubborn server started", r.returncode, 0)
-pid = json.loads(STATE.read_text())["pid"]
+pid = json.loads(state_of("demo").read_text())["pid"]
 t0 = time.time()
 r = mdl("stop")
 elapsed = time.time() - t0
@@ -98,7 +103,7 @@ check("stop waited ~10s then escalated", 9.0 < elapsed < 14.0, True)
 check("stubborn process is gone",
       procstat(pid) is None or procstat(pid)["state"] == "Z",
       True)
-check("state cleaned up", STATE.exists(), False)
+check("state cleaned up", state_of("demo").exists(), False)
 
 # --- a wrapper script: stop must reap the tree, not orphan the server ------
 # The launcher above uses exec, so mdl's pid *is* the server. Anyone whose
@@ -114,7 +119,7 @@ wrapper.chmod(0o755)
 
 check("wrapped server started", mdl("run", "demo").returncode, 0)
 kid = int(kidfile.read_text())
-parent = json.loads(STATE.read_text())["pid"]
+parent = json.loads(state_of("demo").read_text())["pid"]
 check("the server really is a grandchild", kid != parent, True)
 mdl("stop")
 for _ in range(50):
@@ -125,6 +130,36 @@ check("stop reaps the whole tree, not just the wrapper",
       procstat(kid) is None or procstat(kid)["state"] == "Z", True)
 check("run works again straight after", mdl("run", "demo").returncode, 0)
 mdl("stop")
+
+# --- two at once, as real processes ----------------------------------------
+PORT2 = support.free_port()
+with open(CONFIG / "models.toml", "a") as fh:
+    fh.write("\n[second]\nmodel = \"%s\"\nport = %d\n" % (support.FAKE, PORT2))
+
+check("first starts", mdl("run", "demo").returncode, 0)
+check("second starts alongside it", mdl("run", "second").returncode, 0)
+listing = mdl("ps").stdout
+check("ps shows both", ("demo" in listing, "second" in listing), (True, True))
+pids = {n: json.loads(state_of(n).read_text())["pid"]
+        for n in ("demo", "second")}
+check("two live state files", sorted(pids), ["demo", "second"])
+check("they are different processes", pids["demo"] != pids["second"], True)
+
+r = mdl("stop")
+check("bare stop will not guess", r.returncode, 1)
+check("and says why", "several servers are running" in r.stderr, True)
+check("both still up", len(json.loads(mdl("ps", "--json").stdout)), 2)
+
+r = mdl("stop", "--all")
+check("--all stops both", r.returncode, 0)
+for name, pid in pids.items():
+    for _ in range(50):
+        if procstat(pid) is None or procstat(pid)["state"] == "Z":
+            break
+        time.sleep(0.1)
+    check("%s is gone" % name,
+          procstat(pid) is None or procstat(pid)["state"] == "Z", True)
+check("ps is empty again", mdl("ps", "--json").stdout.strip(), "[]")
 
 support.teardown(HOME)
 sys.exit(t.done())

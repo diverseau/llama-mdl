@@ -949,6 +949,8 @@ class MdlApp(App):
         self._metrics_ok = False
         self._health_ok = False
         self._tele = {"metrics": {}, "slots": None, "gpu": None}
+        self.states = {}          # name -> state, refreshed every tick
+        self._following = None    # whose tok/s the sparkline is showing
 
     # ---- layout ----
     def compose(self) -> ComposeResult:
@@ -1016,8 +1018,11 @@ class MdlApp(App):
         table.add_columns("model", "size", "ctx", "")
         for name in sorted(self.models):
             cfg = self._cfg(name)
-            dot = {"ok": ("●", "#9ece6a"), "fail": ("✗", "#f7768e"),
-                   "new": ("○", "#565f89")}[self.marks.get(name, "new")]
+            if name in self.states:      # up right now, whatever it did before
+                dot = ("▶", "#9ece6a")
+            else:
+                dot = {"ok": ("●", "#9ece6a"), "fail": ("✗", "#f7768e"),
+                       "new": ("○", "#565f89")}[self.marks.get(name, "new")]
             table.add_row(Text(name, style="#c0caf5"),
                           Text(human_size(self.sizes.get(name, 0)), style="#565f89"),
                           Text(str(cfg.get("ctx", "-")), style="#565f89"),
@@ -1055,9 +1060,17 @@ class MdlApp(App):
 
     # ---- polling ----
     def _tick(self):
-        state = mdl.read_state()
+        # Whatever is running, the panes follow the selection: with
+        # several servers up, 'the' running one is not a thing.
+        self.states = mdl.read_states()
+        state = self.states.get(self._selected())
         dash = self.query_one("#dash", Dashboard)
         params = self.query_one("#params", ParamPane)
+        if state and state["name"] != self._following:
+            self._following = state["name"]   # a different server's rate
+            self.tok_history.clear()
+            self._last_decode = None
+            self._tele = {"metrics": {}, "slots": None, "gpu": None}
         if state:
             dash.display = True
             params.display = False      # config pane is for choosing, not watching
@@ -1071,6 +1084,7 @@ class MdlApp(App):
         else:
             dash.display = False
             params.display = True
+            self._following = None
             self.tok_history.clear()
             self._last_decode = None
         self._drain_log()
@@ -1137,10 +1151,16 @@ class MdlApp(App):
     def _render_status(self, state):
         t = Text()
         if state:
+            t.append(" ▶ ", style="#9ece6a")
+            t.append("{} on :{}".format(state["name"], state["port"]),
+                     style="#c0caf5")
+        elif self.states:
             t.append(" ● ", style="#9ece6a")
-            t.append("{} on :{}".format(state["name"], state["port"]), style="#c0caf5")
+            t.append(", ".join(sorted(self.states)), style="#c0caf5")
         else:
             t.append(" ○ nothing running", style="#565f89")
+        if len(self.states) > 1:
+            t.append("   %d running" % len(self.states), style="#565f89")
         if self._filter:
             t.append("   filter: " + self._filter, style="#e0af68")
         if self.status_line:
@@ -1217,9 +1237,9 @@ class MdlApp(App):
         self.push_screen(EditScreen(name, self._cfg(name)), apply)
 
     def action_prompt(self):
-        state = mdl.read_state()
+        state = self.states.get(self._selected())
         if not state:
-            self.notify("nothing is running", severity="warning")
+            self.notify("that model is not running", severity="warning")
             return
         self.push_screen(PromptScreen(state["port"], state["name"]))
 
@@ -1227,10 +1247,9 @@ class MdlApp(App):
         name = self._selected()
         if not name:
             return
-        state = mdl.read_state()
-        if state:
+        if name in self.states:
             self.notify(
-                state["name"] + " is already running - press s to stop it",
+                name + " is already running - press s to stop it",
                 severity="warning")
             return
         try:
@@ -1261,7 +1280,7 @@ class MdlApp(App):
             if proc.poll() is not None:
                 self.marks[name] = "fail"
                 self._save_marks()
-                mdl.STATE.unlink(missing_ok=True)
+                mdl.state_path(name).unlink(missing_ok=True)
                 self.call_from_thread(self._after_start, name, False, proc.returncode)
                 return
             time.sleep(0.3)
@@ -1283,17 +1302,20 @@ class MdlApp(App):
         self._tick()
 
     def action_stop(self):
-        state = mdl.read_state()
-        if not state:
-            self.notify("nothing is running")
+        # The selected one if it is up, otherwise the only one that is.
+        name = self._selected() if self._selected() in self.states else None
+        if name is None and len(self.states) == 1:
+            name = next(iter(self.states))
+        if name is None:
+            self.notify("that model is not running")
             return
-        self.status_line = "stopping " + state["name"]
-        self._do_stop(state["name"])
+        self.status_line = "stopping " + name
+        self._do_stop(name)
 
     @work(thread=True, group="stop")
     def _do_stop(self, name):
         try:
-            mdl.cmd_stop([])
+            mdl.cmd_stop([name])
             self.call_from_thread(self.notify, "stopped " + name)
         except mdl.MdlError as e:
             self.call_from_thread(self.notify, str(e), severity="error")
@@ -1301,8 +1323,7 @@ class MdlApp(App):
         self.call_from_thread(self._tick)
 
     def action_restart(self):
-        state = mdl.read_state()
-        name = state["name"] if state else self._selected()
+        name = self._selected()
         if not name:
             return
         self.action_stop()
