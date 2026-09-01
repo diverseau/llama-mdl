@@ -24,10 +24,10 @@ classifiers = [
 dependencies = []
 
 [project.urls]
-Homepage = "https://github.com/contactsturnover-prog/llama-mdl"
-Repository = "https://github.com/contactsturnover-prog/llama-mdl"
-Issues = "https://github.com/contactsturnover-prog/llama-mdl/issues"
-Changelog = "https://github.com/contactsturnover-prog/llama-mdl/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/diverseau/llama-mdl"
+Repository = "https://github.com/diverseau/llama-mdl"
+Issues = "https://github.com/diverseau/llama-mdl/issues"
+Changelog = "https://github.com/diverseau/llama-mdl/blob/main/CHANGELOG.md"
 
 # Only the dashboard has a dependency, and mdl.py never imports it, so
 # `pip install llama-mdl` stays dependency-free.

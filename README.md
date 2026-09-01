@@ -3,6 +3,16 @@
 A small CLI for running one local [llama.cpp](https://github.com/ggml-org/llama.cpp)
 server at a time from a config file, instead of pasting flag soup into your shell.
 
+```sh
+llama-server -m /srv/models/Ornith-1.5-35B-A3B-Q4_K_M.gguf -ngl 99 \
+  --n-cpu-moe 24 -c 65536 -fa on --cache-type-k q8_0 \
+  --cache-type-v q8_0 -np 1 --port 8080
+```
+
+```sh
+mdl run ornith
+```
+
 ![the mdl dashboard](docs/screenshot.svg)
 
 `mdl.py` is a single file, Python 3.11+ (needs `tomllib`), standard library
@@ -27,7 +37,7 @@ dependency, and that is [Textual](https://textual.textualize.io/).
 Or run it straight from a clone - it is two files and a standard library:
 
 ```sh
-git clone https://github.com/contactsturnover-prog/llama-mdl ~/src/mdl
+git clone https://github.com/diverseau/llama-mdl ~/src/mdl
 python ~/src/mdl/mdl.py --help
 ```
 
@@ -181,6 +191,17 @@ sparkline, busy slots, and a colour-coded log tail.
 
 Quitting never stops a server; `s` is the only thing that does.
 
+The telemetry panels need llama.cpp's metrics endpoint, so add `--metrics`
+to a model's `args` to light them up:
+
+```toml
+args = ["--metrics"]
+```
+
+Without it the dashboard still works, and those panels say `metrics off`
+rather than failing. While a model is loading they say `loading` instead,
+since nothing is listening yet.
+
 ### Talking to the model
 
 `p` opens a chat with whatever is running, without leaving the UI.
@@ -200,36 +221,9 @@ you whether a long context is hurting.
 
 ### Animation
 
-The wordmark drifts its gradient slowly and continuously by default. Set
-`ui_fx` at the top level of the config to change that:
-
-```toml
-ui_fx = "always"   # slow continuous drift (default)
-ui_fx = "sweep"    # one ~1.2s pass at launch, then it parks
-ui_fx = "off"      # painted flat, no timer at all
-```
-
-Speed is a separate key, in seconds per full colour cycle. Lower is
-faster; 0.4 is the floor.
-
-```toml
-ui_fx_period = 3.0   # default
-ui_fx_period = 1.0   # brisk
-```
-
-`$MDL_UI_FX` and `$MDL_UI_FX_PERIOD` override the config, and
-`mdl ui --no-fx` overrides both.
-
-The telemetry panels need llama.cpp's metrics endpoint, so add `--metrics`
-to a model's `args` to light them up:
-
-```toml
-args = ["--metrics"]
-```
-
-Without it the dashboard still works, and those panels say `metrics off`
-rather than failing. While a model is loading they say `loading` instead,
-since nothing is listening yet.
+The wordmark drifts its gradient by default. Set `ui_fx = "off"` at the
+top level of the config to paint it flat, or pass `mdl ui --no-fx` for a
+one-off.
 
 ## Files
 

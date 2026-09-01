@@ -4,7 +4,7 @@
 
 Please report privately through GitHub, not in a public issue:
 
-**[Report a vulnerability](https://github.com/contactsturnover-prog/llama-mdl/security/advisories/new)**
+**[Report a vulnerability](https://github.com/diverseau/llama-mdl/security/advisories/new)**
 
 That opens a private advisory only you and the maintainers can see. Expect a
 first reply within a week. If a fix is needed, it ships as a patch release and

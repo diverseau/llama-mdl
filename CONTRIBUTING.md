@@ -20,7 +20,7 @@ smaller.
 No build step, no virtualenv required.
 
 ```sh
-git clone https://github.com/contactsturnover-prog/llama-mdl
+git clone https://github.com/diverseau/llama-mdl
 cd llama-mdl
 python mdl.py --help
 python -m pip install textual      # only if you want the dashboard

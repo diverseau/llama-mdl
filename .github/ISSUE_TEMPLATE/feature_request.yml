@@ -8,7 +8,7 @@ body:
         mdl runs **one** local llama.cpp server from a config file. It will not
         grow a daemon, model downloading, hot-swapping, auto-unload, several
         servers at once, or a web UI - see
-        [CONTRIBUTING.md](https://github.com/contactsturnover-prog/llama-mdl/blob/main/CONTRIBUTING.md).
+        [CONTRIBUTING.md](https://github.com/diverseau/llama-mdl/blob/main/CONTRIBUTING.md).
         Anything else is fair game.
 
   - type: textarea

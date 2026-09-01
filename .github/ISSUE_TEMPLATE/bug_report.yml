@@ -6,7 +6,7 @@ body:
     attributes:
       value: |
         Please do not report security issues here - use
-        [a private advisory](https://github.com/contactsturnover-prog/llama-mdl/security/advisories/new)
+        [a private advisory](https://github.com/diverseau/llama-mdl/security/advisories/new)
         instead.
 
   - type: textarea

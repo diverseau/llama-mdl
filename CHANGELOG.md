@@ -2,6 +2,34 @@
 
 Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
 
+## [0.2.0] - 2026-09-01
+
+### Changed
+
+- `mdl check` no longer counts the `[example]` table `mdl init` writes
+  as a problem. It is a to-do, so a freshly initialised config passes.
+- The Textual requirement is `>=3,<9`. The old `>=0.80` was a guess:
+  0.80, 1.0 and 2.0 all fail the suite and 3.0 is the first that does
+  not, and CI now runs the floor as well as the current release.
+
+### Fixed
+
+- The POSIX suite sandboxed itself with `HOME` alone, so on a runner
+  that sets `XDG_CONFIG_HOME` it read the real config instead of its
+  own. It clears both XDG variables now.
+- A failing check in that suite reported only the exit status, not the
+  line `mdl` printed to say why.
+
+### Project
+
+- CI covers Linux, macOS and Windows across Python 3.11-3.13, both ends
+  of the supported Textual range, Ruff, and a packaging check that
+  builds the wheel and the sdist and installs each into a clean venv.
+- Tagging `v*` publishes to PyPI through Trusted Publishing, with no
+  API token stored in the repository. It refuses to publish when the
+  tag and `mdl.VERSION` disagree.
+- `SECURITY.md`, `CONTRIBUTING.md` and issue templates.
+
 ## [0.1.0]
 
 First release.
