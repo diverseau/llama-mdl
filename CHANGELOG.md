@@ -2,6 +2,23 @@
 
 Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
 
+## [0.3.1] - 2026-09-02
+
+### Fixed
+
+- The ctx meter read `idle` and drew an empty bar on a server that had
+  a whole conversation in its cache. Recent llama.cpp builds no longer
+  export `llamacpp:kv_cache_usage_ratio` at all; where it is missing,
+  the occupancy now comes from `/slots`, which keeps reporting what is
+  resident after the slot goes idle.
+- Peak tok/s decayed to 0 about forty seconds after a reply finished.
+  It was the maximum of the sparkline's rolling window, not a peak. It
+  is now the high-water mark for that server, and resets when it does.
+- A long model name pushed the size and ctx columns off the right edge
+  of the models pane, so `65536` was drawn as `65` with nothing to say
+  it had been cut. Names longer than the column are now truncated with
+  an ellipsis instead; selection still follows the real name.
+
 ## [0.3.0] - 2026-09-01
 
 ### Added

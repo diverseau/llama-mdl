@@ -1,6 +1,7 @@
 """Headless drive of the TUI. No real server, no real config."""
 import asyncio
 import sys
+import time
 import tomllib
 from pathlib import Path
 
@@ -10,12 +11,23 @@ from support import mdl, sandbox, teardown            # noqa: E402
 
 import mdl_ui                                         # noqa: E402
 from mdl_ui import MdlApp                             # noqa: E402
+from textual.geometry import Region                  # noqa: E402
 from textual.widgets import DataTable, Input, Static  # noqa: E402
 
 t = support.Tally("test_ui")
 check = t.check
+LONG = ('\n[a-model-name-far-too-long-for-the-pane]\n'
+        'model = "%s"\nctx = 65536\nport = 9998\n'
+        % str(support.FAKE).replace("\\", "/"))
 EXTRA = ('\n[second]\nmodel = "%s"\nngl = 10\nctx = 512\nport = 9999\n'
          % str(support.FAKE).replace("\\", "/"))
+
+
+def pane_text(widget):
+    """What the widget actually puts on screen, clipping included."""
+    region = Region(0, 0, widget.size.width, widget.size.height)
+    return "\n".join(strip.text
+                     for strip in widget.render_lines(region))
 
 
 def plain(widget):
@@ -92,6 +104,53 @@ async def main():
         await pilot.pause()
         check("stop while idle does not crash", app.is_running, True)
 
+    teardown(root)
+
+    # --- the live panel, driven by hand: no server to talk to --------------
+    # Both of these used to read zero in the case that matters most: idle.
+    root, port = sandbox()
+    app = MdlApp(fx="off")
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        dash = app.query_one("#dash", mdl_ui.Dashboard)
+        state = {"name": "demo", "pid": 1, "port": port, "started": time.time()}
+        idle = [{"n_prompt_tokens": 2048, "n_ctx": 8192, "is_processing": False}]
+
+        # No kv_cache_usage_ratio: current llama.cpp builds do not export it.
+        dash.update_all(state, {}, idle, None, [0.0, 0.0], True, True, 12.5)
+        ctx = plain(app.query_one("#d-ctx", Static))
+        check("ctx falls back to the slots when the gauge is missing",
+              "25% of kv cache" in ctx, True)
+        check("and does not report an idle slot as empty", "idle" in ctx, False)
+
+        toks = plain(app.query_one("#d-toks", Static))
+        check("peak is the high-water mark, not the best of the window",
+              "12.5 peak" in toks, True)
+        check("now still comes from the series", "0.0 now" in toks, True)
+
+        # The gauge wins wherever a build still exports it.
+        dash.update_all(state, {"llamacpp:kv_cache_usage_ratio": 0.5}, idle,
+                        None, [1.0], True, True, 1.0)
+        check("the gauge is preferred when present",
+              "50% of kv cache" in plain(app.query_one("#d-ctx", Static)), True)
+    teardown(root)
+
+    # --- a name too long for the pane -------------------------------------
+    root, port = sandbox(extra=LONG)
+    app = MdlApp(fx="off")
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        table = app.query_one("#models", DataTable)
+        shown = [table.get_row_at(r)[0].plain for r in range(table.row_count)]
+        check("the long name is truncated", any(x.endswith("…")
+                                                for x in shown), True)
+        check("but no ctx value is clipped off the pane",
+              "65536" in pane_text(table), True)
+        for row in range(table.row_count):
+            table.move_cursor(row=row)
+            await pilot.pause()
+            check("selection resolves to the real name, not the label",
+                  app._selected() in app.models, True)
     teardown(root)
     return t.done()
 

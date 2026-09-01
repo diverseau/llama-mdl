@@ -52,6 +52,7 @@ WORDMARK = r"""
 
 GRADIENT = ["#7dcfff", "#7aa2f7", "#8a7af7", "#9d7cf7", "#bb7af7"]
 SPARK_CHARS = " ▁▂▃▄▅▆▇█"
+NAME_WIDTH = 15          # keeps the size and ctx columns on screen
 NEWLINE = chr(10)
 
 
@@ -329,13 +330,18 @@ class Meter(Static):
 class Spark(Static):
     """Sparkline plus current/peak readout."""
 
-    def set_series(self, label, values, unit=""):
+    def set_series(self, label, values, unit="", peak=None):
         t = Text()
         t.append(f"{label:<7}", style="#565f89")
         t.append(sparkline(values), style="#7dcfff")
         if values:
+            # peak is the server's lifetime high-water mark. max(values)
+            # would be the best of the last 40 samples, which decays to
+            # zero a matter of seconds after a reply finishes.
+            if peak is None:
+                peak = max(values)
             t.append(f"  {values[-1]:.1f}{unit} now", style="#c0caf5")
-            t.append(f" · {max(values):.1f}{unit} peak", style="#565f89")
+            t.append(f" · {peak:.1f}{unit} peak", style="#565f89")
         else:
             t.append("  no data yet", style="#565f89")
         self.update(t)
@@ -456,7 +462,7 @@ class Dashboard(Static):
         yield Static(id="d-slots")
 
     def update_all(self, state, metrics, slots, gpu, tok_history, metrics_ok,
-                   health_ok=True):
+                   health_ok=True, peak=None):
         head = Text()
         head.append(state["name"], style="bold #bb7af7")
         head.append("  ● RUNNING", style="bold #9ece6a")
@@ -474,6 +480,14 @@ class Dashboard(Static):
             self.query_one("#d-vram", Meter).set_value("VRAM", None, "no nvidia-smi")
 
         kv = metrics.get("llamacpp:kv_cache_usage_ratio")
+        if kv is None and slots:
+            # Current builds do not export that gauge at all. The slots do
+            # carry what is in the cache, and keep carrying it once the
+            # slot is released - the conversation is still resident.
+            held = sum(x.get("n_prompt_tokens") or 0 for x in slots)
+            room = sum(x.get("n_ctx") or 0 for x in slots)
+            if room:
+                kv = held / room
         if kv is not None:
             caption = "{:.0f}% of kv cache".format(kv * 100)
         elif not health_ok:
@@ -484,7 +498,8 @@ class Dashboard(Static):
             caption = "metrics off"
         self.query_one("#d-ctx", Meter).set_value("ctx", kv, caption)
 
-        self.query_one("#d-toks", Spark).set_series("tok/s", tok_history, "")
+        self.query_one("#d-toks", Spark).set_series("tok/s", tok_history, "",
+                                                    peak)
 
         s = Text()
         if slots is not None:
@@ -946,6 +961,7 @@ class MdlApp(App):
         self.marks = {}                # name -> "ok" | "fail" | "new"
         self.sizes = {}
         self.tok_history = deque(maxlen=SPARK_POINTS)
+        self.tok_peak = 0.0       # for this server, until it is restarted
         self._last_decode = self._last_decode_at = None
         self._log_pos = 0
         self._log_path = None
@@ -1027,13 +1043,16 @@ class MdlApp(App):
             else:
                 dot = {"ok": ("●", "#9ece6a"), "fail": ("✗", "#f7768e"),
                        "new": ("○", "#565f89")}[self.marks.get(name, "new")]
-            table.add_row(Text(name, style="#c0caf5"),
+            # The pane is a fixed width, so a long name used to push the
+            # numbers off the right edge - 65536 rendered as 65, silently.
+            label = name if len(name) <= NAME_WIDTH else name[:NAME_WIDTH - 1] + "…"
+            table.add_row(Text(label, style="#c0caf5"),
                           Text(human_size(self.sizes.get(name, 0)), style="#565f89"),
                           Text(str(cfg.get("ctx", "-")), style="#565f89"),
                           Text(dot[0], style=dot[1]), key=name)
         if keep:
             for row in range(table.row_count):
-                if table.get_row_at(row)[0].plain == keep:
+                if table.ordered_rows[row].key.value == keep:
                     table.move_cursor(row=row)
                     break
         if self.models:
@@ -1047,7 +1066,8 @@ class MdlApp(App):
         if not table.row_count:
             return None
         try:
-            return table.get_row_at(table.cursor_row)[0].plain
+            # The row key, not the cell: a long name is shown truncated.
+            return table.ordered_rows[table.cursor_row].key.value
         except (IndexError, AttributeError):
             return None
 
@@ -1073,6 +1093,7 @@ class MdlApp(App):
         if state and state["name"] != self._following:
             self._following = state["name"]   # a different server's rate
             self.tok_history.clear()
+            self.tok_peak = 0.0
             self._last_decode = self._last_decode_at = None
             self._tele = {"metrics": {}, "slots": None, "gpu": None}
         if state:
@@ -1081,7 +1102,7 @@ class MdlApp(App):
             self._poll(state)
             dash.update_all(state, self._tele["metrics"], self._tele["slots"],
                             self._tele["gpu"], list(self.tok_history),
-                            self._metrics_ok, self._health_ok)
+                            self._metrics_ok, self._health_ok, self.tok_peak)
             if self._log_path != Path(state["log"]):
                 self._log_path, self._log_pos = Path(state["log"]), 0
                 self.query_one("#log", RichLog).clear()
@@ -1090,6 +1111,7 @@ class MdlApp(App):
             params.display = True
             self._following = None
             self.tok_history.clear()
+            self.tok_peak = 0.0
             self._last_decode = self._last_decode_at = None
         self._drain_log()
         name = self._selected()
@@ -1134,6 +1156,7 @@ class MdlApp(App):
             rate = metrics.get("llamacpp:predicted_tokens_seconds")
         if rate is not None:
             self.tok_history.append(rate)
+            self.tok_peak = max(self.tok_peak, rate)
 
         self._tele = {"metrics": metrics, "slots": slots, "gpu": gpu}
 
