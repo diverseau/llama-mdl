@@ -171,7 +171,8 @@ args = ["--metrics"]
 ```
 
 Without it the dashboard still works, and those panels say `metrics off`
-rather than failing.
+rather than failing. While a model is loading they say `loading` instead,
+since nothing is listening yet.
 
 ## Files
 

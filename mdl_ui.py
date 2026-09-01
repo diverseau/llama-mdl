@@ -51,6 +51,7 @@ WORDMARK = r"""
 
 GRADIENT = ["#7dcfff", "#7aa2f7", "#8a7af7", "#9d7cf7", "#bb7af7"]
 SPARK_CHARS = " ▁▂▃▄▅▆▇█"
+NEWLINE = chr(10)
 
 
 def fx_mode(override=None):
@@ -179,10 +180,19 @@ def parse_metrics(raw):
     return out
 
 
+GPU_TTL = 3.0
+_GPU_CACHE = {"at": -1e9, "value": None}
+
+
 def gpu_memory():
-    """(used_mib, total_mib) from nvidia-smi, or None if unavailable."""
+    """(used_mib, total_mib) from nvidia-smi, or None. Cached for GPU_TTL."""
+    now = time.monotonic()
+    if now - _GPU_CACHE["at"] < GPU_TTL:
+        return _GPU_CACHE["value"]
+    _GPU_CACHE["at"] = now
     exe = shutil.which("nvidia-smi")
     if not exe:
+        _GPU_CACHE["value"] = None
         return None
     try:
         raw = subprocess.run(
@@ -190,9 +200,10 @@ def gpu_memory():
             capture_output=True, text=True, timeout=4,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout
         used, total = raw.strip().splitlines()[0].split(",")
-        return int(used), int(total)
+        _GPU_CACHE["value"] = (int(used), int(total))
     except (OSError, ValueError, IndexError, subprocess.SubprocessError):
-        return None
+        _GPU_CACHE["value"] = None
+    return _GPU_CACHE["value"]
 
 
 LAYER_RE = re.compile(r"offloaded (\d+)/(\d+) layers")
@@ -267,31 +278,63 @@ class Spark(Static):
         self.update(t)
 
 
-class ArgvPreview(Static):
-    """The exact llama-server command mdl would run. Updates as params change."""
+class ArgvPreview(VerticalScroll):
+    """The exact llama-server command mdl would run.
+
+    Scrolls, because a long command must never be silently truncated -
+    a half-shown command reads as a differently-configured one.
+    """
+
+    WRAP = 58
+
+    def compose(self) -> ComposeResult:
+        yield Static(id="argv-body")
+
+    @property
+    def text(self):
+        rendered = self.query_one("#argv-body", Static).render()
+        return rendered.plain if hasattr(rendered, "plain") else str(rendered)
+
+    @staticmethod
+    def _pairs(argv):
+        """[-ngl, 99, -fa, on] -> [(-ngl, 99), (-fa, on)]."""
+        out, i = [], 1
+        while i < len(argv):
+            flag = argv[i]
+            if (flag.startswith("-") and i + 1 < len(argv)
+                    and not argv[i + 1].startswith("-")):
+                out.append((flag, argv[i + 1]))
+                i += 2
+            else:
+                out.append((flag, None))
+                i += 1
+        return out
 
     def set_argv(self, argv):
+        body = self.query_one("#argv-body", Static)
         if not argv:
-            self.update(Text("(select a model)", style="#565f89"))
+            body.update(Text("(select a model)", style="#565f89"))
             return
         t = Text()
         t.append("$ ", style="#565f89")
         t.append(Path(argv[0]).name, style="bold #9ece6a")
-        i = 1
-        while i < len(argv):
-            tok = argv[i]
-            if tok.startswith("-"):
-                t.append("\n    ")
-                t.append(tok, style="#7aa2f7")
-                if i + 1 < len(argv) and not argv[i + 1].startswith("-"):
-                    val = argv[i + 1]
-                    shown = ".../" + Path(val).name if len(val) > 46 else val
-                    t.append(" " + shown, style="#e0af68")
-                    i += 1
-            else:
-                t.append(" " + tok, style="#c0caf5")
-            i += 1
-        self.update(t)
+        used = self.WRAP + 1          # force a break before the first flag
+        for flag, value in self._pairs(argv):
+            shown = value
+            if value and len(value) > 44:
+                shown = ".../" + Path(value).name
+            width = len(flag) + (len(shown) + 1 if shown else 0) + 2
+            if used + width > self.WRAP or flag == "-m":
+                t.append(NEWLINE + "    ")
+                used = 4
+            t.append(flag, style="#7aa2f7")
+            used += len(flag)
+            if shown:
+                t.append(" " + shown, style="#e0af68")
+                used += len(shown) + 1
+            t.append("  ")
+            used += 2
+        body.update(t)
 
 
 class ParamPane(VerticalScroll):
@@ -347,7 +390,8 @@ class Dashboard(Static):
         yield Spark(id="d-toks")
         yield Static(id="d-slots")
 
-    def update_all(self, state, metrics, slots, gpu, tok_history, metrics_ok):
+    def update_all(self, state, metrics, slots, gpu, tok_history, metrics_ok,
+                   health_ok=True):
         head = Text()
         head.append(state["name"], style="bold #bb7af7")
         head.append("  ● RUNNING", style="bold #9ece6a")
@@ -363,9 +407,15 @@ class Dashboard(Static):
             self.query_one("#d-vram", Meter).set_value("VRAM", None, "no nvidia-smi")
 
         kv = metrics.get("llamacpp:kv_cache_usage_ratio")
-        self.query_one("#d-ctx", Meter).set_value(
-            "ctx", kv, f"{kv * 100:.0f}% of kv cache" if kv is not None
-            else ("idle" if metrics_ok else "metrics off"))
+        if kv is not None:
+            caption = "{:.0f}% of kv cache".format(kv * 100)
+        elif not health_ok:
+            caption = "loading"
+        elif metrics_ok:
+            caption = "idle"
+        else:
+            caption = "metrics off"
+        self.query_one("#d-ctx", Meter).set_value("ctx", kv, caption)
 
         self.query_one("#d-toks", Spark).set_series("tok/s", tok_history, "")
 
@@ -378,11 +428,13 @@ class Dashboard(Static):
             s.append(f" {busy}/{len(slots)} busy", style="#c0caf5")
         else:
             s.append("slots  ", style="#565f89")
-            s.append("unavailable", style="#565f89")
+            s.append("loading" if not health_ok else "unavailable", style="#565f89")
         reqs = metrics.get("llamacpp:n_decode_total")
         if reqs:
             s.append(f"   {int(reqs)} decodes", style="#565f89")
-        if not metrics_ok:
+        if not health_ok:
+            s.append("   server still loading", style="#565f89")
+        elif not metrics_ok:
             s.append("   metrics off · add --metrics to args", style="#e0af68")
         self.query_one("#d-slots", Static).update(s)
 
@@ -590,6 +642,8 @@ class MdlApp(App):
         self._log_path = None
         self._filter = ""
         self._metrics_ok = False
+        self._health_ok = False
+        self._tele = {"metrics": {}, "slots": None, "gpu": None}
 
     # ---- layout ----
     def compose(self) -> ComposeResult:
@@ -702,6 +756,9 @@ class MdlApp(App):
             dash.display = True
             params.display = False      # config pane is for choosing, not watching
             self._poll(state)
+            dash.update_all(state, self._tele["metrics"], self._tele["slots"],
+                            self._tele["gpu"], list(self.tok_history),
+                            self._metrics_ok, self._health_ok)
             if self._log_path != Path(state["log"]):
                 self._log_path, self._log_pos = Path(state["log"]), 0
                 self.query_one("#log", RichLog).clear()
@@ -726,6 +783,7 @@ class MdlApp(App):
     @work(thread=True, exclusive=True, group="poll")
     def _poll(self, state):
         port = state["port"]
+        self._health_ok = http_get(port, "/health") is not None
         raw = http_get(port, "/metrics")
         self._metrics_ok = raw is not None
         metrics = parse_metrics(raw)
@@ -744,9 +802,7 @@ class MdlApp(App):
         if rate is not None:
             self.tok_history.append(rate)
 
-        self.call_from_thread(
-            self.query_one("#dash", Dashboard).update_all,
-            state, metrics, slots, gpu, list(self.tok_history), self._metrics_ok)
+        self._tele = {"metrics": metrics, "slots": slots, "gpu": gpu}
 
     def _drain_log(self):
         if not self._log_path or not self._log_path.exists():
