@@ -92,13 +92,15 @@ instead of silently doing nothing.
 ## Commands
 
 ```
-mdl run <name>   Start <name> in the background, then tail its log until the
-                 server reports it is listening, and exit. The server keeps
-                 running after mdl exits.
+mdl run <name>   Start <name> in the background, tail its log until the
+                 server answers /health, and exit. The server keeps running
+                 after mdl exits.
 mdl stop         SIGTERM the running server, SIGKILL after 10s, clean up.
 mdl ps           name, pid, port and uptime, or "nothing running".
 mdl list         The models defined in the config.
 mdl ui           The dashboard. Bare `mdl` opens it too.
+mdl logs [-f]    Print the running server's log; -f follows it.
+                 Takes a model name to read a stopped one's log.
 ```
 
 Without textual installed, `mdl ui` fails with one line and bare `mdl` prints
@@ -130,6 +132,9 @@ state file. Anything you do in it is visible to the CLI and vice versa.
 
 Idle, it lists your models with a status dot, shows the selected model's
 parameters, and previews the exact `llama-server` command it would run.
+`e` edits those parameters and saves them back to `models.toml`, leaving
+your comments and layout alone. `p` prompts the running model and streams
+the reply.
 Running, it swaps in live telemetry: VRAM, KV-cache use, a tokens/sec
 sparkline, busy slots, and a colour-coded log tail.
 
@@ -139,7 +144,7 @@ sparkline, busy slots, and a colour-coded log tail.
  enter, r     run the selected model
  s            stop the running server
  R            restart
- e            edit ngl / ctx / kv_type / port for this session
+ e            edit ngl / ctx / kv_type / port, saved to models.toml
  c            copy the llama-server command
  p            prompt the running model without leaving the UI
  l            focus the log, / filters it
@@ -198,6 +203,11 @@ Same layout on Windows, under `%USERPROFILE%`.
 
 - **One server at a time.** `run` while something is up is an error telling you
   to `stop` first.
+- **Readiness is an HTTP probe, not log scraping.** `run` polls `/health` on
+  the configured port. llama.cpp has reworded its startup line between builds;
+  this contract has not.
+- **Obvious mistakes fail before launch.** A missing model file, a missing
+  binary or a busy port is one line in milliseconds, not a failed model load.
 - **Stale state self-heals.** If the pid in `state.json` is gone (crash, reboot,
   `kill -9`) the file is removed and `ps` reports nothing running.
 - **If the server exits during startup,** `run` reports its exit status, removes
@@ -208,6 +218,22 @@ Same layout on Windows, under `%USERPROFILE%`.
   `ps` will report it as still running. Rare, and the cure costs more than the
   disease.
 - Errors are one line on stderr and a non-zero exit. No tracebacks.
+
+## Tests
+
+```sh
+python tests/run.py           # fast: no real model needed
+python tests/run.py --live    # also drives a real model through the UI
+```
+
+The fast suites run against a temp config and a fake `llama-server`, so they
+never touch `~/.config/mdl`. The POSIX process semantics (detaching, orphan
+self-heal, SIGTERM escalating to SIGKILL) need Linux:
+
+```sh
+docker run --rm -v "$PWD:/repo:ro" python:3.12-slim \
+    sh -c 'cp -r /repo /w && cd /w && python3 tests/integration_posix.py'
+```
 
 ## Deliberately not included
 

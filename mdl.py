@@ -5,11 +5,15 @@ import ctypes
 import json
 import os
 import re
+import shutil
 import signal
+import socket
 import subprocess
 import sys
 import time
 import tomllib
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -22,6 +26,7 @@ CONFIG_DATA = {}          # last parsed config, for UI-only settings
 DEFAULT_PORT = 8080
 # Wording differs across llama.cpp builds: older ones say "server is listening on
 # http://...", build 10424+ says "llama_server: listening on http://...".
+# Matched only to colour log lines; readiness is decided by server_ready().
 READY = re.compile(r"listening on http|server is listening|HTTP server listening"
                    r"|starting the main loop")
 READY_TIMEOUT = 300
@@ -30,7 +35,7 @@ KNOWN = {"model", "ngl", "n_cpu_moe", "ctx", "flash_attn", "kv_type", "parallel"
 SIMPLE = (("ngl", "-ngl"), ("n_cpu_moe", "--n-cpu-moe"), ("ctx", "-c"),
           ("parallel", "-np"), ("port", "--port"))
 
-USAGE = "usage: mdl {ui [--no-fx]|run <name>|stop|ps|list}"
+USAGE = "usage: mdl {ui [--no-fx]|run <name>|stop|ps|list|logs [-f] [name]}"
 
 
 class MdlError(Exception):
@@ -74,6 +79,23 @@ def build_argv(name, cfg, binary):
     if not isinstance(extra, list):
         die(f"model '{name}': 'args' must be a list of strings")
     return argv + [str(a) for a in extra]
+
+
+def server_ready(port):
+    """True once the server answers /health. Log wording changes between
+    llama.cpp builds; this contract does not."""
+    try:
+        with urllib.request.urlopen(
+                "http://127.0.0.1:%d/health" % port, timeout=1) as r:
+            return r.status == 200
+    except (urllib.error.URLError, OSError, ValueError):
+        return False
+
+
+def port_busy(port):
+    with socket.socket() as sock:
+        sock.settimeout(0.5)
+        return sock.connect_ex(("127.0.0.1", port)) == 0
 
 
 if os.name == "nt":
@@ -125,22 +147,30 @@ def uptime(seconds):
     return f"{s}s"
 
 
-def tail_until_ready(proc, log, name):
-    """Echo the log until the server says it is listening. Fatal on early exit."""
+def _drain(fh, pending):
+    """Echo whole lines from the log, returning the partial remainder."""
+    pending += fh.read()
+    while chr(10) in pending:
+        line, pending = pending.split(chr(10), 1)
+        print(line, flush=True)
+    return pending
+
+
+def tail_until_ready(proc, log, name, port):
+    """Echo the log until /health answers. Fatal if it dies or times out."""
     deadline = time.monotonic() + READY_TIMEOUT
     with open(log, "r", errors="replace") as fh:
         pending = ""
         while True:
-            chunk = fh.read()
-            if chunk:
-                pending += chunk
-                while "\n" in pending:
-                    line, pending = pending.split("\n", 1)
-                    print(line, flush=True)
-                    if READY.search(line):
-                        return
-                continue
+            pending = _drain(fh, pending)
+            if server_ready(port):
+                time.sleep(0.2)          # let the last writes land, then show them
+                pending = _drain(fh, pending)
+                if pending:
+                    print(pending, flush=True)
+                return
             if proc.poll() is not None:
+                pending = _drain(fh, pending)
                 if pending:
                     print(pending, flush=True)
                 STATE.unlink(missing_ok=True)
@@ -158,6 +188,12 @@ def spawn(name, models, binary):
     """
     argv = build_argv(name, models[name], binary)
     port = models[name].get("port", DEFAULT_PORT)
+    if not shutil.which(binary) and not Path(binary).is_file():
+        die(f"llama-server not found: {binary}")
+    if not Path(models[name]["model"]).is_file():
+        die(f"model file not found: {models[name]['model']}")
+    if port_busy(port):
+        die(f"port {port} is already in use")
     try:
         STATE_DIR.mkdir(parents=True, exist_ok=True)
         log = STATE_DIR / f"{name}.log"
@@ -190,7 +226,7 @@ def cmd_run(args):
 
     proc, log, port = spawn(name, models, binary)
     print(f"starting {name} (pid {proc.pid}), log {log}", flush=True)
-    tail_until_ready(proc, log, name)
+    tail_until_ready(proc, log, name, port)
     print(f"ready: {name} on http://127.0.0.1:{port} (pid {proc.pid})")
 
 
@@ -242,6 +278,32 @@ def cmd_list(args):
         print(f"{name.ljust(width)}  {models[name].get('model', '(no model path)')}")
 
 
+def cmd_logs(args):
+    follow = "-f" in args
+    rest = [a for a in args if a != "-f"]
+    if len(rest) > 1:
+        die("usage: mdl logs [-f] [name]")
+    if rest:
+        log = STATE_DIR / (rest[0] + ".log")
+    else:
+        state = read_state()
+        if not state:
+            die("nothing running; pass a model name")
+        log = Path(state["log"])
+    if not log.is_file():
+        die(f"no log at {log}")
+    with open(log, "r", errors="replace") as fh:
+        while True:
+            chunk = fh.read()
+            if chunk:
+                sys.stdout.write(chunk)
+                sys.stdout.flush()
+            elif not follow:
+                return
+            else:
+                time.sleep(0.3)
+
+
 def _launch_ui(fx=None):
     try:
         from mdl_ui import run_ui
@@ -260,7 +322,7 @@ def cmd_ui(args):
 
 
 COMMANDS = {"ui": cmd_ui, "run": cmd_run, "stop": cmd_stop,
-            "ps": cmd_ps, "list": cmd_list}
+            "ps": cmd_ps, "list": cmd_list, "logs": cmd_logs}
 
 
 def main():

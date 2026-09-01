@@ -55,6 +55,46 @@ SPARK_CHARS = " ▁▂▃▄▅▆▇█"
 NEWLINE = chr(10)
 
 
+def toml_value(v):
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, (int, float)):
+        return str(v)
+    if isinstance(v, list):
+        return "[" + ", ".join(toml_value(x) for x in v) + "]"
+    return chr(34) + str(v).replace(chr(92), chr(92) * 2) + chr(34)
+
+
+def write_params(name, cfg, path=None):
+    """Rewrite [name]'s keys in the config in place.
+
+    Only key lines are touched, so comments, ordering and blank lines
+    survive - which a dump-and-rewrite through tomllib would not.
+    """
+    path = path or mdl.CONFIG
+    lines = path.read_text(encoding="utf-8").split(NEWLINE)
+    head = lines.index("[" + name + "]")
+    tail = head + 1
+    while tail < len(lines) and not lines[tail].startswith("["):
+        tail += 1
+    body, seen, insert_at = [], set(), 0
+    for line in lines[head + 1:tail]:
+        key = re.match(r"([A-Za-z_]\w*)\s*=", line)
+        if not key:
+            body.append(line)
+            continue
+        seen.add(key.group(1))
+        if key.group(1) in cfg:
+            body.append("%s = %s" % (key.group(1), toml_value(cfg[key.group(1)])))
+            insert_at = len(body)
+    for key in cfg:
+        if key not in seen:
+            body.insert(insert_at, "%s = %s" % (key, toml_value(cfg[key])))
+            insert_at += 1
+    lines[head + 1:tail] = body
+    path.write_text(NEWLINE.join(lines), encoding="utf-8")
+
+
 def fx_period(override=None):
     """Seconds per colour cycle. --fx-period beats $MDL_UI_FX_PERIOD
     beats ui_fx_period in the config."""
@@ -488,7 +528,7 @@ class HelpScreen(ModalScreen):
 
 
 class EditScreen(ModalScreen):
-    """Edit one model's params. Writes nothing to disk; applies for this run."""
+    """Edit one model's params and save them to the config."""
 
     BINDINGS = [Binding("escape", "dismiss", "cancel")]
     FIELDS = ["ngl", "n_cpu_moe", "ctx", "kv_type", "parallel", "port"]
@@ -510,7 +550,7 @@ class EditScreen(ModalScreen):
                 yield Label(f"{'flash_attn':<11}", classes="edit-label")
                 yield Input(value="on" if self.cfg.get("flash_attn") else "off",
                             id="f-flash_attn", classes="edit-input")
-            yield Label(Text(" enter applies · esc cancels", style="#565f89"))
+            yield Label(Text(" enter saves to models.toml · esc cancels", style="#565f89"))
             yield Button("apply", variant="primary", id="apply")
 
     def _collect(self):
@@ -559,41 +599,63 @@ class PromptScreen(ModalScreen):
     def compose(self) -> ComposeResult:
         with Vertical(id="prompt-box"):
             yield Label(Text(" prompt the model ", style="bold #bb7af7"))
-            yield Input(placeholder="ask something, enter to send", id="prompt-input")
-            yield RichLog(id="prompt-out", wrap=True, markup=False)
+            yield Input(placeholder="ask something, enter to send",
+                        id="prompt-input")
+            with VerticalScroll(id="prompt-scroll"):
+                yield Static(id="prompt-out")
 
     def on_mount(self):
+        self.log_text = Text()
         self.query_one("#prompt-input", Input).focus()
+
+    def say(self, text, style=""):
+        self.log_text.append(text, style=style)
+        self.query_one("#prompt-out", Static).update(self.log_text)
+        self.query_one("#prompt-scroll").scroll_end(animate=False)
 
     def on_input_submitted(self, event):
         text = event.value.strip()
         if not text:
             return
-        out = self.query_one("#prompt-out", RichLog)
-        out.write(Text(f"> {text}", style="#7aa2f7"))
         self.query_one("#prompt-input", Input).value = ""
-        self._send(text, out)
+        self.say("> " + text + NEWLINE, "#7aa2f7")
+        self._send(text)
 
     @work(thread=True)
-    def _send(self, text, out):
+    def _send(self, text):
+        """Stream the reply token by token; a 200-token wait reads as a hang."""
         body = json.dumps({"messages": [{"role": "user", "content": text}],
-                           "max_tokens": 256, "temperature": 0.7}).encode()
+                           "max_tokens": 512, "temperature": 0.7,
+                           "stream": True}).encode()
         req = urllib.request.Request(
-            f"http://127.0.0.1:{self.port}/v1/chat/completions", data=body,
+            "http://127.0.0.1:%d/v1/chat/completions" % self.port, data=body,
             headers={"Content-Type": "application/json"}, method="POST")
-        started = time.time()
+        started, tokens = time.time(), 0
         try:
-            with urllib.request.urlopen(req, timeout=180) as r:
-                data = json.loads(r.read().decode("utf-8", "replace"))
-            reply = data["choices"][0]["message"]["content"].strip()
-            used = data.get("usage", {}).get("completion_tokens", 0)
-            rate = used / max(time.time() - started, 1e-6)
-            self.app.call_from_thread(out.write, Text(reply, style="#c0caf5"))
-            self.app.call_from_thread(
-                out.write, Text(f"  {used} tokens · {rate:.1f} tok/s\n", style="#565f89"))
-        except Exception as e:                      # noqa: BLE001 - surfaced, not raised
-            self.app.call_from_thread(out.write, Text(f"  request failed: {e}\n",
-                                                      style="#f7768e"))
+            with urllib.request.urlopen(req, timeout=180) as response:
+                for raw in response:
+                    line = raw.decode("utf-8", "replace").strip()
+                    if not line.startswith("data:"):
+                        continue
+                    payload = line[5:].strip()
+                    if payload == "[DONE]":
+                        break
+                    try:
+                        delta = json.loads(payload)["choices"][0]["delta"]
+                    except (ValueError, KeyError, IndexError):
+                        continue
+                    piece = delta.get("content") or ""
+                    if piece:
+                        tokens += 1
+                        self.app.call_from_thread(self.say, piece, "#c0caf5")
+        except Exception as e:                       # noqa: BLE001 - shown, not raised
+            self.app.call_from_thread(self.say, NEWLINE + "  failed: %s" % e,
+                                      "#f7768e")
+            return
+        rate = tokens / max(time.time() - started, 1e-6)
+        self.app.call_from_thread(
+            self.say, NEWLINE + "  %d chunks - %.1f/s" % (tokens, rate) + NEWLINE * 2,
+            "#565f89")
 
 
 # --------------------------------------------------------------------------
@@ -622,7 +684,8 @@ class MdlApp(App):
                 border: round #7aa2f7; }
     #edit-box, #prompt-box { width: 66; height: auto; padding: 1 2;
                 background: #151a23; border: round #7aa2f7; }
-    #prompt-out { height: 14; background: #0b0e14; margin-top: 1; }
+    #prompt-scroll { height: 14; background: #0b0e14; margin-top: 1; }
+    #prompt-out { padding: 0 1; }
     .edit-row { height: 3; }
     .edit-label { padding: 1 0 0 0; color: #565f89; width: 12; }
     .edit-input { width: 1fr; }
@@ -652,7 +715,6 @@ class MdlApp(App):
         self.fx = fx_mode(fx)
         self.fx_period = fx_period(fx_period_override)
         self.models, self.binary = {}, ""
-        self.overrides = {}            # name -> cfg edited this session
         self.marks = {}                # name -> "ok" | "fail" | "new"
         self.sizes = {}
         self.tok_history = deque(maxlen=SPARK_POINTS)
@@ -745,7 +807,7 @@ class MdlApp(App):
             table.focus()
 
     def _cfg(self, name):
-        return self.overrides.get(name, self.models.get(name, {}))
+        return self.models.get(name, {})
 
     def _selected(self):
         table = self.query_one("#models", DataTable)
@@ -916,11 +978,17 @@ class MdlApp(App):
             return
 
         def apply(cfg):
-            if cfg is not None:
-                self.overrides[name] = cfg
-                self._build_table()
-                self._tick()
-                self.notify(name + " params updated for this session")
+            if cfg is None:
+                return
+            try:
+                write_params(name, cfg)
+            except (OSError, ValueError) as e:
+                self.notify("could not save: %s" % e, severity="error")
+                return
+            self._load_config()
+            self._build_table()
+            self._tick()
+            self.notify(name + " saved to models.toml")
         self.push_screen(EditScreen(name, self._cfg(name)), apply)
 
     def action_prompt(self):
@@ -940,10 +1008,8 @@ class MdlApp(App):
                 state["name"] + " is already running - press s to stop it",
                 severity="warning")
             return
-        models = dict(self.models)
-        models[name] = self._cfg(name)
         try:
-            proc, log, port = mdl.spawn(name, models, self.binary)
+            proc, log, port = mdl.spawn(name, self.models, self.binary)
         except mdl.MdlError as e:
             self.notify(str(e), severity="error")
             return
