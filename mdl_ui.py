@@ -6,6 +6,7 @@ the same state file, so they can never disagree about what is running.
 """
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -29,7 +30,14 @@ from textual.widgets import (Button, DataTable, Footer, Input, Label, RichLog,
 
 POLL_SECONDS = 1.0
 SPARK_POINTS = 40
-FX = True  # flipped off by --no-fx / the config
+
+# Wordmark animation. "always" drifts slowly forever, "sweep" runs one pass
+# at launch then parks, "off" paints it flat. Set ui_fx in models.toml,
+# $MDL_UI_FX, or pass --no-fx.
+FX_DEFAULT = "always"
+FX_TICK = 0.08          # ~12 fps; cheap enough to leave running
+FX_STEP = 0.010         # a full colour cycle every ~8 seconds
+FX_SWEEP_STEP = 0.067   # "sweep" does that one cycle in ~1.2s, then parks
 
 # ANSI Shadow. Drawn once at launch, then parked in the header.
 WORDMARK = r"""
@@ -45,15 +53,49 @@ GRADIENT = ["#7dcfff", "#7aa2f7", "#8a7af7", "#9d7cf7", "#bb7af7"]
 SPARK_CHARS = " ▁▂▃▄▅▆▇█"
 
 
-def gradient_text(lines, colors=GRADIENT):
-    """Colour a block of text left-to-right through `colors`."""
+def fx_mode(override=None):
+    """--no-fx beats $MDL_UI_FX beats ui_fx in the config."""
+    if override:
+        return str(override).strip().lower()
+    env = os.environ.get("MDL_UI_FX")
+    if env:
+        return env.strip().lower()
+    try:
+        mdl.load_config()
+    except mdl.MdlError:
+        pass
+    value = (mdl.CONFIG_DATA or {}).get("ui_fx")
+    return str(value).strip().lower() if value else FX_DEFAULT
+
+
+def _rgb(hex_colour):
+    h = hex_colour.lstrip("#")
+    return int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+
+
+def colour_at(pos, colors=GRADIENT):
+    """Colour at 0..1 through `colors`, wrapping so it can drift seamlessly."""
+    pos = pos % 1.0
+    span = pos * len(colors)
+    i = int(span)
+    a = _rgb(colors[i % len(colors)])
+    b = _rgb(colors[(i + 1) % len(colors)])
+    t = span - i
+    return "#%02x%02x%02x" % tuple(
+        round(a[k] + (b[k] - a[k]) * t) for k in range(3))
+
+
+def gradient_text(lines, colors=GRADIENT, phase=0.0):
+    """Colour a block of text left-to-right, offset by `phase` (0..1)."""
     width = max((len(l) for l in lines), default=1)
     out = Text()
     for row, line in enumerate(lines):
         for col, ch in enumerate(line):
-            pos = col / max(width - 1, 1)
-            idx = min(int(pos * (len(colors) - 1)), len(colors) - 2)
-            out.append(ch, style=colors[idx] if ch.strip() else "")
+            if ch.strip():
+                out.append(ch, style=colour_at(
+                    col / max(width - 1, 1) + phase, colors))
+            else:
+                out.append(ch)
         if row != len(lines) - 1:
             out.append("\n")
     return out
@@ -179,15 +221,23 @@ class Wordmark(Static):
 
     def on_mount(self):
         self.lines = WORDMARK.split("\n")
+        self._phase = 0.0
+        self._step = FX_STEP
         self.update(gradient_text(self.lines))
-        if FX:
-            self._phase = 0
-            self.set_interval(0.045, self._sweep, repeat=14)
+        mode = getattr(self.app, "fx", FX_DEFAULT)
+        if mode == "off":
+            return
+        if mode == "sweep":
+            self._step = FX_SWEEP_STEP
+            self.set_interval(FX_TICK, self._drift,
+                              repeat=round(1.0 / FX_SWEEP_STEP))
+        else:
+            self._step = FX_STEP
+            self.set_interval(FX_TICK, self._drift)
 
-    def _sweep(self):
-        self._phase += 1
-        shift = self._phase % len(GRADIENT)
-        self.update(gradient_text(self.lines, GRADIENT[shift:] + GRADIENT[:shift]))
+    def _drift(self):
+        self._phase = (self._phase + self._step) % 1.0
+        self.update(gradient_text(self.lines, phase=self._phase))
 
 
 class Meter(Static):
@@ -527,8 +577,9 @@ class MdlApp(App):
 
     status_line = reactive("")
 
-    def __init__(self):
+    def __init__(self, fx=None):
         super().__init__()
+        self.fx = fx_mode(fx)
         self.models, self.binary = {}, ""
         self.overrides = {}            # name -> cfg edited this session
         self.marks = {}                # name -> "ok" | "fail" | "new"
@@ -921,5 +972,5 @@ class FilterScreen(ModalScreen):
         self.dismiss(event.value)
 
 
-def run_ui():
-    MdlApp().run()
+def run_ui(fx=None):
+    MdlApp(fx).run()

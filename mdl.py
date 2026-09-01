@@ -18,6 +18,7 @@ CONFIG = Path.home() / ".config" / "mdl" / "models.toml"
 STATE_DIR = Path.home() / ".local" / "state" / "mdl"
 STATE = STATE_DIR / "state.json"
 DEFAULT_BIN = "llama-server"
+CONFIG_DATA = {}          # last parsed config, for UI-only settings
 DEFAULT_PORT = 8080
 # Wording differs across llama.cpp builds: older ones say "server is listening on
 # http://...", build 10424+ says "llama_server: listening on http://...".
@@ -29,7 +30,7 @@ KNOWN = {"model", "ngl", "n_cpu_moe", "ctx", "flash_attn", "kv_type", "parallel"
 SIMPLE = (("ngl", "-ngl"), ("n_cpu_moe", "--n-cpu-moe"), ("ctx", "-c"),
           ("parallel", "-np"), ("port", "--port"))
 
-USAGE = "usage: mdl {ui|run <name>|stop|ps|list}"
+USAGE = "usage: mdl {ui [--no-fx]|run <name>|stop|ps|list}"
 
 
 class MdlError(Exception):
@@ -47,6 +48,8 @@ def load_config():
         die(f"no config at {CONFIG}")
     except (OSError, tomllib.TOMLDecodeError) as e:
         die(f"cannot read {CONFIG}: {e}")
+    global CONFIG_DATA
+    CONFIG_DATA = data
     models = {k: v for k, v in data.items() if isinstance(v, dict)}
     binary = os.environ.get("MDL_LLAMA_SERVER") or data.get("llama_server") or DEFAULT_BIN
     return models, str(binary)
@@ -239,17 +242,20 @@ def cmd_list(args):
         print(f"{name.ljust(width)}  {models[name].get('model', '(no model path)')}")
 
 
-def _launch_ui():
+def _launch_ui(fx=None):
     try:
         from mdl_ui import run_ui
     except ImportError as e:
         die("mdl ui needs textual: pip install textual ({})".format(e))
-    run_ui()
+    run_ui(fx)
 
 
 def cmd_ui(args):
+    if args == ["--no-fx"]:
+        _launch_ui("off")
+        return
     if args:
-        die("usage: mdl ui")
+        die("usage: mdl ui [--no-fx]")
     _launch_ui()
 
 

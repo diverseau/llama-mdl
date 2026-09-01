@@ -150,6 +150,19 @@ sparkline, busy slots, and a colour-coded log tail.
 
 Quitting never stops a server; `s` is the only thing that does.
 
+### Animation
+
+The wordmark drifts its gradient slowly and continuously by default. Set
+`ui_fx` at the top level of the config to change that:
+
+```toml
+ui_fx = "always"   # slow continuous drift (default)
+ui_fx = "sweep"    # one ~1.2s pass at launch, then it parks
+ui_fx = "off"      # painted flat, no timer at all
+```
+
+`$MDL_UI_FX` overrides the config, and `mdl ui --no-fx` overrides both.
+
 The telemetry panels need llama.cpp's metrics endpoint, so add `--metrics`
 to a model's `args` to light them up:
 
