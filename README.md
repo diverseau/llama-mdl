@@ -3,6 +3,8 @@
 A small CLI for running one local [llama.cpp](https://github.com/ggml-org/llama.cpp)
 server at a time from a config file, instead of pasting flag soup into your shell.
 
+![the mdl dashboard](docs/screenshot.svg)
+
 `mdl.py` is a single file, Python 3.11+ (needs `tomllib`), standard library
 only. Runs on Linux, macOS and Windows.
 
@@ -232,10 +234,32 @@ docker run --rm -v "$PWD:/repo:ro" python:3.12-slim \
     sh -c 'cp -r /repo /w && cd /w && python3 tests/integration_posix.py'
 ```
 
-## Deliberately not included
+## Non-goals
 
-No daemon, no web UI, no model downloading, no hot-swap, no auto-unload,
-no multiple concurrent servers.
+These are deliberate, and issues asking for them will be closed with a link
+here. `mdl` starts one server, stops it, and tells you what is running.
+
+- **No daemon.** Nothing runs in the background except the server itself.
+- **No multiple concurrent servers.** These models are measured in gigabytes
+  of VRAM; running two is usually a mistake, and refusing is a feature.
+- **No model downloading.** Use `huggingface-cli`, or your browser.
+- **No hot-swap or auto-unload.** `mdl stop && mdl run other` is two words.
+- **No web UI.** llama-server already ships one.
+
+If you want these, [llama-swap](https://github.com/mostlygeek/llama-swap)
+and [Ollama](https://ollama.com) are good and solve different problems.
+
+## Contributing
+
+Run the tests before opening a pull request:
+
+```sh
+python tests/run.py
+```
+
+CI runs them on Linux, macOS and Windows against Python 3.11 and 3.13, plus
+the POSIX process suite and a wheel build. Keep `mdl.py` free of
+dependencies - only the dashboard is allowed any.
 
 ## License
 
