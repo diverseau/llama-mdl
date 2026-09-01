@@ -12,35 +12,29 @@ and the CLI never imports it, so the four commands stay dependency-free.
 
 ## Install
 
-Linux / macOS:
+```sh
+pipx install mdl          # or: pip install mdl
+pipx install "mdl[ui]"    # with the terminal dashboard
+```
+
+The four commands need no dependencies at all; only the dashboard pulls in
+[Textual](https://textual.textualize.io/).
+
+Or run it straight from a clone - it is two files and a standard library:
 
 ```sh
 git clone <this repo> ~/src/mdl
-chmod +x ~/src/mdl/mdl.py
-sudo ln -s ~/src/mdl/mdl.py /usr/local/bin/mdl
+python ~/src/mdl/mdl.py --help
 ```
 
-Windows has no symlink worth relying on, so drop a `mdl.cmd` shim somewhere on
-your PATH:
-
-```
-@echo off
-python "%USERPROFILE%\src\mdl\mdl.py" %*
-```
-
-For the optional dashboard:
+Then create a starter config:
 
 ```sh
-pip install textual
+mdl init
 ```
 
-Then write a config:
-
-```sh
-mkdir -p ~/.config/mdl && $EDITOR ~/.config/mdl/models.toml
-```
-
-On Windows that is `%USERPROFILE%\.config\mdl\models.toml`.
+That writes `~/.config/mdl/models.toml`, finds `llama-server` on your PATH if
+it is there, and tells you what to edit.
 
 ## Config
 
@@ -98,6 +92,8 @@ mdl run <name>   Start <name> in the background, tail its log until the
 mdl stop         SIGTERM the running server, SIGKILL after 10s, clean up.
 mdl ps           name, pid, port and uptime, or "nothing running".
 mdl list         The models defined in the config.
+mdl init         Write a starter config, if you do not have one.
+mdl --version    The version, for bug reports.
 mdl ui           The dashboard. Bare `mdl` opens it too.
 mdl logs [-f]    Print the running server's log; -f follows it.
                  Takes a model name to read a stopped one's log.
@@ -191,13 +187,14 @@ since nothing is listening yet.
 ## Files
 
 ```
-~/.config/mdl/models.toml       your config
-~/.local/state/mdl/state.json   name, pid, port and start time of the server
-~/.local/state/mdl/<name>.log   server stdout+stderr, truncated on each run
+~/.config/mdl/models.toml        your config
+~/.local/state/mdl/state.json    name, pid, port and start time of the server
+~/.local/state/mdl/<name>.log    server stdout+stderr, truncated on each run
 ~/.local/state/mdl/ui-marks.json which models the UI has seen start or fail
 ```
 
-Same layout on Windows, under `%USERPROFILE%`.
+`$XDG_CONFIG_HOME` and `$XDG_STATE_HOME` are honoured if set. On Windows the
+same layout lives under `%USERPROFILE%`.
 
 ## Behaviour notes
 

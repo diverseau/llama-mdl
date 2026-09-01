@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mdl"
+version = "0.1.0"
+description = "Run one local llama.cpp server from a config file, with an optional terminal dashboard"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.11"
+authors = [{ name = "leon" }]
+keywords = ["llama.cpp", "llm", "gguf", "cli", "tui", "local-ai"]
+classifiers = [
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Utilities",
+]
+dependencies = []
+
+# The four commands need nothing. Only the dashboard has a dependency, and
+# mdl.py never imports it, so `pip install mdl` stays dependency-free.
+[project.optional-dependencies]
+ui = ["textual>=0.80"]
+
+[project.scripts]
+mdl = "mdl:main"
+
+[tool.setuptools]
+py-modules = ["mdl", "mdl_ui"]

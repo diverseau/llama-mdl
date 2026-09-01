@@ -11,16 +11,27 @@ import socket
 import subprocess
 import sys
 import time
-import tomllib
+try:
+    import tomllib
+except ImportError:                      # 3.10 and older
+    raise SystemExit("mdl: needs Python 3.11 or newer (tomllib)")
 import urllib.error
 import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-CONFIG = Path.home() / ".config" / "mdl" / "models.toml"
-STATE_DIR = Path.home() / ".local" / "state" / "mdl"
+def _base(env, *fallback):
+    """XDG dir if the variable is set, else the conventional path."""
+    root = os.environ.get(env)
+    return Path(root) if root else Path.home().joinpath(*fallback)
+
+
+CONFIG_DIR = _base("XDG_CONFIG_HOME", ".config") / "mdl"
+CONFIG = CONFIG_DIR / "models.toml"
+STATE_DIR = _base("XDG_STATE_HOME", ".local", "state") / "mdl"
 STATE = STATE_DIR / "state.json"
+VERSION = "0.1.0"
 DEFAULT_BIN = "llama-server"
 CONFIG_DATA = {}          # last parsed config, for UI-only settings
 DEFAULT_PORT = 8080
@@ -35,7 +46,27 @@ KNOWN = {"model", "ngl", "n_cpu_moe", "ctx", "flash_attn", "kv_type", "parallel"
 SIMPLE = (("ngl", "-ngl"), ("n_cpu_moe", "--n-cpu-moe"), ("ctx", "-c"),
           ("parallel", "-np"), ("port", "--port"))
 
-USAGE = "usage: mdl {ui [--no-fx]|run <name>|stop|ps|list|logs [-f] [name]}"
+USAGE = ("usage: mdl {init|ui [--no-fx]|run <name>|stop|ps|list|"
+         "logs [-f] [name]} [--version]")
+
+STARTER = '''# mdl config. One table per model; the table name is what you
+# pass to `mdl run`. Use forward slashes in paths on Windows - TOML
+# treats a backslash as an escape character.
+
+# Where llama-server lives. $MDL_LLAMA_SERVER overrides this.
+llama_server = "%s"
+
+# Rename this, point it at a .gguf, and run: mdl run example
+[example]
+model = "/path/to/your-model.gguf"
+ngl = 99          # layers on the GPU; 99 means all of them
+ctx = 8192        # context window
+flash_attn = true
+kv_type = "q8_0"  # quantised KV cache, needs flash_attn
+parallel = 1
+port = 8080
+args = ["--metrics"]   # extra flags, passed through as-is
+'''
 
 
 class MdlError(Exception):
@@ -50,7 +81,7 @@ def load_config():
     try:
         data = tomllib.loads(CONFIG.read_text())
     except FileNotFoundError:
-        die(f"no config at {CONFIG}")
+        die(f"no config at {CONFIG}; run 'mdl init' to create one")
     except (OSError, tomllib.TOMLDecodeError) as e:
         die(f"cannot read {CONFIG}: {e}")
     global CONFIG_DATA
@@ -278,6 +309,24 @@ def cmd_list(args):
         print(f"{name.ljust(width)}  {models[name].get('model', '(no model path)')}")
 
 
+def cmd_init(args):
+    if args:
+        die("usage: mdl init")
+    if CONFIG.exists():
+        die(f"config already exists at {CONFIG}")
+    found = shutil.which(DEFAULT_BIN) or "/path/to/llama-server"
+    try:
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        CONFIG.write_text(STARTER % found.replace(chr(92), "/"),
+                          encoding="utf-8")
+    except OSError as e:
+        die(f"cannot write {CONFIG}: {e}")
+    print(f"wrote {CONFIG}")
+    if not shutil.which(DEFAULT_BIN):
+        print("set llama_server in it: llama-server is not on your PATH")
+    print("edit it, then run: mdl list")
+
+
 def cmd_logs(args):
     follow = "-f" in args
     rest = [a for a in args if a != "-f"]
@@ -308,7 +357,7 @@ def _launch_ui(fx=None):
     try:
         from mdl_ui import run_ui
     except ImportError as e:
-        die("mdl ui needs textual: pip install textual ({})".format(e))
+        die("mdl ui needs textual: pip install \"mdl[ui]\" ({})".format(e))
     run_ui(fx)
 
 
@@ -321,11 +370,11 @@ def cmd_ui(args):
     _launch_ui()
 
 
-COMMANDS = {"ui": cmd_ui, "run": cmd_run, "stop": cmd_stop,
+COMMANDS = {"init": cmd_init, "ui": cmd_ui, "run": cmd_run, "stop": cmd_stop,
             "ps": cmd_ps, "list": cmd_list, "logs": cmd_logs}
 
 
-def main():
+def _dispatch():
     if len(sys.argv) < 2:
         # Bare `mdl` opens the UI; without textual it prints usage as before.
         try:
@@ -338,15 +387,19 @@ def main():
     if sys.argv[1] in ("-h", "--help"):
         print(USAGE)
         return
+    if sys.argv[1] in ("-V", "--version"):
+        print("mdl " + VERSION)
+        return
     command = COMMANDS.get(sys.argv[1])
     if not command:
         die("unknown command '{}'".format(sys.argv[1]) + chr(10) + USAGE)
     command(sys.argv[2:])
 
 
-if __name__ == "__main__":
+def main():
+    """Entry point. Owns error reporting so console_scripts behaves too."""
     try:
-        main()
+        _dispatch()
     except MdlError as e:
         print(f"mdl: {e}", file=sys.stderr)
         sys.exit(1)
@@ -354,3 +407,7 @@ if __name__ == "__main__":
         sys.exit(130)
     except BrokenPipeError:
         sys.exit(0)
+
+
+if __name__ == "__main__":
+    main()

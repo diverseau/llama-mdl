@@ -51,7 +51,8 @@ del os.environ["MDL_LLAMA_SERVER"]
 # ------------------------------------------------------------ config file ---
 mdl.CONFIG = root / "config" / "nope.toml"
 _, err, code = run(mdl.cmd_list, [])
-check("missing config", (err.strip(), code), ("mdl: no config at %s" % mdl.CONFIG, 1))
+check("missing config", (err.strip(), code),
+      ("mdl: no config at %s; run 'mdl init' to create one" % mdl.CONFIG, 1))
 bad = root / "config" / "bad.toml"
 bad.write_text("[oops\n", encoding="utf-8")
 mdl.CONFIG = bad
@@ -160,5 +161,39 @@ state = mdl.read_state()
 if state:
     run(mdl.cmd_stop, [])
 teardown(root)
+
+# ------------------------------------------------------- init / paths ---
+import tempfile, tomllib  # noqa: E402
+
+home = Path(tempfile.mkdtemp(prefix="mdl-init-"))
+os.environ["XDG_CONFIG_HOME"] = str(home / "cfg")
+os.environ["XDG_STATE_HOME"] = str(home / "st")
+import importlib  # noqa: E402
+fresh = importlib.reload(mdl)
+check("XDG_CONFIG_HOME is honoured", fresh.CONFIG,
+      home / "cfg" / "mdl" / "models.toml")
+check("XDG_STATE_HOME is honoured", fresh.STATE_DIR, home / "st" / "mdl")
+
+_, err, code = run(fresh.cmd_list, [])
+check("missing config points at init", ("run 'mdl init'" in err, code), (True, 1))
+
+out, _, code = run(fresh.cmd_init, [])
+check("init writes a config", (fresh.CONFIG.is_file(), code), (True, 0))
+starter = tomllib.loads(fresh.CONFIG.read_text(encoding="utf-8"))
+check("starter config is valid toml", "example" in starter, True)
+check("starter uses only known keys",
+      set(starter["example"]) <= fresh.KNOWN, True)
+check("starter builds a real command",
+      "-fa" in fresh.build_argv("example", starter["example"], "LS"), True)
+_, err, code = run(fresh.cmd_init, [])
+check("init refuses to clobber", ("already exists" in err, code), (True, 1))
+_, err, code = run(fresh.cmd_init, ["x"])
+check("init takes no arguments", (err.strip(), code), ("mdl: usage: mdl init", 1))
+
+check("version is set", bool(fresh.VERSION), True)
+for name in ("XDG_CONFIG_HOME", "XDG_STATE_HOME"):
+    del os.environ[name]
+import shutil as _sh  # noqa: E402
+_sh.rmtree(home, ignore_errors=True)
 
 sys.exit(t.done())
