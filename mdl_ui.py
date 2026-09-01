@@ -35,9 +35,10 @@ SPARK_POINTS = 40
 # at launch then parks, "off" paints it flat. Set ui_fx in models.toml,
 # $MDL_UI_FX, or pass --no-fx.
 FX_DEFAULT = "always"
-FX_TICK = 0.08          # ~12 fps; cheap enough to leave running
-FX_STEP = 0.010         # a full colour cycle every ~8 seconds
-FX_SWEEP_STEP = 0.067   # "sweep" does that one cycle in ~1.2s, then parks
+FX_TICK = 0.06          # ~16 fps
+FX_PERIOD = 3.0         # seconds per colour cycle; ui_fx_period overrides
+FX_SWEEP_SECONDS = 1.2  # how long the one-shot "sweep" pass takes
+FX_MIN_PERIOD = 0.4     # below this it strobes rather than drifts
 
 # ANSI Shadow. Drawn once at launch, then parked in the header.
 WORDMARK = r"""
@@ -52,6 +53,22 @@ WORDMARK = r"""
 GRADIENT = ["#7dcfff", "#7aa2f7", "#8a7af7", "#9d7cf7", "#bb7af7"]
 SPARK_CHARS = " ▁▂▃▄▅▆▇█"
 NEWLINE = chr(10)
+
+
+def fx_period(override=None):
+    """Seconds per colour cycle. --fx-period beats $MDL_UI_FX_PERIOD
+    beats ui_fx_period in the config."""
+    raw = override or os.environ.get("MDL_UI_FX_PERIOD")
+    if raw is None:
+        try:
+            mdl.load_config()
+        except mdl.MdlError:
+            pass
+        raw = (mdl.CONFIG_DATA or {}).get("ui_fx_period")
+    try:
+        return max(FX_MIN_PERIOD, float(raw))
+    except (TypeError, ValueError):
+        return FX_PERIOD
 
 
 def fx_mode(override=None):
@@ -233,17 +250,18 @@ class Wordmark(Static):
     def on_mount(self):
         self.lines = WORDMARK.split("\n")
         self._phase = 0.0
-        self._step = FX_STEP
+        self._step = FX_TICK / FX_PERIOD
         self.update(gradient_text(self.lines))
         mode = getattr(self.app, "fx", FX_DEFAULT)
         if mode == "off":
             return
         if mode == "sweep":
-            self._step = FX_SWEEP_STEP
+            self._step = FX_TICK / FX_SWEEP_SECONDS
             self.set_interval(FX_TICK, self._drift,
-                              repeat=round(1.0 / FX_SWEEP_STEP))
+                              repeat=round(FX_SWEEP_SECONDS / FX_TICK))
         else:
-            self._step = FX_STEP
+            period = getattr(self.app, "fx_period", FX_PERIOD)
+            self._step = FX_TICK / period
             self.set_interval(FX_TICK, self._drift)
 
     def _drift(self):
@@ -629,9 +647,10 @@ class MdlApp(App):
 
     status_line = reactive("")
 
-    def __init__(self, fx=None):
+    def __init__(self, fx=None, fx_period_override=None):
         super().__init__()
         self.fx = fx_mode(fx)
+        self.fx_period = fx_period(fx_period_override)
         self.models, self.binary = {}, ""
         self.overrides = {}            # name -> cfg edited this session
         self.marks = {}                # name -> "ok" | "fail" | "new"
@@ -1028,5 +1047,5 @@ class FilterScreen(ModalScreen):
         self.dismiss(event.value)
 
 
-def run_ui(fx=None):
-    MdlApp(fx).run()
+def run_ui(fx=None, fx_period_override=None):
+    MdlApp(fx, fx_period_override).run()

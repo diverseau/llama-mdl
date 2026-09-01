@@ -161,7 +161,16 @@ ui_fx = "sweep"    # one ~1.2s pass at launch, then it parks
 ui_fx = "off"      # painted flat, no timer at all
 ```
 
-`$MDL_UI_FX` overrides the config, and `mdl ui --no-fx` overrides both.
+Speed is a separate key, in seconds per full colour cycle. Lower is
+faster; 0.4 is the floor.
+
+```toml
+ui_fx_period = 3.0   # default
+ui_fx_period = 1.0   # brisk
+```
+
+`$MDL_UI_FX` and `$MDL_UI_FX_PERIOD` override the config, and
+`mdl ui --no-fx` overrides both.
 
 The telemetry panels need llama.cpp's metrics endpoint, so add `--metrics`
 to a model's `args` to light them up:
