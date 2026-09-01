@@ -12,6 +12,8 @@ import time
 import tomllib
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 CONFIG = Path.home() / ".config" / "mdl" / "models.toml"
 STATE_DIR = Path.home() / ".local" / "state" / "mdl"
 STATE = STATE_DIR / "state.json"
@@ -27,12 +29,15 @@ KNOWN = {"model", "ngl", "n_cpu_moe", "ctx", "flash_attn", "kv_type", "parallel"
 SIMPLE = (("ngl", "-ngl"), ("n_cpu_moe", "--n-cpu-moe"), ("ctx", "-c"),
           ("parallel", "-np"), ("port", "--port"))
 
-USAGE = "usage: mdl {run <name>|stop|ps|list}"
+USAGE = "usage: mdl {ui|run <name>|stop|ps|list}"
+
+
+class MdlError(Exception):
+    """Anything the user caused. main() prints it; the TUI shows it in a modal."""
 
 
 def die(msg):
-    print(f"mdl: {msg}", file=sys.stderr)
-    sys.exit(1)
+    raise MdlError(msg)
 
 
 def load_config():
@@ -143,18 +148,11 @@ def tail_until_ready(proc, log, name):
             time.sleep(0.2)
 
 
-def cmd_run(args):
-    if len(args) != 1:
-        die("usage: mdl run <name>")
-    name = args[0]
-    models, binary = load_config()
-    if name not in models:
-        die(f"no model named '{name}' in {CONFIG}")
-    running = read_state()
-    if running:
-        die(f"'{running['name']}' is already running (pid {running['pid']}, "
-            f"port {running['port']}); run 'mdl stop' first")
+def spawn(name, models, binary):
+    """Launch <name> detached, write the state file, return (proc, log, port).
 
+    Shared by the CLI and the TUI so there is one way to start a server.
+    """
     argv = build_argv(name, models[name], binary)
     port = models[name].get("port", DEFAULT_PORT)
     try:
@@ -170,9 +168,24 @@ def cmd_run(args):
         die(f"cannot start {binary}: {e}")
     finally:
         handle.close()
-
     STATE.write_text(json.dumps({"name": name, "pid": proc.pid, "port": port,
                                  "started": time.time(), "log": str(log)}))
+    return proc, log, port
+
+
+def cmd_run(args):
+    if len(args) != 1:
+        die("usage: mdl run <name>")
+    name = args[0]
+    models, binary = load_config()
+    if name not in models:
+        die(f"no model named '{name}' in {CONFIG}")
+    running = read_state()
+    if running:
+        die(f"'{running['name']}' is already running (pid {running['pid']}, "
+            f"port {running['port']}); run 'mdl stop' first")
+
+    proc, log, port = spawn(name, models, binary)
     print(f"starting {name} (pid {proc.pid}), log {log}", flush=True)
     tail_until_ready(proc, log, name)
     print(f"ready: {name} on http://127.0.0.1:{port} (pid {proc.pid})")
@@ -226,22 +239,49 @@ def cmd_list(args):
         print(f"{name.ljust(width)}  {models[name].get('model', '(no model path)')}")
 
 
-COMMANDS = {"run": cmd_run, "stop": cmd_stop, "ps": cmd_ps, "list": cmd_list}
+def _launch_ui():
+    try:
+        from mdl_ui import run_ui
+    except ImportError as e:
+        die("mdl ui needs textual: pip install textual ({})".format(e))
+    run_ui()
+
+
+def cmd_ui(args):
+    if args:
+        die("usage: mdl ui")
+    _launch_ui()
+
+
+COMMANDS = {"ui": cmd_ui, "run": cmd_run, "stop": cmd_stop,
+            "ps": cmd_ps, "list": cmd_list}
 
 
 def main():
-    if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help"):
+    if len(sys.argv) < 2:
+        # Bare `mdl` opens the UI; without textual it prints usage as before.
+        try:
+            from mdl_ui import run_ui
+        except ImportError:
+            print(USAGE)
+            sys.exit(2)
+        run_ui()
+        return
+    if sys.argv[1] in ("-h", "--help"):
         print(USAGE)
-        sys.exit(0 if len(sys.argv) > 1 else 2)
+        return
     command = COMMANDS.get(sys.argv[1])
     if not command:
-        die(f"unknown command '{sys.argv[1]}'\n{USAGE}")
+        die("unknown command '{}'".format(sys.argv[1]) + chr(10) + USAGE)
     command(sys.argv[2:])
 
 
 if __name__ == "__main__":
     try:
         main()
+    except MdlError as e:
+        print(f"mdl: {e}", file=sys.stderr)
+        sys.exit(1)
     except KeyboardInterrupt:
         sys.exit(130)
     except BrokenPipeError:

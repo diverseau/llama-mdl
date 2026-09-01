@@ -3,8 +3,12 @@
 A small CLI for running one local [llama.cpp](https://github.com/ggml-org/llama.cpp)
 server at a time from a config file, instead of pasting flag soup into your shell.
 
-Single file, Python 3.11+ (needs `tomllib`), standard library only.
-Runs on Linux, macOS and Windows.
+`mdl.py` is a single file, Python 3.11+ (needs `tomllib`), standard library
+only. Runs on Linux, macOS and Windows.
+
+`mdl_ui.py` adds an optional terminal dashboard (`mdl ui`). It is the only
+part that needs a dependency — [Textual](https://textual.textualize.io/) —
+and the CLI never imports it, so the four commands stay dependency-free.
 
 ## Install
 
@@ -22,6 +26,12 @@ your PATH:
 ```
 @echo off
 python "%USERPROFILE%\src\mdl\mdl.py" %*
+```
+
+For the optional dashboard:
+
+```sh
+pip install textual
 ```
 
 Then write a config:
@@ -88,7 +98,11 @@ mdl run <name>   Start <name> in the background, then tail its log until the
 mdl stop         SIGTERM the running server, SIGKILL after 10s, clean up.
 mdl ps           name, pid, port and uptime, or "nothing running".
 mdl list         The models defined in the config.
+mdl ui           The dashboard. Bare `mdl` opens it too.
 ```
+
+Without textual installed, `mdl ui` fails with one line and bare `mdl` prints
+the usage string, exactly as it always did.
 
 ```console
 $ mdl list
@@ -109,12 +123,50 @@ $ mdl stop
 stopped ornith (pid 48812)
 ```
 
+## The UI
+
+`mdl ui` (or just `mdl`) opens a dashboard over the same config and the same
+state file. Anything you do in it is visible to the CLI and vice versa.
+
+Idle, it lists your models with a status dot, shows the selected model's
+parameters, and previews the exact `llama-server` command it would run.
+Running, it swaps in live telemetry: VRAM, KV-cache use, a tokens/sec
+sparkline, busy slots, and a colour-coded log tail.
+
+```
+ key          does
+ up/down, j k select a model
+ enter, r     run the selected model
+ s            stop the running server
+ R            restart
+ e            edit ngl / ctx / kv_type / port for this session
+ c            copy the llama-server command
+ p            prompt the running model without leaving the UI
+ l            focus the log, / filters it
+ g            reload the config
+ ?            help
+ q            quit the UI - the server keeps running
+```
+
+Quitting never stops a server; `s` is the only thing that does.
+
+The telemetry panels need llama.cpp's metrics endpoint, so add `--metrics`
+to a model's `args` to light them up:
+
+```toml
+args = ["--metrics"]
+```
+
+Without it the dashboard still works, and those panels say `metrics off`
+rather than failing.
+
 ## Files
 
 ```
 ~/.config/mdl/models.toml       your config
 ~/.local/state/mdl/state.json   name, pid, port and start time of the server
 ~/.local/state/mdl/<name>.log   server stdout+stderr, truncated on each run
+~/.local/state/mdl/ui-marks.json which models the UI has seen start or fail
 ```
 
 Same layout on Windows, under `%USERPROFILE%`.
