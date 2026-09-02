@@ -2,6 +2,15 @@
 
 Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
 
+## [0.4.1] - 2026-09-03
+
+### Fixed
+
+- Quitting the dashboard while a model was still loading could leave
+  the startup watcher drawing into widgets that had gone. 0.3.5
+  guarded the poll; the watcher reaches the table by its own path,
+  and that one was still open.
+
 ## [0.4.0] - 2026-09-03
 
 ### Added

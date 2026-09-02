@@ -308,10 +308,14 @@ async def main():
                      if table.ordered_rows[r].key.value != long_name][0]
         table.move_cursor(row=elsewhere)     # so a miss leaves it on the wrong one
         await pilot.pause()
-        app._restart_run(long_name)
-        await pilot.pause()
-        check("restart lands on the model it was given",
-              app._selected(), long_name)
+        ran = []
+        app.action_run = lambda: ran.append(app._selected())
+        try:
+            app._restart_run(long_name)
+            await pilot.pause()
+        finally:
+            del app.action_run
+        check("restart lands on the model it was given", ran, [long_name])
 
         # a model whose file is gone says so rather than reading 0B
         app.sizes[long_name] = None
@@ -321,18 +325,29 @@ async def main():
         check("a missing file is named, not sized", "missing" in shown, True)
         check("0B is no longer how absence looks", "0B" in shown, False)
 
-        # the poll must survive the widgets going away. Removing them is
-        # not teardown - the app reacts to that in its own way - so this
-        # asks the one question that matters: does _tick raise?
+    teardown(root)
+
+    # --- a worker finishing after the widgets have gone -------------------
+    # Removing them is not teardown, so this asks the question that
+    # matters rather than whether the app is still up: does it raise?
+    root, port = sandbox()
+    app = MdlApp(fx="off")
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
         for widget in app.query("#dash, #params, #models"):
             widget.remove()
         await pilot.pause()
-        try:
-            app._tick()
-            raised = None
-        except Exception as e:                       # noqa: BLE001
-            raised = type(e).__name__
-        check("the poll outliving its widgets is not a crash", raised, None)
+        for label, call in (("the poll", app._tick),
+                            ("the table builder", app._build_table),
+                            ("a finished start", lambda: app._after_start(
+                                "demo", True, None))):
+            try:
+                call()
+                raised = None
+            except Exception as e:               # noqa: BLE001
+                raised = type(e).__name__
+            check("%s outliving its widgets is not a crash" % label,
+                  raised, None)
     teardown(root)
     return t.done()
 

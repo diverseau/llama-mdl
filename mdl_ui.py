@@ -1160,7 +1160,10 @@ class MdlApp(App):
             pass
 
     def _build_table(self):
-        table = self.query_one("#models", DataTable)
+        try:
+            table = self.query_one("#models", DataTable)
+        except NoMatches:
+            return          # a worker finishing after the screen has gone
         keep = self._selected()
         table.clear(columns=True)
         table.add_columns("model", "size", "ctx", "")
@@ -1516,7 +1519,10 @@ class MdlApp(App):
         # read_states, because the stop that led here happened in a worker
         # and self.states does not catch up until the next poll.
         self.states = mdl.read_states()
-        table = self.query_one("#models", DataTable)
+        try:
+            table = self.query_one("#models", DataTable)
+        except NoMatches:
+            return
         for row in range(table.row_count):
             # The key, not the cell: a long name is displayed truncated,
             # and a miss here would leave the cursor on another model and
