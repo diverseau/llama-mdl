@@ -16,6 +16,7 @@ from mdl_ui import MdlApp                             # noqa: E402
 from textual.geometry import Region                  # noqa: E402
 from textual.widgets import DataTable, Input, Static  # noqa: E402
 
+BACKSLASH = chr(92)
 t = support.Tally("test_ui")
 check = t.check
 LONG = ('\n[a-model-name-far-too-long-for-the-pane]\n'
@@ -125,6 +126,35 @@ async def main():
         app.screen.query_one("#f-args", Input).value = ""
         app.screen._apply()
         await pilot.pause()
+
+        # a vision model: its projector is a second file, and it is
+        # weights on the same card as everything else
+        await pilot.press("e")
+        await pilot.pause()
+        app.screen.query_one("#f-mmproj", Input).value = str(support.FAKE)
+        app.screen._apply()
+        await pilot.pause()
+        saved = tomllib.loads(mdl.CONFIG.read_text(encoding="utf-8"))
+        check("mmproj is saved with forward slashes",
+              saved["demo"]["mmproj"], str(support.FAKE).replace(BACKSLASH, "/"))
+        check("and reaches the command line",
+              "--mmproj" in argv.text, True)
+        check("the params pane names the file, not the path",
+              support.FAKE.name in plain(app.query_one("#p-params", Static)),
+              True)
+
+        w_with, _, _ = mdl_ui.vram_estimate(["llama-server"], 1 << 30, 1 << 29)
+        w_without, _, _ = mdl_ui.vram_estimate(["llama-server"], 1 << 30)
+        check("the projector counts towards vram",
+              (w_with, w_without), (1536.0, 1024.0))
+
+        await pilot.press("e")
+        await pilot.pause()
+        app.screen.query_one("#f-mmproj", Input).value = ""
+        app.screen._apply()
+        await pilot.pause()
+        saved = tomllib.loads(mdl.CONFIG.read_text(encoding="utf-8"))
+        check("clearing mmproj removes it", "mmproj" in saved["demo"], False)
 
         # the VRAM estimate must not care which field a flag came from
         est, kv, partial = mdl_ui.vram_estimate(
@@ -291,13 +321,18 @@ async def main():
         check("a missing file is named, not sized", "missing" in shown, True)
         check("0B is no longer how absence looks", "0B" in shown, False)
 
-        # the poll must survive the widgets going away
+        # the poll must survive the widgets going away. Removing them is
+        # not teardown - the app reacts to that in its own way - so this
+        # asks the one question that matters: does _tick raise?
         for widget in app.query("#dash, #params, #models"):
             widget.remove()
         await pilot.pause()
-        app._tick()
-        check("the poll outliving its widgets is not a crash",
-              app.is_running, True)
+        try:
+            app._tick()
+            raised = None
+        except Exception as e:                       # noqa: BLE001
+            raised = type(e).__name__
+        check("the poll outliving its widgets is not a crash", raised, None)
     teardown(root)
     return t.done()
 

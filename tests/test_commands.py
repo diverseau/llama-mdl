@@ -132,4 +132,40 @@ check("the starter really does use the placeholder path",
       mdl.PLACEHOLDER in mdl.STARTER, True)
 teardown(root)
 
+# ---- vision -------------------------------------------------------------
+root, port = sandbox()
+vd = root / "vision"
+vd.mkdir()
+weights = vd / "Gemma-3-12B-Q4_K_M.gguf"
+weights.write_bytes(b"GGUF" + bytes(64))
+proj = vd / "mmproj-F16.gguf"
+proj.write_bytes(b"GGUF" + bytes(32))
+
+check("mmproj becomes --mmproj",
+      mdl.build_argv("v", {"model": "m.gguf", "mmproj": "p.gguf"}, "srv"),
+      ["srv", "-m", "m.gguf", "--mmproj", "p.gguf"])
+check("and it is a known key, not a typo",
+      "mmproj" in mdl.KNOWN, True)
+check("add finds the projector beside the weights",
+      mdl.find_mmproj(weights), proj)
+
+out, _, code = run(mdl.cmd_add, [str(weights)])
+check("add writes it into the block", code, 0)
+added = tomllib.loads(mdl.CONFIG.read_text(encoding="utf-8"))["gemma-3-12b"]
+check("as an absolute path", Path(added["mmproj"]), proj)
+check("and says so", "vision: mmproj-F16.gguf" in out, True)
+
+second = vd / "mmproj-Q8_0.gguf"
+second.write_bytes(b"GGUF")
+check("two candidates is a choice, so it declines to guess",
+      mdl.find_mmproj(weights), None)
+second.unlink()
+
+proj.unlink()
+out, _, code = run(mdl.cmd_check, [])
+check("check notices a projector that is gone",
+      "mmproj file not found" in out, True)
+check("and fails the run", code, 1)
+teardown(root)
+
 sys.exit(t.done())

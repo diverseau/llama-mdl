@@ -59,6 +59,9 @@ NAME_WIDTH = 15          # keeps the size and ctx columns on screen
 NEWLINE = chr(10)
 
 
+BACKSLASH = chr(92)
+
+
 def toml_value(v):
     if isinstance(v, bool):
         return "true" if v else "false"
@@ -437,7 +440,7 @@ class ArgvPreview(VerticalScroll):
         body.update(t)
 
 
-def vram_estimate(argv, size_bytes):
+def vram_estimate(argv, size_bytes, mmproj_bytes=0):
     """Rough (weights, kv, partial) in MB. Enough to warn, not to trust.
 
     Read off the command rather than the config, because the same flag
@@ -466,7 +469,9 @@ def vram_estimate(argv, size_bytes):
                 partial = partial or int(value) < 99
             except ValueError:
                 pass
-    return ((size_bytes or 0) / (1 << 20),
+    # The projector loads onto the card with everything else, and on a
+    # small one a gigabyte of it is not a rounding error.
+    return (((size_bytes or 0) + (mmproj_bytes or 0)) / (1 << 20),
             ctx / 1024 * (32 if quantised else 64), partial)
 
 
@@ -479,7 +484,7 @@ class ParamPane(VerticalScroll):
         yield Static(id="p-params")
         yield Static(id="p-vram")
 
-    def show(self, name, cfg, argv, size_bytes, status):
+    def show(self, name, cfg, argv, size_bytes, status, mmproj_bytes=0):
         title = Text()
         title.append(name, style="bold #bb7af7")
         badge = {"ok": (" verified", "#9ece6a"), "fail": (" failed to load", "#f7768e"),
@@ -497,14 +502,21 @@ class ParamPane(VerticalScroll):
         self.query_one("#p-meta", Static).update(meta)
 
         rows = Text()
-        for key in ("ngl", "n_cpu_moe", "ctx", "flash_attn", "kv_type",
-                    "parallel", "port"):
-            if key in cfg:
-                rows.append(f"  {key:<12}", style="#565f89")
+        for key in ("mmproj", "ngl", "n_cpu_moe", "ctx", "flash_attn",
+                    "kv_type", "parallel", "port"):
+            if key not in cfg:
+                continue
+            rows.append(f"  {key:<12}", style="#565f89")
+            if key == "mmproj":     # a path; the filename is the useful part
+                here = Path(str(cfg[key])).is_file()
+                rows.append(Path(str(cfg[key])).name
+                            + ("" if here else "  missing") + "\n",
+                            style="#c0caf5" if here else "#f7768e")
+            else:
                 rows.append(f"{cfg[key]}\n", style="#c0caf5")
         self.query_one("#p-params", Static).update(rows)
 
-        weights, kv, partial = vram_estimate(argv, size_bytes)
+        weights, kv, partial = vram_estimate(argv, size_bytes, mmproj_bytes)
         gpu = gpu_memory()
         v = Text()
         if gpu:
@@ -637,6 +649,7 @@ class EditScreen(ModalScreen):
 
     BINDINGS = [Binding("escape", "dismiss", "cancel")]
     FIELDS = ["ngl", "n_cpu_moe", "ctx", "kv_type", "parallel", "port"]
+    TEXT = {"kv_type", "mmproj"}     # everything else is a whole number
 
     def __init__(self, name, cfg):
         super().__init__()
@@ -651,6 +664,14 @@ class EditScreen(ModalScreen):
                     yield Label(f"{f:<11}", classes="edit-label")
                     yield Input(value=str(self.cfg.get(f, "")), id=f"f-{f}",
                                 placeholder="unset", classes="edit-input")
+            # The vision half of a multimodal model. Its own row rather
+            # than a line in args, because it is a path to a file that
+            # can go missing, and check has to be able to say so.
+            with Horizontal(classes="edit-row"):
+                yield Label(f"{'mmproj':<11}", classes="edit-label")
+                yield Input(value=str(self.cfg.get("mmproj", "")),
+                            id="f-mmproj", placeholder="path to mmproj-*.gguf",
+                            classes="edit-input")
             with Horizontal(classes="edit-row"):
                 yield Label(f"{'flash_attn':<11}", classes="edit-label")
                 yield Input(value="on" if self.cfg.get("flash_attn") else "off",
@@ -669,13 +690,13 @@ class EditScreen(ModalScreen):
 
     def _collect(self):
         cfg = dict(self.cfg)
-        for f in self.FIELDS:
+        for f in self.FIELDS + ["mmproj"]:
             raw = self.query_one(f"#f-{f}", Input).value.strip()
             if not raw:
                 cfg.pop(f, None)
                 continue
-            if f == "kv_type":
-                cfg[f] = raw
+            if f in self.TEXT:
+                cfg[f] = raw.replace(BACKSLASH, "/") if f == "mmproj" else raw
             else:
                 try:
                     cfg[f] = int(raw)
@@ -1062,6 +1083,7 @@ class MdlApp(App):
         self.models, self.binary = {}, ""
         self.marks = {}                # name -> "ok" | "fail" | "new"
         self.sizes = {}
+        self.mmproj_sizes = {}
         self.tok_history = deque(maxlen=SPARK_POINTS)
         self.tok_peak = 0.0       # for this server, until it is restarted
         self._last_decode = self._last_decode_at = None
@@ -1122,6 +1144,10 @@ class MdlApp(App):
                 self.sizes[name] = Path(cfg["model"]).stat().st_size
             except (OSError, KeyError):
                 self.sizes[name] = None      # not 0: the file is not there
+            try:
+                self.mmproj_sizes[name] = Path(cfg["mmproj"]).stat().st_size
+            except (OSError, KeyError):
+                self.mmproj_sizes[name] = 0
 
     def _marks_path(self):
         return mdl.STATE_DIR / "ui-marks.json"
@@ -1232,7 +1258,8 @@ class MdlApp(App):
             except mdl.MdlError as e:
                 argv, self.status_line = [], str(e)
             params.show(name, cfg, argv, self.sizes.get(name, 0),
-                        self.marks.get(name, "new"))
+                        self.marks.get(name, "new"),
+                        self.mmproj_sizes.get(name, 0))
             self.query_one("#p-argv", ArgvPreview).set_argv(argv)
         self._render_status(state)
 

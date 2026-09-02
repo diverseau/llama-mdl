@@ -2,6 +2,29 @@
 
 Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
 
+## [0.4.0] - 2026-09-03
+
+### Added
+
+- `mmproj`, per model: the vision projector a multimodal model needs
+  alongside its weights, emitted as `--mmproj`. Without it llama-server
+  loads the text half and says nothing about the missing eyes.
+- `mdl add` writes it in when it finds exactly one `mmproj-*.gguf`
+  beside the weights, and names it in the output. Two candidates is a
+  choice rather than a default, so it leaves that to you.
+- `mdl check` reports a projector whose file has gone, the same way it
+  reports missing weights, and the params pane marks it `missing`.
+- The projector counts towards the estimated VRAM. It loads onto the
+  card with everything else, and on a small one it is not a rounding
+  error.
+
+### Fixed
+
+- A test added in 0.3.5 removed widgets from a running app to check
+  the poll survives them, then asserted the app was still running -
+  which removing them is itself enough to change. It now asks the
+  question it meant to: does the poll raise?
+
 ## [0.3.5] - 2026-09-02
 
 ### Fixed

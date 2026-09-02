@@ -97,6 +97,7 @@ share one.
 | Key | llama-server flag | Notes |
 | --- | --- | --- |
 | `model` | `-m` | Required. |
+| `mmproj` | `--mmproj` | The vision projector, for a multimodal model. |
 | `ngl` | `-ngl` | |
 | `n_cpu_moe` | `--n-cpu-moe` | |
 | `ctx` | `-c` | |
@@ -112,6 +113,15 @@ It defaults to 300, which a 70B on a slow disk can exceed.
 
 Anything else in a model table is an error, so a typo like `flash_atn` tells you
 instead of silently doing nothing.
+
+### Vision models
+
+A multimodal model is two files: the weights and a projector, shipped
+alongside them as `mmproj-*.gguf`. Point `mmproj` at it and llama-server
+accepts images; leave it out and you get a text-only server that says
+nothing about the eyes it is missing. `mdl add` fills it in when it finds
+exactly one beside the weights, and `mdl check` tells you if it later goes
+away. To keep it off a full GPU, add `--no-mmproj-offload` to `args`.
 
 ## Commands
 

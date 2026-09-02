@@ -31,7 +31,7 @@ CONFIG_DIR = _base("XDG_CONFIG_HOME", ".config") / "mdl"
 CONFIG = CONFIG_DIR / "models.toml"
 STATE_DIR = _base("XDG_STATE_HOME", ".local", "state") / "mdl"
 STATE = STATE_DIR / "state.json"
-VERSION = "0.3.5"
+VERSION = "0.4.0"
 DEFAULT_BIN = "llama-server"
 CONFIG_DATA = {}          # last parsed config, for UI-only settings
 DEFAULT_PORT = 8080
@@ -43,8 +43,8 @@ READY = re.compile(r"listening on http|server is listening|HTTP server listening
 READY_TIMEOUT = 300      # seconds; ready_timeout in the config overrides
 
 KEEP_LOGS = 3            # <name>.log plus .1 .. .N-1
-KNOWN = {"model", "ngl", "n_cpu_moe", "ctx", "flash_attn", "kv_type",
-         "parallel", "port", "args"}
+KNOWN = {"model", "mmproj", "ngl", "n_cpu_moe", "ctx", "flash_attn",
+         "kv_type", "parallel", "port", "args"}
 SIMPLE = (("ngl", "-ngl"), ("n_cpu_moe", "--n-cpu-moe"), ("ctx", "-c"),
           ("parallel", "-np"), ("port", "--port"))
 
@@ -71,6 +71,7 @@ ctx = 8192        # context window
 flash_attn = true
 kv_type = "q8_0"  # quantised KV cache, needs flash_attn
 parallel = 1
+# mmproj = "/path/to/mmproj-F16.gguf"   # for a vision model
 port = 8080
 args = ["--metrics"]   # extra flags, passed through as-is
 '''
@@ -117,6 +118,8 @@ def build_argv(name, cfg, binary):
     if "model" not in cfg:
         die(f"model '{name}': missing required key 'model'")
     argv = [binary, "-m", str(cfg["model"])]
+    if "mmproj" in cfg:          # the vision half of a multimodal model
+        argv += ["--mmproj", str(cfg["mmproj"])]
     for key, flag in SIMPLE:
         if key in cfg:
             argv += [flag, str(cfg[key])]
@@ -593,6 +596,22 @@ def gguf_layers(path, window=32 << 20):
     return max(int(b) for b in blocks) + 1 if blocks else None
 
 
+def find_mmproj(model):
+    """The vision projector sitting beside a model, if there is exactly one.
+
+    Multimodal repos ship it as mmproj-<something>.gguf next to the
+    weights, and without it llama-server loads the text half and says
+    nothing about the missing eyes. Two candidates is a choice, not a
+    default, so it declines to guess.
+    """
+    try:
+        found = sorted(p for p in model.parent.glob("*.gguf")
+                       if p.name.lower().startswith("mmproj"))
+    except OSError:
+        return None
+    return found[0] if len(found) == 1 else None
+
+
 def human_size(nbytes):
     for unit, div in (("T", 1 << 40), ("G", 1 << 30),
                       ("M", 1 << 20), ("K", 1 << 10)):
@@ -639,10 +658,12 @@ def cmd_add(args):
     if name in models:
         die(f"{name} is already in {CONFIG}; pick another name")
     layers = gguf_layers(path)
+    mmproj = find_mmproj(path)
     block = (
         f"{chr(10)}[{name}]{chr(10)}"
         f'model = "{toml_path(path)}"{chr(10)}'
-        f"ngl = 99{chr(10)}ctx = 8192{chr(10)}flash_attn = true{chr(10)}"
+        + (f'mmproj = "{toml_path(mmproj)}"{chr(10)}' if mmproj else "")
+        + f"ngl = 99{chr(10)}ctx = 8192{chr(10)}flash_attn = true{chr(10)}"
         f'kv_type = "q8_0"{chr(10)}parallel = 1{chr(10)}port = {port}{chr(10)}'
         f'args = ["--metrics"]{chr(10)}')
     try:
@@ -655,6 +676,8 @@ def cmd_add(args):
     if layers:
         detail += f", {layers} layers"
     print(f"  {path.name} ({detail})")
+    if mmproj:
+        print(f"  vision: {mmproj.name}")
     print(f"  run it with: mdl run {name}")
 
 
@@ -686,6 +709,8 @@ def cmd_check(args):
             layers = gguf_layers(model)
             if layers and isinstance(cfg.get("ngl"), int) and 0 < cfg["ngl"] < layers:
                 notes.append(f"ngl {cfg['ngl']} < {layers} layers, partial offload")
+        if "mmproj" in cfg and not Path(str(cfg["mmproj"])).is_file():
+            notes.append("mmproj file not found")
         problems += len(notes)
         ports.setdefault(cfg.get("port", DEFAULT_PORT), []).append(name)
         if blank:            # a to-do, so it must not fail the check
