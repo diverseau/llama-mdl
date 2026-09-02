@@ -2,6 +2,20 @@
 
 Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
 
+## [0.3.4] - 2026-09-02
+
+### Changed
+
+- The estimated VRAM bar is split into weights and kv cache, with
+  each figure spelled out beneath it. Past the card's capacity it
+  scales to the total rather than clipping, so the parts stay
+  visible: once a bar is full, what is in it is the question.
+- A config that keeps weights off the gpu - `n_cpu_moe`, `-ot`, a
+  partial `-ngl` - now reads `<= 16.3 / 12.0 G` in ordinary text
+  rather than red. The estimate counts the whole file as resident,
+  which for a MoE model with experts on the cpu is far too high, so
+  it was calling working configurations broken.
+
 ## [0.3.3] - 2026-09-02
 
 ### Fixed

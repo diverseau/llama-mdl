@@ -126,22 +126,43 @@ async def main():
         await pilot.pause()
 
         # the VRAM estimate must not care which field a flag came from
-        est, kv = mdl_ui.vram_estimate(
+        est, kv, partial = mdl_ui.vram_estimate(
             ["llama-server", "-c", "65536", "--cache-type-k", "q8_0"], 1 << 30)
         check("a quantised cache halves the kv allowance", (est, kv),
               (1024.0, 2048.0))
-        _, plain_kv = mdl_ui.vram_estimate(["llama-server", "-c", "65536"], 0)
+        check("nothing here keeps weights off the gpu", partial, False)
+        _, plain_kv, _ = mdl_ui.vram_estimate(["llama-server", "-c", "65536"], 0)
         check("an unquantised one does not", plain_kv, 4096.0)
-        _, from_key = mdl_ui.vram_estimate(
+        _, from_key, _ = mdl_ui.vram_estimate(
             mdl.build_argv("demo", {"model": "m.gguf", "ctx": 65536,
                                     "kv_type": "q8_0"}, "llama-server"), 0)
-        _, from_args = mdl_ui.vram_estimate(
+        _, from_args, _ = mdl_ui.vram_estimate(
             mdl.build_argv("demo", {"model": "m.gguf", "ctx": 65536,
                                     "args": ["--cache-type-k", "q8_0"]},
                            "llama-server"), 0)
         check("kv_type and args agree", from_key, from_args)
         check("and a missing ctx falls back to llama.cpp's default",
               mdl_ui.vram_estimate(["llama-server"], 0)[1], 256.0)
+
+        # weights that are not all on the card make the figure a ceiling
+        for flags in (["--n-cpu-moe", "14"], ["-ngl", "20"],
+                      ["-ot", "exps=CPU"], ["--cpu-moe"]):
+            check("%s means the estimate is an upper bound" % flags[0],
+                  mdl_ui.vram_estimate(["llama-server"] + flags, 0)[2], True)
+        check("a full offload does not",
+              mdl_ui.vram_estimate(["llama-server", "-ngl", "99"], 0)[2], False)
+
+        # the bar shows what is in it, not just how full it is
+        parts = [(6144.0, "#7aa2f7"), (2048.0, "#bb7af7")]
+        drawn = mdl_ui.stacked_bar(parts, 12288, width=12).plain
+        check("segments are sized in proportion",
+              (drawn.count("█"), len(drawn)), (8, 12))
+        over = mdl_ui.stacked_bar([(12288.0, "a"), (4096.0, "b")], 12288,
+                                  width=12)
+        check("an overflowing bar still shows both parts", over.plain,
+              "█" * 12)
+        check("in the proportion of the total, not the card",
+              [sp.end - sp.start for sp in over.spans], [9, 3])
 
         # args is the escape hatch for every flag mdl has no key for
         await pilot.press("e")

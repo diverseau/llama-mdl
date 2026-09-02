@@ -52,6 +52,7 @@ WORDMARK = r"""
 """.strip("\n")
 
 GRADIENT = ["#7dcfff", "#7aa2f7", "#8a7af7", "#9d7cf7", "#bb7af7"]
+WEIGHTS_COLOUR, KV_COLOUR = "#7aa2f7", "#bb7af7"
 SPARK_CHARS = " ▁▂▃▄▅▆▇█"
 NAME_WIDTH = 15          # keeps the size and ctx columns on screen
 NEWLINE = chr(10)
@@ -184,6 +185,29 @@ def bar(fraction, width=20, fill="█", empty="░"):
     fraction = 0.0 if fraction is None else max(0.0, min(1.0, fraction))
     filled = int(round(fraction * width))
     return fill * filled + empty * (width - filled)
+
+
+def stacked_bar(parts, capacity, width=18, empty="░"):
+    """One bar, several coloured runs, scaled to capacity.
+
+    Past capacity it scales to the total instead, so the parts stay
+    visible: once a bar is full, how full stopped being the question
+    and what is in it started being one. Rounds each run up, because a
+    part that is present should occupy at least a cell.
+    """
+    t = Text()
+    capacity = max(capacity, sum(size for size, _ in parts))
+    used = 0
+    for size, colour in parts:
+        cells = min(width - used, max(1, round(size / max(capacity, 1) * width))
+                    if size > 0 else 0)
+        if cells > 0:
+            t.append("█" * cells, style=colour)
+            used += cells
+        if used >= width:
+            break
+    t.append(empty * (width - used), style="#1f2430")
+    return t
 
 
 def bar_colour(fraction):
@@ -413,13 +437,17 @@ class ArgvPreview(VerticalScroll):
 
 
 def vram_estimate(argv, size_bytes):
-    """Rough (weights, kv) in MB. Enough to warn, not to trust.
+    """Rough (weights, kv, partial) in MB. Enough to warn, not to trust.
 
     Read off the command rather than the config, because the same flag
     can arrive either way: --cache-type-k in args has to count for as
     much as kv_type does, and both land here.
+
+    `partial` says the weights figure is an upper bound: some flag keeps
+    part of the model off the GPU, and how much cannot be known without
+    reading the tensor table and replaying llama.cpp's placement rules.
     """
-    ctx, quantised = 4096, False       # llama.cpp's own default context
+    ctx, quantised, partial = 4096, False, False   # 4096 is llama.cpp's default
     for i, flag in enumerate(argv):
         value = argv[i + 1] if i + 1 < len(argv) else ""
         if flag in ("-c", "--ctx-size"):
@@ -429,7 +457,16 @@ def vram_estimate(argv, size_bytes):
                 pass
         elif flag in ("-ctk", "--cache-type-k"):
             quantised = value not in ("f16", "f32", "")
-    return (size_bytes or 0) / (1 << 20), ctx / 1024 * (32 if quantised else 64)
+        elif flag in ("--n-cpu-moe", "-ncmoe", "--cpu-moe", "-cmoe",
+                      "-ot", "--override-tensor"):
+            partial = True
+        elif flag in ("-ngl", "--n-gpu-layers", "--gpu-layers"):
+            try:
+                partial = partial or int(value) < 99
+            except ValueError:
+                pass
+    return ((size_bytes or 0) / (1 << 20),
+            ctx / 1024 * (32 if quantised else 64), partial)
 
 
 class ParamPane(VerticalScroll):
@@ -463,15 +500,30 @@ class ParamPane(VerticalScroll):
                 rows.append(f"{cfg[key]}\n", style="#c0caf5")
         self.query_one("#p-params", Static).update(rows)
 
-        est, kv = vram_estimate(argv, size_bytes)
+        weights, kv, partial = vram_estimate(argv, size_bytes)
         gpu = gpu_memory()
         v = Text()
         if gpu:
-            frac = min((est + kv) / max(gpu[1], 1), 1.0)
+            total, room = weights + kv, gpu[1]
             v.append("est VRAM  ", style="#565f89")
-            v.append(bar(frac, 18), style=bar_colour(frac))
-            v.append(f"  {(est + kv) / 1024:.1f} / {gpu[1] / 1024:.1f} G",
-                     style="#c0caf5")
+            v.append(stacked_bar([(weights, WEIGHTS_COLOUR), (kv, KV_COLOUR)],
+                                 room))
+            # An upper bound that exceeds the card is not news: the flag
+            # that makes it an upper bound is there to keep it off the
+            # card. Red is for a figure we actually believe.
+            over = total > room and not partial
+            v.append("  %s%.1f / %.1f G" % ("≤ " if partial else "",
+                                            total / 1024, room / 1024),
+                     style="#f7768e" if over else "#c0caf5")
+            v.append(NEWLINE + " " * 10)
+            v.append("weights", style=WEIGHTS_COLOUR)
+            v.append(" %.1fG" % (weights / 1024), style="#565f89")
+            v.append("  kv", style=KV_COLOUR)
+            v.append(" %.1fG" % (kv / 1024), style="#565f89")
+            if partial:
+                v.append(NEWLINE + " " * 10)
+                v.append("some weights stay on the cpu; the real figure "
+                         "is lower", style="#565f89")
         self.query_one("#p-vram", Static).update(v)
 
 
