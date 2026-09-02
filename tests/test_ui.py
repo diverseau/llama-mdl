@@ -1,6 +1,7 @@
 """Headless drive of the TUI. No real server, no real config."""
 import asyncio
 import sys
+import inspect
 import shlex
 import time
 import tomllib
@@ -242,6 +243,61 @@ async def main():
             await pilot.pause()
             check("selection resolves to the real name, not the label",
                   app._selected() in app.models, True)
+    teardown(root)
+
+    # --- the small print ---------------------------------------------------
+    root, port = sandbox(extra=LONG)
+    app = MdlApp(fx="off")
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+
+        # two cards are one pool, not whichever one nvidia-smi lists first
+        two = "1000, 8192" + chr(10) + "2000, 8192" + chr(10)
+        mdl_ui._GPU_CACHE["at"] = 0
+        real_run = mdl_ui.subprocess.run
+        mdl_ui.subprocess.run = lambda *a, **k: type(
+            "R", (), {"stdout": two})()
+        mdl_ui.shutil.which = lambda x: "nvidia-smi"
+        try:
+            check("both cards are counted", mdl_ui.gpu_memory(), (3000, 16384))
+        finally:
+            mdl_ui.subprocess.run = real_run
+            mdl_ui._GPU_CACHE["at"] = 0
+
+        # readiness is /health, and the timeout is the configured one
+        src = inspect.getsource(app._watch_start)
+        check("startup waits on /health, not on a log line",
+              "server_ready" in src and "READY.search" not in src, True)
+        check("and honours ready_timeout from the config",
+              "ready_timeout()" in src, True)
+
+        # restarting must not pick a row by its displayed label
+        table = app.query_one("#models", DataTable)
+        long_name = [n for n in app.models if len(n) > mdl_ui.NAME_WIDTH][0]
+        elsewhere = [r for r in range(table.row_count)
+                     if table.ordered_rows[r].key.value != long_name][0]
+        table.move_cursor(row=elsewhere)     # so a miss leaves it on the wrong one
+        await pilot.pause()
+        app._restart_run(long_name)
+        await pilot.pause()
+        check("restart lands on the model it was given",
+              app._selected(), long_name)
+
+        # a model whose file is gone says so rather than reading 0B
+        app.sizes[long_name] = None
+        app._build_table()
+        await pilot.pause()
+        shown = [table.get_row_at(r)[1].plain for r in range(table.row_count)]
+        check("a missing file is named, not sized", "missing" in shown, True)
+        check("0B is no longer how absence looks", "0B" in shown, False)
+
+        # the poll must survive the widgets going away
+        for widget in app.query("#dash, #params, #models"):
+            widget.remove()
+        await pilot.pause()
+        app._tick()
+        check("the poll outliving its widgets is not a crash",
+              app.is_running, True)
     teardown(root)
     return t.done()
 

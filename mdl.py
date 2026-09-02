@@ -31,7 +31,7 @@ CONFIG_DIR = _base("XDG_CONFIG_HOME", ".config") / "mdl"
 CONFIG = CONFIG_DIR / "models.toml"
 STATE_DIR = _base("XDG_STATE_HOME", ".local", "state") / "mdl"
 STATE = STATE_DIR / "state.json"
-VERSION = "0.3.4"
+VERSION = "0.3.5"
 DEFAULT_BIN = "llama-server"
 CONFIG_DATA = {}          # last parsed config, for UI-only settings
 DEFAULT_PORT = 8080
@@ -239,7 +239,9 @@ def migrate_state():
     """Move a pre-0.3 single state.json into the per-server directory.
 
     Someone upgrading with a server up should keep control of it rather
-    than be told nothing is running.
+    than be told nothing is running. This, STATE, and the test that
+    covers them can go in 0.5: by then nobody is stopping a server they
+    started two minor versions ago.
     """
     if not STATE.exists():
         return
@@ -592,7 +594,8 @@ def gguf_layers(path, window=32 << 20):
 
 
 def human_size(nbytes):
-    for unit, div in (("T", 1 << 40), ("G", 1 << 30), ("M", 1 << 20)):
+    for unit, div in (("T", 1 << 40), ("G", 1 << 30),
+                      ("M", 1 << 20), ("K", 1 << 10)):
         if nbytes >= div:
             return f"{nbytes / div:.1f}{unit}"
     return f"{nbytes}B"

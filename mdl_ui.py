@@ -23,6 +23,7 @@ from rich.text import Text
 from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
+from textual.css.query import NoMatches
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.reactive import reactive
 from textual.screen import ModalScreen
@@ -220,13 +221,6 @@ def bar_colour(fraction):
     return "#9ece6a"
 
 
-def human_size(nbytes):
-    for unit, div in (("T", 1 << 40), ("G", 1 << 30), ("M", 1 << 20), ("K", 1 << 10)):
-        if nbytes >= div:
-            return f"{nbytes / div:.1f}{unit}"
-    return f"{nbytes}B"
-
-
 # --------------------------------------------------------------------------
 # telemetry. Every one of these degrades to None rather than raising: a panel
 # going grey is always better than the dashboard falling over.
@@ -277,7 +271,11 @@ _GPU_CACHE = {"at": -1e9, "value": None}
 
 
 def gpu_memory():
-    """(used_mib, total_mib) from nvidia-smi, or None. Cached for GPU_TTL."""
+    """(used_mib, total_mib) across every card, or None. Cached for GPU_TTL.
+
+    Summed, because a box with two cards has two lines here and reading
+    only the first reported the wrong card's memory as the whole system's.
+    """
     now = time.monotonic()
     if now - _GPU_CACHE["at"] < GPU_TTL:
         return _GPU_CACHE["value"]
@@ -292,8 +290,11 @@ def gpu_memory():
              "--format=csv,noheader,nounits"],
             capture_output=True, text=True, timeout=4,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout
-        used, total = raw.strip().splitlines()[0].split(",")
-        _GPU_CACHE["value"] = (int(used), int(total))
+        used = total = 0
+        for line in raw.strip().splitlines():
+            u, t = line.split(",")
+            used, total = used + int(u), total + int(t)
+        _GPU_CACHE["value"] = (used, total) if total else None
     except (OSError, ValueError, IndexError, subprocess.SubprocessError):
         _GPU_CACHE["value"] = None
     return _GPU_CACHE["value"]
@@ -488,8 +489,11 @@ class ParamPane(VerticalScroll):
 
         meta = Text()
         meta.append(Path(cfg["model"]).name + "\n", style="#565f89")
-        meta.append(human_size(size_bytes) if size_bytes else "?", style="#c0caf5")
-        meta.append("  on disk", style="#565f89")
+        if size_bytes:
+            meta.append(mdl.human_size(size_bytes), style="#c0caf5")
+            meta.append("  on disk", style="#565f89")
+        else:
+            meta.append("not on disk", style="#f7768e")
         self.query_one("#p-meta", Static).update(meta)
 
         rows = Text()
@@ -605,14 +609,14 @@ class HelpScreen(ModalScreen):
     ROWS = [
         ("↑ ↓ / j k", "select a model"),
         ("enter / r", "run the selected model"),
-        ("s", "stop the running server"),
+        ("s", "stop the selected server"),
         ("R", "restart (stop, then run again)"),
         ("e", "edit params for the selected model"),
         ("c", "copy the llama-server command"),
         ("p", "prompt the running model"),
         ("l", "focus the log pane"),
         ("/", "filter the log"),
-        ("g", "refresh GPU / telemetry now"),
+        ("g", "reload models.toml and refresh telemetry"),
         ("?", "this help"),
         ("q", "quit the UI (the server keeps running)"),
     ]
@@ -1117,7 +1121,7 @@ class MdlApp(App):
             try:
                 self.sizes[name] = Path(cfg["model"]).stat().st_size
             except (OSError, KeyError):
-                self.sizes[name] = 0
+                self.sizes[name] = None      # not 0: the file is not there
 
     def _marks_path(self):
         return mdl.STATE_DIR / "ui-marks.json"
@@ -1144,8 +1148,10 @@ class MdlApp(App):
             # The pane is a fixed width, so a long name used to push the
             # numbers off the right edge - 65536 rendered as 65, silently.
             label = name if len(name) <= NAME_WIDTH else name[:NAME_WIDTH - 1] + "…"
-            table.add_row(Text(label, style="#c0caf5"),
-                          Text(human_size(self.sizes.get(name, 0)), style="#565f89"),
+            size = self.sizes.get(name)
+            cell = (Text("missing", style="#f7768e") if size is None
+                    else Text(mdl.human_size(size), style="#565f89"))
+            table.add_row(Text(label, style="#c0caf5"), cell,
                           Text(str(cfg.get("ctx", "-")), style="#565f89"),
                           Text(dot[0], style=dot[1]), key=name)
         if keep:
@@ -1160,7 +1166,10 @@ class MdlApp(App):
         return self.models.get(name, {})
 
     def _selected(self):
-        table = self.query_one("#models", DataTable)
+        try:
+            table = self.query_one("#models", DataTable)
+        except NoMatches:
+            return None
         if not table.row_count:
             return None
         try:
@@ -1185,9 +1194,12 @@ class MdlApp(App):
         # Whatever is running, the panes follow the selection: with
         # several servers up, 'the' running one is not a thing.
         self.states = mdl.read_states()
+        try:
+            dash = self.query_one("#dash", Dashboard)
+            params = self.query_one("#params", ParamPane)
+        except NoMatches:
+            return          # the interval outlived the screen; we are closing
         state = self.states.get(self._selected())
-        dash = self.query_one("#dash", Dashboard)
-        params = self.query_one("#params", ParamPane)
         if state and state["name"] != self._following:
             self._following = state["name"]   # a different server's rate
             self.tok_history.clear()
@@ -1394,19 +1406,20 @@ class MdlApp(App):
         self._log_path, self._log_pos = Path(log), 0
         self.query_one("#log", RichLog).clear()
         self.status_line = "starting " + name
-        self._watch_start(name, proc)
+        self._watch_start(name, proc, port)
 
     @work(thread=True, group="start")
-    def _watch_start(self, name, proc):
-        """Mark the model verified once it reports ready, or failed if it dies."""
-        deadline = time.monotonic() + mdl.READY_TIMEOUT
-        log = mdl.STATE_DIR / (name + ".log")
+    def _watch_start(self, name, proc, port):
+        """Mark the model verified once it reports ready, or failed if it dies.
+
+        Readiness is /health answering, not a line in the log. The log
+        wording has already changed once between llama.cpp builds; the
+        endpoint is the contract, and mdl run has always used it.
+        """
+        limit = mdl.ready_timeout()
+        deadline = time.monotonic() + limit
         while time.monotonic() < deadline:
-            try:
-                text = log.read_text(errors="replace")
-            except OSError:
-                text = ""
-            if mdl.READY.search(text):
+            if mdl.server_ready(port):
                 self.marks[name] = "ok"
                 self._save_marks()
                 self.call_from_thread(self._after_start, name, True, None)
@@ -1418,9 +1431,9 @@ class MdlApp(App):
                 self.call_from_thread(self._after_start, name, False, proc.returncode)
                 return
             time.sleep(0.3)
-        self.call_from_thread(self._after_start, name, False, None)
+        self.call_from_thread(self._after_start, name, False, None, limit)
 
-    def _after_start(self, name, ok, code):
+    def _after_start(self, name, ok, code, limit=None):
         self._build_table()
         self.status_line = ""
         if ok:
@@ -1431,7 +1444,8 @@ class MdlApp(App):
                 severity="error", timeout=10)
         else:
             self.notify(
-                "{} did not report ready in {}s".format(name, mdl.READY_TIMEOUT),
+                "{} did not report ready in {:g}s".format(
+                    name, limit if limit is not None else mdl.READY_TIMEOUT),
                 severity="warning", timeout=10)
         self._tick()
 
@@ -1447,26 +1461,40 @@ class MdlApp(App):
         self._do_stop(name)
 
     @work(thread=True, group="stop")
-    def _do_stop(self, name):
+    def _do_stop(self, name, then=None):
         try:
             mdl.cmd_stop([name])
             self.call_from_thread(self.notify, "stopped " + name)
         except mdl.MdlError as e:
             self.call_from_thread(self.notify, str(e), severity="error")
+            then = None
         self.call_from_thread(setattr, self, "status_line", "")
+        if then:
+            self.call_from_thread(then, name)
         self.call_from_thread(self._tick)
 
     def action_restart(self):
         name = self._selected()
         if not name:
             return
-        self.action_stop()
-        self.set_timer(1.5, lambda: self._restart_run(name))
+        if name not in self.states:
+            self._restart_run(name)      # nothing to stop; just start it
+            return
+        self.status_line = "restarting " + name
+        # Chained off the stop, not a timer: a stop that takes longer than
+        # the guess used to leave the run colliding with its own old port.
+        self._do_stop(name, then=self._restart_run)
 
     def _restart_run(self, name):
+        # read_states, because the stop that led here happened in a worker
+        # and self.states does not catch up until the next poll.
+        self.states = mdl.read_states()
         table = self.query_one("#models", DataTable)
         for row in range(table.row_count):
-            if table.get_row_at(row)[0].plain == name:
+            # The key, not the cell: a long name is displayed truncated,
+            # and a miss here would leave the cursor on another model and
+            # start that one instead.
+            if table.ordered_rows[row].key.value == name:
                 table.move_cursor(row=row)
                 break
         self.action_run()

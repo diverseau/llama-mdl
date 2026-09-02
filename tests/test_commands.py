@@ -42,8 +42,9 @@ check("add honours an explicit port",
       tomllib.loads(mdl.CONFIG.read_text(encoding="utf-8"))["ported"]["port"], 9001)
 
 check("gguf_layers returns None for a non-gguf", mdl.gguf_layers(GGUF), None)
-check("human_size", [mdl.human_size(n) for n in (900, 5 << 20, 3 << 30)],
-      ["900B", "5.0M", "3.0G"])
+check("human_size",
+      [mdl.human_size(n) for n in (900, 4096, 5 << 20, 3 << 30, 2 << 40)],
+      ["900B", "4.0K", "5.0M", "3.0G", "2.0T"])
 
 # ---------------------------------------------------------------- check ----
 # everything above wrote *valid* entries, so break one on purpose

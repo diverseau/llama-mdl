@@ -2,6 +2,40 @@
 
 Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
 
+## [0.3.5] - 2026-09-02
+
+### Fixed
+
+- The dashboard decided a server was ready by matching a line in
+  its log, while `mdl run` asked `/health`. The log wording has
+  already changed once between llama.cpp builds; the endpoint is
+  the contract, and both use it now.
+- The dashboard ignored `ready_timeout` and always gave up after
+  300 seconds, so a slow model that `mdl run` waited for happily
+  was reported as failing to start.
+- `R` waited a fixed 1.5 seconds between the stop and the run, and
+  a slower stop left the restart colliding with its own old port.
+  It now waits for the stop to finish. On a model that is not up,
+  it starts it instead of first saying it is not running.
+- `R` also picked its row by the displayed name, so restarting a
+  model whose name is too long for the pane started whichever one
+  the cursor happened to be on.
+- VRAM was read from the first card `nvidia-smi` listed rather than
+  summed across them, so a second GPU was invisible.
+- The poll could outlive the widgets it draws into and raise on the
+  way out of the app.
+
+### Changed
+
+- A model whose file is not on disk reads `missing` in the size
+  column instead of `0B`, which was indistinguishable from a file
+  that is genuinely empty.
+- Help says `s` stops the *selected* server, which has been true
+  since 0.3.0, and that `g` reloads `models.toml` as well as the
+  telemetry - useful, and previously undocumented.
+- One `human_size`, in `mdl`. There were two, with different units:
+  the same byte count printed differently depending on the caller.
+
 ## [0.3.4] - 2026-09-02
 
 ### Changed
