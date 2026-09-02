@@ -31,7 +31,7 @@ CONFIG_DIR = _base("XDG_CONFIG_HOME", ".config") / "mdl"
 CONFIG = CONFIG_DIR / "models.toml"
 STATE_DIR = _base("XDG_STATE_HOME", ".local", "state") / "mdl"
 STATE = STATE_DIR / "state.json"
-VERSION = "0.3.2"
+VERSION = "0.3.3"
 DEFAULT_BIN = "llama-server"
 CONFIG_DATA = {}          # last parsed config, for UI-only settings
 DEFAULT_PORT = 8080
@@ -97,6 +97,17 @@ def load_config():
     binary = (os.environ.get("MDL_LLAMA_SERVER")
               or data.get("llama_server") or DEFAULT_BIN)
     return models, str(binary)
+
+
+def toml_path(path):
+    """A filesystem path as a TOML basic string.
+
+    Backslashes become forward slashes rather than escapes, because
+    that is what the config asks people to write. A quote is legal in
+    a POSIX filename and would otherwise close the string early.
+    """
+    return str(path).replace(chr(92), "/").replace(chr(34),
+                                                   chr(92) + chr(34))
 
 
 def build_argv(name, cfg, binary):
@@ -627,7 +638,7 @@ def cmd_add(args):
     layers = gguf_layers(path)
     block = (
         f"{chr(10)}[{name}]{chr(10)}"
-        f'model = "{str(path).replace(chr(92), "/")}"{chr(10)}'
+        f'model = "{toml_path(path)}"{chr(10)}'
         f"ngl = 99{chr(10)}ctx = 8192{chr(10)}flash_attn = true{chr(10)}"
         f'kv_type = "q8_0"{chr(10)}parallel = 1{chr(10)}port = {port}{chr(10)}'
         f'args = ["--metrics"]{chr(10)}')

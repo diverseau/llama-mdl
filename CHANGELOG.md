@@ -2,6 +2,19 @@
 
 Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
 
+## [0.3.3] - 2026-09-02
+
+### Fixed
+
+- Saving an argument containing a double quote corrupted the config.
+  The TOML writer escaped backslashes but not quotes, so a value like
+  the JSON `--chat-template-kwargs` takes closed its string early and
+  left the `args` array open - the next read failed to parse, and the
+  edit was lost. Quotes are escaped now, after the backslashes rather
+  than before, so the escape characters are not themselves escaped.
+- `mdl add` had the same hole: a quote in a model's path, legal on
+  POSIX, produced a config that would not parse.
+
 ## [0.3.2] - 2026-09-02
 
 ### Added

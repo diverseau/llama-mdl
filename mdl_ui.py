@@ -64,7 +64,12 @@ def toml_value(v):
         return str(v)
     if isinstance(v, list):
         return "[" + ", ".join(toml_value(x) for x in v) + "]"
-    return chr(34) + str(v).replace(chr(92), chr(92) * 2) + chr(34)
+    # Backslashes first, then quotes - reversing the order would escape
+    # the backslash this line just added. A value like the JSON that
+    # --chat-template-kwargs takes is nothing but quotes, and unescaped
+    # they close the string early and leave the args array open.
+    return chr(34) + (str(v).replace(chr(92), chr(92) * 2)
+                            .replace(chr(34), chr(92) + chr(34))) + chr(34)
 
 
 def write_params(name, cfg, path=None):

@@ -1,6 +1,7 @@
 """Headless drive of the TUI. No real server, no real config."""
 import asyncio
 import sys
+import shlex
 import time
 import tomllib
 from pathlib import Path
@@ -95,6 +96,34 @@ async def main():
 
         _, _, code = support.run(mdl.load_config)
         check("config still parses after the write", code, 0)
+
+        # a quoted value must survive the round trip through models.toml.
+        # --chat-template-kwargs takes JSON, which is nothing but quotes;
+        # unescaped they close the string and leave the args array open,
+        # corrupting the config on save.
+        json_arg = '{"reasoning_effort":"low"}'
+        await pilot.press("e")
+        await pilot.pause()
+        app.screen.query_one("#f-args", Input).value = shlex.join(
+            ["--chat-template-kwargs", json_arg])
+        app.screen._apply()
+        await pilot.pause()
+        saved = tomllib.loads(mdl.CONFIG.read_text(encoding="utf-8"))
+        check("a quoted arg survives the save",
+              saved["demo"]["args"], ["--chat-template-kwargs", json_arg])
+
+        await pilot.press("e")
+        await pilot.pause()
+        app.screen._apply()          # saving again must not double-escape
+        await pilot.pause()
+        saved = tomllib.loads(mdl.CONFIG.read_text(encoding="utf-8"))
+        check("and again on the next save",
+              saved["demo"]["args"], ["--chat-template-kwargs", json_arg])
+        await pilot.press("e")
+        await pilot.pause()
+        app.screen.query_one("#f-args", Input).value = ""
+        app.screen._apply()
+        await pilot.pause()
 
         # the VRAM estimate must not care which field a flag came from
         est, kv = mdl_ui.vram_estimate(
