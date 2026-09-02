@@ -2,7 +2,7 @@
 
 Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
 
-## [Unreleased]
+## [0.3.2] - 2026-09-02
 
 ### Added
 
