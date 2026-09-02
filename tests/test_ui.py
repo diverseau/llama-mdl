@@ -96,6 +96,24 @@ async def main():
         _, _, code = support.run(mdl.load_config)
         check("config still parses after the write", code, 0)
 
+        # the VRAM estimate must not care which field a flag came from
+        est, kv = mdl_ui.vram_estimate(
+            ["llama-server", "-c", "65536", "--cache-type-k", "q8_0"], 1 << 30)
+        check("a quantised cache halves the kv allowance", (est, kv),
+              (1024.0, 2048.0))
+        _, plain_kv = mdl_ui.vram_estimate(["llama-server", "-c", "65536"], 0)
+        check("an unquantised one does not", plain_kv, 4096.0)
+        _, from_key = mdl_ui.vram_estimate(
+            mdl.build_argv("demo", {"model": "m.gguf", "ctx": 65536,
+                                    "kv_type": "q8_0"}, "llama-server"), 0)
+        _, from_args = mdl_ui.vram_estimate(
+            mdl.build_argv("demo", {"model": "m.gguf", "ctx": 65536,
+                                    "args": ["--cache-type-k", "q8_0"]},
+                           "llama-server"), 0)
+        check("kv_type and args agree", from_key, from_args)
+        check("and a missing ctx falls back to llama.cpp's default",
+              mdl_ui.vram_estimate(["llama-server"], 0)[1], 256.0)
+
         # args is the escape hatch for every flag mdl has no key for
         await pilot.press("e")
         await pilot.pause()

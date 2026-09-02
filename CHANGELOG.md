@@ -10,6 +10,14 @@ Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
   flags through verbatim; now you can set it without leaving the TUI,
   which is the answer to every llama-server flag mdl has no key for.
 
+### Fixed
+
+- The VRAM estimate ignored `args`, so moving `--cache-type-k` out of
+  `kv_type` and into `args` added two gigabytes to the figure without
+  changing the command. It now reads the context size and cache type
+  off the built command line, where every flag ends up whichever
+  field it came from.
+
 ## [0.3.1] - 2026-09-02
 
 ### Fixed

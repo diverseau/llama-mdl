@@ -407,6 +407,26 @@ class ArgvPreview(VerticalScroll):
         body.update(t)
 
 
+def vram_estimate(argv, size_bytes):
+    """Rough (weights, kv) in MB. Enough to warn, not to trust.
+
+    Read off the command rather than the config, because the same flag
+    can arrive either way: --cache-type-k in args has to count for as
+    much as kv_type does, and both land here.
+    """
+    ctx, quantised = 4096, False       # llama.cpp's own default context
+    for i, flag in enumerate(argv):
+        value = argv[i + 1] if i + 1 < len(argv) else ""
+        if flag in ("-c", "--ctx-size"):
+            try:
+                ctx = int(value)
+            except ValueError:
+                pass
+        elif flag in ("-ctk", "--cache-type-k"):
+            quantised = value not in ("f16", "f32", "")
+    return (size_bytes or 0) / (1 << 20), ctx / 1024 * (32 if quantised else 64)
+
+
 class ParamPane(VerticalScroll):
     """Model metadata, tunable params, and the argv preview."""
 
@@ -438,9 +458,7 @@ class ParamPane(VerticalScroll):
                 rows.append(f"{cfg[key]}\n", style="#c0caf5")
         self.query_one("#p-params", Static).update(rows)
 
-        # Rough: weights plus a KV allowance. Enough to warn, not to trust.
-        est = (size_bytes or 0) / (1 << 20)
-        kv = cfg.get("ctx", 4096) / 1024 * (32 if cfg.get("kv_type") else 64)
+        est, kv = vram_estimate(argv, size_bytes)
         gpu = gpu_memory()
         v = Text()
         if gpu:
