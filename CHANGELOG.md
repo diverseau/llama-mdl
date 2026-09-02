@@ -2,6 +2,14 @@
 
 Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- An `args` row in the edit screen. The config key already passed
+  flags through verbatim; now you can set it without leaving the TUI,
+  which is the answer to every llama-server flag mdl has no key for.
+
 ## [0.3.1] - 2026-09-02
 
 ### Fixed

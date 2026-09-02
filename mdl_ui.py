@@ -8,6 +8,7 @@ the same state file, so they can never disagree about what is running.
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import time
@@ -575,6 +576,14 @@ class EditScreen(ModalScreen):
                 yield Label(f"{'flash_attn':<11}", classes="edit-label")
                 yield Input(value="on" if self.cfg.get("flash_attn") else "off",
                             id="f-flash_attn", classes="edit-input")
+            # Everything llama-server takes that mdl has no key for. Better
+            # one row here than a form that chases llama.cpp's flag list.
+            with Horizontal(classes="edit-row"):
+                yield Label(f"{'args':<11}", classes="edit-label")
+                yield Input(value=shlex.join(str(a) for a in
+                                             self.cfg.get("args", [])),
+                            id="f-args", placeholder="--metrics --no-mmap",
+                            classes="edit-input")
             yield Label(Text(" enter saves to models.toml · esc cancels",
                         style="#565f89"))
             yield Button("apply", variant="primary", id="apply")
@@ -594,6 +603,20 @@ class EditScreen(ModalScreen):
                 except ValueError:
                     self.notify(f"{f} must be a whole number", severity="error")
                     return None
+        raw = self.query_one("#f-args", Input).value.strip()
+        if not raw:
+            cfg.pop("args", None)
+        elif os.name == "nt" and chr(92) in raw:
+            # shlex would eat them, and a path that quietly lost its
+            # separators is worse than being told to type it the other way.
+            self.notify("args: use forward slashes in paths", severity="error")
+            return None
+        else:
+            try:
+                cfg["args"] = shlex.split(raw)
+            except ValueError as e:              # an unbalanced quote
+                self.notify("args: %s" % e, severity="error")
+                return None
         fa = self.query_one("#f-flash_attn", Input).value.strip().lower()
         if fa in ("on", "true", "yes", "1"):
             cfg["flash_attn"] = True

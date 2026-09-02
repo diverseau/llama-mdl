@@ -96,6 +96,29 @@ async def main():
         _, _, code = support.run(mdl.load_config)
         check("config still parses after the write", code, 0)
 
+        # args is the escape hatch for every flag mdl has no key for
+        await pilot.press("e")
+        await pilot.pause()
+        app.screen.query_one("#f-args", Input).value = '--metrics --alias "a b"'
+        app.screen._apply()
+        await pilot.pause()
+        saved = tomllib.loads(mdl.CONFIG.read_text(encoding="utf-8"))
+        check("args are saved as a list, quotes respected",
+              saved["demo"]["args"], ["--metrics", "--alias", "a b"])
+        check("and reach the command line",
+              "--metrics" in argv.text and "--alias" in argv.text, True)
+
+        await pilot.press("e")
+        await pilot.pause()
+        check("args round-trip back into the field",
+              app.screen.query_one("#f-args", Input).value,
+              "--metrics --alias 'a b'")
+        app.screen.query_one("#f-args", Input).value = ""
+        app.screen._apply()
+        await pilot.pause()
+        saved = tomllib.loads(mdl.CONFIG.read_text(encoding="utf-8"))
+        check("clearing args removes the key", "args" in saved["demo"], False)
+
         await pilot.press("p")
         await pilot.pause()
         check("prompt refused while idle",
