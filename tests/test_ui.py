@@ -408,6 +408,28 @@ async def main():
         check("a folded group says something inside it is up",
               header[3].plain, "\u25b6")
         check("and counts what it is hiding", header[2].plain, "2")
+
+        # one and two are presets of the same file, as grouped models
+        # usually are, so the group costs one download and not two
+        app.sizes["one"] = app.sizes["two"] = 4 << 30
+        check("a shared gguf is counted once",
+              app._group_bytes(["one", "two"]), 4 << 30)
+        app.models["two"] = dict(app.models["two"],
+                                 model=str(support.FAKE) + "-other")
+        check("and a genuine second file is added",
+              app._group_bytes(["one", "two"]), 8 << 30)
+        check("a file that is not there adds nothing",
+              app._group_bytes(["one", "missing-model"]), 4 << 30)
+
+        # and the row itself must show the deduplicated figure, which
+        # is where the sum was being claimed
+        app.models["two"] = dict(app.models["two"],
+                                 model=str(support.FAKE))
+        app._build_table()
+        await pilot.pause()
+        header = table.get_row_at(rows().index(mdl_ui.GROUP_KEY + "qwen"))
+        check("the group row shows one file, not six of it",
+              header[1].plain, "4.0G")
         app.states = {}
 
         await pilot.press("enter")

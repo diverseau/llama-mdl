@@ -2,6 +2,16 @@
 
 Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
 
+## [0.5.1] - 2026-09-05
+
+### Fixed
+
+- A group's size added up its members, so six context presets of one
+  11.3G gguf claimed 67.7G. Presets of a single model are the usual
+  reason to group, so the figure was wrong in the common case. Each
+  file is counted once now, and a member pointing somewhere else
+  still adds its own.
+
 ## [0.5.0] - 2026-09-05
 
 ### Added

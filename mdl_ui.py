@@ -1193,6 +1193,25 @@ class MdlApp(App):
         return {"ok": ("●", "#9ece6a"), "fail": ("✗", "#f7768e"),
                 "new": ("○", "#565f89")}[self.marks.get(name, "new")]
 
+    def _group_bytes(self, names):
+        """What the group costs on disk, counting each file once.
+
+        Presets of one model are the usual reason to group: six
+        context lengths of the same gguf are six rows but one file,
+        and adding the sizes up claimed 67.7G of a 12.3G download.
+        """
+        seen, total = set(), 0
+        for name in names:
+            raw = self._cfg(name).get("model")
+            size = self.sizes.get(name)
+            if not raw or not size:
+                continue
+            key = os.path.normcase(str(Path(raw)))
+            if key not in seen:
+                seen.add(key)
+                total += size
+        return total
+
     def _add_group_row(self, table, group):
         """A folded group still has to show that something inside it is
         up, or collapsing hides the one thing this pane is for."""
@@ -1201,7 +1220,7 @@ class MdlApp(App):
         running = [n for n in members if n in self.states]
         head = Text((("▸ " if shut else "▾ ") + group)[:NAME_WIDTH],
                     style="bold #bb7af7")
-        total = sum(self.sizes.get(n) or 0 for n in members)
+        total = self._group_bytes(members)
         table.add_row(head,
                       Text(mdl.human_size(total) if total else "-",
                            style="#3b4261"),
