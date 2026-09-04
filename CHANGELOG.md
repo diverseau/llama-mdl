@@ -2,6 +2,15 @@
 
 Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
 
+## [0.5.2] - 2026-09-05
+
+### Fixed
+
+- Quitting while the dashboard was mid-poll could still raise, this
+  time on the status line. 0.3.5, 0.4.1 and this release each guarded
+  one more widget the poll touches; the guard now sits on the tick
+  itself, which is what all of them had in common.
+
 ## [0.5.1] - 2026-09-05
 
 ### Fixed

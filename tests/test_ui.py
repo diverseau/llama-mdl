@@ -343,7 +343,7 @@ async def main():
     app = MdlApp(fx="off")
     async with app.run_test(size=(120, 40)) as pilot:
         await pilot.pause()
-        for widget in app.query("#dash, #params, #models"):
+        for widget in app.query("#dash, #params, #models, #status, #log, #p-argv"):
             widget.remove()
         await pilot.pause()
         for label, call in (("the poll", app._tick),

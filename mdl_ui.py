@@ -1351,14 +1351,25 @@ class MdlApp(App):
 
     # ---- polling ----
     def _tick(self):
+        """Poll, and draw the result - unless the screen has gone.
+
+        The guard is here rather than on each widget because the tick
+        is what they have in common: quitting mid-poll took out #models,
+        then #dash, then #status, one release at a time. Every selector
+        below is exercised by the tests on every run, so a typo shows up
+        as a pane that never updates rather than being swallowed here.
+        """
+        try:
+            self._tick_once()
+        except NoMatches:
+            return
+
+    def _tick_once(self):
         # Whatever is running, the panes follow the selection: with
         # several servers up, 'the' running one is not a thing.
         self.states = mdl.read_states()
-        try:
-            dash = self.query_one("#dash", Dashboard)
-            params = self.query_one("#params", ParamPane)
-        except NoMatches:
-            return          # the interval outlived the screen; we are closing
+        dash = self.query_one("#dash", Dashboard)
+        params = self.query_one("#params", ParamPane)
         state = self.states.get(self._selected())
         if state and state["name"] != self._following:
             self._following = state["name"]   # a different server's rate
