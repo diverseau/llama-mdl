@@ -31,7 +31,7 @@ CONFIG_DIR = _base("XDG_CONFIG_HOME", ".config") / "mdl"
 CONFIG = CONFIG_DIR / "models.toml"
 STATE_DIR = _base("XDG_STATE_HOME", ".local", "state") / "mdl"
 STATE = STATE_DIR / "state.json"
-VERSION = "0.4.1"
+VERSION = "0.5.0"
 DEFAULT_BIN = "llama-server"
 CONFIG_DATA = {}          # last parsed config, for UI-only settings
 DEFAULT_PORT = 8080
@@ -44,7 +44,7 @@ READY_TIMEOUT = 300      # seconds; ready_timeout in the config overrides
 
 KEEP_LOGS = 3            # <name>.log plus .1 .. .N-1
 KNOWN = {"model", "mmproj", "ngl", "n_cpu_moe", "ctx", "flash_attn",
-         "kv_type", "parallel", "port", "args"}
+         "kv_type", "parallel", "port", "args", "group"}
 SIMPLE = (("ngl", "-ngl"), ("n_cpu_moe", "--n-cpu-moe"), ("ctx", "-c"),
           ("parallel", "-np"), ("port", "--port"))
 

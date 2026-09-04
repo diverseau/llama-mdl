@@ -141,6 +141,11 @@ weights.write_bytes(b"GGUF" + bytes(64))
 proj = vd / "mmproj-F16.gguf"
 proj.write_bytes(b"GGUF" + bytes(32))
 
+check("group is a known key",  "group" in mdl.KNOWN, True)
+check("but it never reaches llama-server",
+      mdl.build_argv("g", {"model": "m.gguf", "group": "qwen"}, "srv"),
+      ["srv", "-m", "m.gguf"])
+
 check("mmproj becomes --mmproj",
       mdl.build_argv("v", {"model": "m.gguf", "mmproj": "p.gguf"}, "srv"),
       ["srv", "-m", "m.gguf", "--mmproj", "p.gguf"])

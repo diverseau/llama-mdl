@@ -105,6 +105,7 @@ share one.
 | `kv_type` | `--cache-type-k` and `--cache-type-v` | Both get the same value. |
 | `parallel` | `-np` | |
 | `port` | `--port` | Defaults to 8080. |
+| `group` | none | Folds models together in the dashboard list. |
 | `args` | passed through verbatim | Array of strings, appended last. |
 
 Two top-level keys sit outside the model tables: `llama_server` (above) and
@@ -113,6 +114,17 @@ It defaults to 300, which a 70B on a slow disk can exceed.
 
 Anything else in a model table is an error, so a typo like `flash_atn` tells you
 instead of silently doing nothing.
+
+### Grouping
+
+Give several models the same `group` and the dashboard folds them under
+one row - useful for the six context-length variants of one model, or
+everything from one lab. `enter` on a group opens and closes it, and a
+closed group still shows a marker when something inside it is running.
+The fold is remembered between sessions.
+
+There is nothing to create or delete: a group is a name two models share.
+It changes nothing about how they run, and `mdl run <name>` is unaffected.
 
 ### Vision models
 

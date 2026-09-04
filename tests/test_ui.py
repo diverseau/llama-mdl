@@ -14,11 +14,20 @@ from support import mdl, sandbox, teardown            # noqa: E402
 import mdl_ui                                         # noqa: E402
 from mdl_ui import MdlApp                             # noqa: E402
 from textual.geometry import Region                  # noqa: E402
-from textual.widgets import DataTable, Input, Static  # noqa: E402
+from textual.selection import Selection               # noqa: E402
+from textual.widgets import (DataTable, Input, RichLog,  # noqa: E402
+                             Static)
 
 BACKSLASH = chr(92)
 t = support.Tally("test_ui")
 check = t.check
+GROUPED = ('\n[one]\n'
+           'model = "%s"\n'
+           'group = "qwen"\nctx = 4096\nport = 9997\n'
+           '\n[two]\n'
+           'model = "%s"\n'
+           'group = "qwen"\nctx = 4096\nport = 9996\n'
+           % ((str(support.FAKE).replace("\\", "/"),) * 2))
 LONG = ('\n[a-model-name-far-too-long-for-the-pane]\n'
         'model = "%s"\nctx = 65536\nport = 9998\n'
         % str(support.FAKE).replace("\\", "/"))
@@ -348,6 +357,113 @@ async def main():
                 raised = type(e).__name__
             check("%s outliving its widgets is not a crash" % label,
                   raised, None)
+    teardown(root)
+
+    # --- folders ----------------------------------------------------------
+    root, port = sandbox(extra=GROUPED)
+    app = MdlApp(fx="off")
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        table = app.query_one("#models", DataTable)
+
+        def rows():
+            return [table.ordered_rows[r].key.value
+                    for r in range(table.row_count)]
+
+        check("ungrouped models come first, so a config with no groups"
+              " looks untouched",
+              [n for g, n in app._ordered()],
+              ["demo", "one", "two"])
+        check("a group gets a row of its own",
+              rows(), ["demo", mdl_ui.GROUP_KEY + "qwen", "one", "two"])
+        check("whose key can never collide with a model name",
+              mdl_ui.GROUP_KEY.isalnum(), False)
+
+        # the cursor on a folder is not a model
+        table.move_cursor(row=rows().index(mdl_ui.GROUP_KEY + "qwen"))
+        await pilot.pause()
+        check("a group row selects as no model", app._selected(), None)
+        check("but it knows which group it is", app._selected_group(),
+              "qwen")
+
+        # enter folds it rather than running anything
+        ran = []
+        real_spawn, mdl.spawn = mdl.spawn, lambda *a, **k: ran.append(a)
+        try:
+            await pilot.press("enter")
+            await pilot.pause()
+        finally:
+            mdl.spawn = real_spawn
+        check("enter on a group starts nothing", ran, [])
+        check("it folds it instead", app.collapsed, {"qwen"})
+        check("and its members go away", rows(),
+              ["demo", mdl_ui.GROUP_KEY + "qwen"])
+
+        # a server inside a folded group still has to show
+        app.states = {"one": {"name": "one", "pid": 1, "port": port,
+                              "started": time.time()}}
+        app._build_table()
+        await pilot.pause()
+        header = table.get_row_at(rows().index(mdl_ui.GROUP_KEY + "qwen"))
+        check("a folded group says something inside it is up",
+              header[3].plain, "\u25b6")
+        check("and counts what it is hiding", header[2].plain, "2")
+        app.states = {}
+
+        await pilot.press("enter")
+        await pilot.pause()
+        check("enter again unfolds it", app.collapsed, set())
+        check("the fold is remembered on disk",
+              app._groups_path().exists(), True)
+
+        # and the editor sets the key, because a group is just a field
+        table.move_cursor(row=rows().index("demo"))
+        await pilot.pause()
+        await pilot.press("e")
+        await pilot.pause()
+        app.screen.query_one("#f-group", Input).value = "qwen"
+        app.screen._apply()
+        await pilot.pause()
+        saved = tomllib.loads(mdl.CONFIG.read_text(encoding="utf-8"))
+        check("the editor writes group", saved["demo"]["group"], "qwen")
+        await pilot.press("e")
+        await pilot.pause()
+        app.screen.query_one("#f-group", Input).value = ""
+        app.screen._apply()
+        await pilot.pause()
+        saved = tomllib.loads(mdl.CONFIG.read_text(encoding="utf-8"))
+        check("and clearing it removes the key",
+              "group" in saved["demo"], False)
+    teardown(root)
+
+    # --- the log can be got out of ----------------------------------------
+    root, port = sandbox()
+    app = MdlApp(fx="off")
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        log = app.query_one("#log", mdl_ui.CopyableLog)
+        copied = []
+        app.copy_to_clipboard = copied.append
+
+        await pilot.press("y")
+        await pilot.pause()
+        check("an empty log copies nothing", copied, [])
+
+        for i in range(4):
+            log.write("slot print_timing: id 0 | task %d" % i)
+        await pilot.pause()
+        check("a plain RichLog would have handed back nothing",
+              RichLog.get_selection(log, Selection(None, None)), None)
+        got = log.get_selection(Selection(None, None))
+        check("ours hands back its lines",
+              got[0].splitlines()[0], "slot print_timing: id 0 | task 0")
+
+        await pilot.press("y")
+        await pilot.pause()
+        check("y copies the whole buffer", len(copied), 1)
+        check("all of it", len(copied[0].splitlines()), 4)
+        check("and it is the text, not the styling",
+              "task 3" in copied[0], True)
     teardown(root)
     return t.done()
 

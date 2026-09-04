@@ -2,6 +2,26 @@
 
 Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
 
+## [0.5.0] - 2026-09-05
+
+### Added
+
+- `group`, per model: models sharing a name fold under one row in the
+  dashboard. `enter` opens and closes a group, the fold is remembered
+  between sessions, and a closed group still shows a marker when
+  something inside it is running - otherwise folding would hide the one
+  thing the pane is for.
+  There is no command to make a group and none to delete one, because a
+  group is not a thing: it is a name two models share. Set it in the
+  editor beside every other key.
+- `y` copies the log. Textual's own selection reads nothing out of a
+  `RichLog` - `Widget.get_selection` only handles a widget that renders
+  to a single `Text`, so every scrolling widget copies as nothing - and
+  the log now hands its lines over, so drag-and-`ctrl+c` works too.
+  A drag marks the whole widget rather than a span, so both copy the
+  whole buffer; for part of it, hold shift and use the terminal's own
+  selection.
+
 ## [0.4.1] - 2026-09-03
 
 ### Fixed

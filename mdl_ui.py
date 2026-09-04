@@ -56,6 +56,7 @@ GRADIENT = ["#7dcfff", "#7aa2f7", "#8a7af7", "#9d7cf7", "#bb7af7"]
 WEIGHTS_COLOUR, KV_COLOUR = "#7aa2f7", "#bb7af7"
 SPARK_CHARS = " ▁▂▃▄▅▆▇█"
 NAME_WIDTH = 15          # keeps the size and ctx columns on screen
+GROUP_KEY = chr(0) + "g:"   # row keys a model name can never take
 NEWLINE = chr(10)
 
 
@@ -381,6 +382,26 @@ class Spark(Static):
         self.update(t)
 
 
+class CopyableLog(RichLog):
+    """A RichLog you can get the text out of.
+
+    Widget.get_selection only knows how to read a widget that renders
+    to a single Text, so every scrolling widget in textual - this one,
+    Log, DataTable - contributes nothing to a selection and copies as
+    nothing. The lines are right here; hand them over.
+
+    A drag marks the whole widget rather than a span, because textual
+    cannot map a coordinate into rendered strips, so this copies the
+    whole buffer. Whole log or no log is the honest choice available.
+    """
+
+    def get_selection(self, selection):
+        return selection.extract(self.as_text()), NEWLINE
+
+    def as_text(self):
+        return NEWLINE.join(strip.text.rstrip() for strip in self.lines)
+
+
 class ArgvPreview(VerticalScroll):
     """The exact llama-server command mdl would run.
 
@@ -620,11 +641,12 @@ class HelpScreen(ModalScreen):
 
     ROWS = [
         ("↑ ↓ / j k", "select a model"),
-        ("enter / r", "run the selected model"),
+        ("enter / r", "run the selected model, or fold a group"),
         ("s", "stop the selected server"),
         ("R", "restart (stop, then run again)"),
         ("e", "edit params for the selected model"),
         ("c", "copy the llama-server command"),
+        ("y", "copy the whole log"),
         ("p", "prompt the running model"),
         ("l", "focus the log pane"),
         ("/", "filter the log"),
@@ -649,7 +671,7 @@ class EditScreen(ModalScreen):
 
     BINDINGS = [Binding("escape", "dismiss", "cancel")]
     FIELDS = ["ngl", "n_cpu_moe", "ctx", "kv_type", "parallel", "port"]
-    TEXT = {"kv_type", "mmproj"}     # everything else is a whole number
+    TEXT = {"kv_type", "mmproj", "group"}   # the rest are whole numbers
 
     def __init__(self, name, cfg):
         super().__init__()
@@ -664,6 +686,14 @@ class EditScreen(ModalScreen):
                     yield Label(f"{f:<11}", classes="edit-label")
                     yield Input(value=str(self.cfg.get(f, "")), id=f"f-{f}",
                                 placeholder="unset", classes="edit-input")
+            # A group is not an object to create and delete: it is a
+            # name two models share. Type the same one twice and they
+            # fold together; clear the last one and it is gone.
+            with Horizontal(classes="edit-row"):
+                yield Label(f"{'group':<11}", classes="edit-label")
+                yield Input(value=str(self.cfg.get("group", "")),
+                            id="f-group", placeholder="unset",
+                            classes="edit-input")
             # The vision half of a multimodal model. Its own row rather
             # than a line in args, because it is a path to a file that
             # can go missing, and check has to be able to say so.
@@ -690,7 +720,7 @@ class EditScreen(ModalScreen):
 
     def _collect(self):
         cfg = dict(self.cfg)
-        for f in self.FIELDS + ["mmproj"]:
+        for f in self.FIELDS + ["mmproj", "group"]:
             raw = self.query_one(f"#f-{f}", Input).value.strip()
             if not raw:
                 cfg.pop(f, None)
@@ -1065,6 +1095,7 @@ class MdlApp(App):
         Binding("R", "restart", "restart"),
         Binding("e", "edit", "edit"),
         Binding("c", "copy", "copy cmd"),
+        Binding("y", "copy_log", "copy log"),
         Binding("p", "prompt", "prompt"),
         Binding("l", "focus_log", "logs"),
         Binding("slash", "filter", "filter"),
@@ -1082,6 +1113,7 @@ class MdlApp(App):
         self.fx_period = fx_period(fx_period_override)
         self.models, self.binary = {}, ""
         self.marks = {}                # name -> "ok" | "fail" | "new"
+        self.collapsed = set()         # group names folded shut
         self.sizes = {}
         self.mmproj_sizes = {}
         self.tok_history = deque(maxlen=SPARK_POINTS)
@@ -1108,7 +1140,8 @@ class MdlApp(App):
                 yield Dashboard(id="dash")
                 yield ParamPane(id="params")
                 yield ArgvPreview(id="p-argv")
-                yield RichLog(id="log", wrap=False, markup=False, max_lines=2000)
+                yield CopyableLog(id="log", wrap=False, markup=False,
+                                  max_lines=2000)
         yield Static(id="status")
         yield Footer()
 
@@ -1138,6 +1171,11 @@ class MdlApp(App):
             self.marks = json.loads(marks.read_text())
         except (OSError, ValueError):
             self.marks = {}
+        try:
+            self.collapsed = set(json.loads(
+                self._groups_path().read_text()))
+        except (OSError, ValueError, TypeError):
+            self.collapsed = set()
         for name, cfg in self.models.items():
             self.marks.setdefault(name, "new")
             try:
@@ -1149,8 +1187,41 @@ class MdlApp(App):
             except (OSError, KeyError):
                 self.mmproj_sizes[name] = 0
 
+    def _dot(self, name):
+        if name in self.states:      # up right now, whatever it did before
+            return ("▶", "#9ece6a")
+        return {"ok": ("●", "#9ece6a"), "fail": ("✗", "#f7768e"),
+                "new": ("○", "#565f89")}[self.marks.get(name, "new")]
+
+    def _add_group_row(self, table, group):
+        """A folded group still has to show that something inside it is
+        up, or collapsing hides the one thing this pane is for."""
+        members = [n for g, n in self._ordered() if g == group]
+        shut = group in self.collapsed
+        running = [n for n in members if n in self.states]
+        head = Text((("▸ " if shut else "▾ ") + group)[:NAME_WIDTH],
+                    style="bold #bb7af7")
+        total = sum(self.sizes.get(n) or 0 for n in members)
+        table.add_row(head,
+                      Text(mdl.human_size(total) if total else "-",
+                           style="#3b4261"),
+                      Text("%d" % len(members), style="#3b4261"),
+                      Text("▶" if running else "", style="#9ece6a"),
+                      key=GROUP_KEY + group)
+
     def _marks_path(self):
         return mdl.STATE_DIR / "ui-marks.json"
+
+    def _groups_path(self):
+        return mdl.STATE_DIR / "ui-groups.json"
+
+    def _save_collapsed(self):
+        try:
+            mdl.STATE_DIR.mkdir(parents=True, exist_ok=True)
+            mdl.write_atomic(self._groups_path(),
+                             json.dumps(sorted(self.collapsed)))
+        except OSError:
+            pass
 
     def _save_marks(self):
         try:
@@ -1164,23 +1235,27 @@ class MdlApp(App):
             table = self.query_one("#models", DataTable)
         except NoMatches:
             return          # a worker finishing after the screen has gone
-        keep = self._selected()
+        keep = self._selected_key()
         table.clear(columns=True)
         table.add_columns("model", "size", "ctx", "")
-        for name in sorted(self.models):
+        shown = None
+        for group, name in self._ordered():
+            if group and group != shown:
+                self._add_group_row(table, group)
+                shown = group
+            if group in self.collapsed:
+                continue
             cfg = self._cfg(name)
-            if name in self.states:      # up right now, whatever it did before
-                dot = ("▶", "#9ece6a")
-            else:
-                dot = {"ok": ("●", "#9ece6a"), "fail": ("✗", "#f7768e"),
-                       "new": ("○", "#565f89")}[self.marks.get(name, "new")]
             # The pane is a fixed width, so a long name used to push the
             # numbers off the right edge - 65536 rendered as 65, silently.
-            label = name if len(name) <= NAME_WIDTH else name[:NAME_WIDTH - 1] + "…"
+            room = NAME_WIDTH - (2 if group else 0)
+            label = name if len(name) <= room else name[:room - 1] + "…"
             size = self.sizes.get(name)
             cell = (Text("missing", style="#f7768e") if size is None
                     else Text(mdl.human_size(size), style="#565f89"))
-            table.add_row(Text(label, style="#c0caf5"), cell,
+            dot = self._dot(name)
+            table.add_row(Text(("  " if group else "") + label,
+                               style="#c0caf5"), cell,
                           Text(str(cfg.get("ctx", "-")), style="#565f89"),
                           Text(dot[0], style=dot[1]), key=name)
         if keep:
@@ -1194,7 +1269,21 @@ class MdlApp(App):
     def _cfg(self, name):
         return self.models.get(name, {})
 
-    def _selected(self):
+    def _group(self, name):
+        return str(self._cfg(name).get("group") or "")
+
+    def _ordered(self):
+        """(group, name) pairs, grouped models after the loose ones.
+
+        Ungrouped first so a config that uses no groups looks exactly
+        as it did before the feature existed.
+        """
+        return sorted(((self._group(n), n) for n in self.models),
+                      key=lambda gn: (gn[0] != "", gn[0].lower(),
+                                      gn[1].lower()))
+
+    def _selected_key(self):
+        """The row under the cursor, group rows included."""
         try:
             table = self.query_one("#models", DataTable)
         except NoMatches:
@@ -1206,6 +1295,29 @@ class MdlApp(App):
             return table.ordered_rows[table.cursor_row].key.value
         except (IndexError, AttributeError):
             return None
+
+    def _selected(self):
+        """The model under the cursor, or None on a group row.
+
+        None rather than the group name, because every caller already
+        handles None by doing nothing - which is what run, stop, edit
+        and prompt should do when the cursor is on a folder.
+        """
+        key = self._selected_key()
+        return None if key is None or key.startswith(GROUP_KEY) else key
+
+    def _selected_group(self):
+        key = self._selected_key()
+        return key[len(GROUP_KEY):] if key and key.startswith(GROUP_KEY) else None
+
+    def action_toggle_group(self):
+        group = self._selected_group()
+        if group is None:
+            return False
+        self.collapsed ^= {group}
+        self._save_collapsed()
+        self._build_table()
+        return True
 
     def _sysinfo(self):
         gpu = gpu_memory()
@@ -1244,7 +1356,7 @@ class MdlApp(App):
                             self._metrics_ok, self._health_ok, self.tok_peak)
             if self._log_path != Path(state["log"]):
                 self._log_path, self._log_pos = Path(state["log"]), 0
-                self.query_one("#log", RichLog).clear()
+                self.query_one("#log", CopyableLog).clear()
         else:
             dash.display = False
             params.display = True
@@ -1312,7 +1424,7 @@ class MdlApp(App):
             return
         if not chunk:
             return
-        out = self.query_one("#log", RichLog)
+        out = self.query_one("#log", CopyableLog)
         colours = {"error": "#f7768e", "warn": "#e0af68", "ready": "bold #9ece6a",
                    "slot": "#7dcfff", "info": "#565f89"}
         for line in chunk.splitlines():
@@ -1368,13 +1480,13 @@ class MdlApp(App):
         self.notify("reloaded config")
 
     def action_focus_log(self):
-        self.query_one("#log", RichLog).focus()
+        self.query_one("#log", CopyableLog).focus()
 
     def action_filter(self):
         def apply(value):
             self._filter = (value or "").strip()
             self._log_pos = 0
-            self.query_one("#log", RichLog).clear()
+            self.query_one("#log", CopyableLog).clear()
             self._drain_log()
         self.push_screen(FilterScreen(self._filter), apply)
 
@@ -1390,6 +1502,17 @@ class MdlApp(App):
         try:
             self.copy_to_clipboard(subprocess.list2cmdline(argv))
             self.notify("command copied")
+        except Exception:                            # noqa: BLE001
+            self.notify("could not reach the clipboard", severity="warning")
+
+    def action_copy_log(self):
+        text = self.query_one("#log", CopyableLog).as_text().strip()
+        if not text:
+            self.notify("the log is empty")
+            return
+        try:
+            self.copy_to_clipboard(text)
+            self.notify("log copied (%d lines)" % len(text.split(NEWLINE)))
         except Exception:                            # noqa: BLE001
             self.notify("could not reach the clipboard", severity="warning")
 
@@ -1420,6 +1543,10 @@ class MdlApp(App):
         self.push_screen(PromptScreen(state["port"], state["name"]))
 
     def action_run(self):
+        # enter does the obvious thing for whatever is under the cursor,
+        # rather than needing a key of its own for folders.
+        if self.action_toggle_group():
+            return
         name = self._selected()
         if not name:
             return
@@ -1434,7 +1561,7 @@ class MdlApp(App):
             self.notify(str(e), severity="error")
             return
         self._log_path, self._log_pos = Path(log), 0
-        self.query_one("#log", RichLog).clear()
+        self.query_one("#log", CopyableLog).clear()
         self.status_line = "starting " + name
         self._watch_start(name, proc, port)
 
