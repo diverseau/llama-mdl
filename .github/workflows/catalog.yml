@@ -3,7 +3,9 @@ name: catalog
 # Nightly crawl of the Hugging Face model tree into the SQLite snapshot
 # `mdl find` reads, published as a dataset. Needs a write token in the
 # HF_TOKEN secret and a dataset repo named by the CATALOG_REPO variable
-# (default diverseau/mdl-catalog). Does nothing on forks.
+# (default diverseau/mdl-catalog). Off until the CATALOG_ENABLED variable
+# is "true", so it does not crawl for hours only to fail at the upload;
+# does nothing on forks.
 
 on:
   schedule:
@@ -16,7 +18,7 @@ concurrency:
 
 jobs:
   crawl:
-    if: github.repository_owner == 'diverseau'
+    if: github.repository_owner == 'diverseau' && vars.CATALOG_ENABLED == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 300
     env:
