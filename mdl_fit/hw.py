@@ -3,7 +3,13 @@
 Free VRAM is read live at fit time, not taken off the box: the desktop and
 a browser eat a few hundred MB, and it moves. llama.cpp's own view of the
 device (--list-devices) wins over nvidia-smi when both answer, because
-llama.cpp is the one that will be allocating.
+llama.cpp is the one that will be allocating - and under Vulkan on Windows
+it is the right one: the driver's budget counts what idle desktop apps
+will give back, nvidia-smi counts it as taken, and the gap is a gigabyte.
+
+RAM has two numbers. What is free right now is not the limit: a load
+that needs more makes the OS page idle programs out, slowly but fine. The
+limit is the total less what the OS and desktop cannot do without.
 """
 
 import ctypes
@@ -19,7 +25,8 @@ from pathlib import Path
 MiB = 1 << 20
 GiB = 1 << 30
 DEFAULT_MARGIN = 256 * MiB       # held back on the card, learned per machine
-OS_HEADROOM = 1024 * MiB         # RAM the rest of the machine gets to keep
+OS_HEADROOM = 1024 * MiB         # RAM left alone when counting 'free now'
+RAM_RESERVE = 3 * GiB            # RAM the OS and desktop cannot give up
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
@@ -235,6 +242,7 @@ class Machine:
         self.ram_total = kw.get("ram_total", 0)
         self.ram_avail = kw.get("ram_avail", 0)
         self.os_headroom = kw.get("os_headroom", OS_HEADROOM)
+        self.ram_reserve = kw.get("ram_reserve", RAM_RESERVE)
         self.cores = kw.get("cores", (os.cpu_count(), None, None))
         self.pcie = kw.get("pcie")
         self.driver = kw.get("driver")
@@ -249,6 +257,14 @@ class Machine:
 
     @property
     def ram_usable(self):
+        """The hard limit: past this the machine thrashes."""
+        if self.ram_total:
+            return max(0, self.ram_total - self.ram_reserve)
+        return self.ram_free_now
+
+    @property
+    def ram_free_now(self):
+        """Past this, loading pages other programs out first."""
         return max(0, self.ram_avail - self.os_headroom)
 
     @property
@@ -275,8 +291,9 @@ class Machine:
         else:
             parts.append("no GPU found")
         if self.ram_total:
-            parts.append("%.0f G RAM (%.1f avail)"
-                         % (self.ram_total / GiB, self.ram_avail / GiB))
+            parts.append("%.0f G RAM (%.1f free now, %.1f usable)"
+                         % (self.ram_total / GiB, self.ram_avail / GiB,
+                            self.ram_usable / GiB))
         parts.append("calibrated ✓" if self.calibrated else "uncalibrated")
         return " · ".join(parts)
 
@@ -322,7 +339,7 @@ def probe(binary="llama-server", quick=False):
     if devs:
         backend, _, name, total, free = devs[0]
         kw.update(backend=backend, gpu_name=name, vram_total=total,
-                  vram_free=free if not gpus else min(free, gpus[0]["free"]))
+                  vram_free=free)
     elif gpus:
         kw["backend"] = saved.get("backends", {}).get(bkey) or _guess_backend(
             binary)

@@ -104,6 +104,12 @@ class Context:
         return (mem.gpu <= self.machine.vram_usable
                 and mem.host <= self.machine.ram_usable)
 
+    def tight(self, fit):
+        """Inside the free VRAM, but eating the safety margin: it loads
+        today, and a browser tab opening later can push it over."""
+        return (self.machine.vram_usable < fit.gpu <= self.machine.vram_free
+                and fit.mem.host <= self.machine.ram_usable)
+
     def evaluate(self, flags, depth):
         mem = self.memory(flags)
         sp = perf.speed(self.shape, flags, self.machine, depth, self.eff)
@@ -335,12 +341,12 @@ def closest(ctx_obj, opts):
     if card and not ram:
         f, m = min(card, key=lambda r: r[1].host)
         why = ("RAM is the limit: the card holds it from %s up, which needs "
-               "%.1f G of host memory, and %.1f G is usable now (%.1f G "
-               "available, %.1f G kept for the system). Close something, or "
-               "it pages from disk on every token" % (
+               "%.1f G of host memory, and %.1f G is usable (%.0f G total, "
+               "%.1f G kept for the system); past that it pages from disk "
+               "on every token" % (
                    offload_label(f, shape), m.host / gib,
-                   mach.ram_usable / gib, mach.ram_avail / gib,
-                   mach.os_headroom / gib))
+                   mach.ram_usable / gib, mach.ram_total / gib,
+                   mach.ram_reserve / gib))
     elif ram and not card:
         f, m = min(ram, key=lambda r: r[1].gpu)
         why = ("VRAM is the limit: even at %s it needs %.1f G on the card, "

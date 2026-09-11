@@ -132,6 +132,7 @@ def machine(vram=8 * GiB, ram=16 * GiB, backend="CUDA"):
     return FakeMachine(gpu_name="NVIDIA GeForce RTX 3060", backend=backend,
                        vram_total=vram + GiB, vram_free=vram, margin=0,
                        ram_total=ram + 4 * GiB, ram_avail=ram, os_headroom=0,
+                       ram_reserve=4 * GiB,
                        cores=(16, 10, 6), pcie=[4, 4, 16, 16],
                        build={"build": 1, "load_mode": True,
                               "fit_flag": True})
@@ -603,5 +604,29 @@ check("a context cut is offered, and ranked last",
       (fixes[-1].kind if fixes else None), "ctx")
 check("the KV step is the first thing it tries",
       [x.kind for x in fixes][:1], ["kv"])
+
+# ============================================================ budgets ===
+
+from mdl_fit import cli  # noqa: E402
+
+box = hw.Machine(ram_total=16 * GiB, ram_avail=5 * GiB, os_headroom=GiB)
+check("RAM: the limit is the total less a reserve, not what is free now",
+      (box.ram_usable, box.ram_free_now), (13 * GiB, 4 * GiB))
+fl = model.Flags(ctx=4096, ub=512)
+tm = machine(vram=model.memory(shape, fl).gpu + (100 << 20))
+tm.margin = 256 << 20
+tctx = search.Context(inv, tm, calib.Residuals([]))
+tf = tctx.evaluate(fl, 0)
+check("inside the free VRAM but eating the margin is tight, not over",
+      (tctx.fits(tf.mem), tctx.tight(tf),
+       cli.verdict(tctx, tf).startswith("fits, tight")), (False, True, True))
+
+
+class _Q4:
+    flags = model.Flags(ctk="q8_0", ctv="q4_0")
+
+
+check("a config already on 4-bit KV lets the search go there too",
+      (cli.kv_floor_of(_Q4), cli.kv_floor_of(None)), ("q4_0", "q8_0"))
 
 sys.exit(t.done())

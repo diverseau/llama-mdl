@@ -134,13 +134,22 @@ def _load(path):
         die("%s: %s" % (path, e))
 
 
+def kv_floor_of(target):
+    """A config that already runs 4-bit KV has made its quality call; the
+    search may go as far. Everything else stops at q8_0."""
+    f = target.flags if target else None
+    if f and max(model.KV_RANK.get(f.ctk, 0), model.KV_RANK.get(f.ctv, 0)) >= 3:
+        return "q4_0"
+    return "q8_0"
+
+
 def options(o, target=None):
     try:
         opts = search.Options(
             o.get("profile", "agent"),
             min_ctx=number(o["min-ctx"]) if "min-ctx" in o else None,
             min_tps=float(o["min-tps"]) if "min-tps" in o else None,
-            kv_floor=o.get("kv-floor", "q8_0"),
+            kv_floor=o.get("kv-floor", kv_floor_of(target)),
             np=int(o.get("np", target.flags.np if target and target.flags
                          else 1)),
             max_ctx=number(o["max-ctx"]) if "max-ctx" in o else None)
@@ -212,7 +221,7 @@ def table(ctx_obj, fits, opts):
 
 def placement(ctx_obj, fit, label="#1"):
     m, f, shape = fit.mem, fit.flags, ctx_obj.shape
-    free = ctx_obj.machine.vram_usable - fit.gpu
+    free = ctx_obj.machine.vram_free - fit.gpu
     gpu = ["weights %s" % g(m.gpu_weights), "kv %s" % g(m.gpu_kv + m.gpu_rs),
            "compute %s" % g(m.gpu_compute)]
     if m.gpu_mmproj:
@@ -260,16 +269,74 @@ def with_threads(opts, mach):
     return opts
 
 
+def oracle_check(ctx_obj, fit, fit_bin):
+    """The config as it stands, through the oracle. Its residual then
+    calibrates everything costed after it, the search included."""
+    if not fit_bin or str(ctx_obj.inv.source).startswith("hf:"):
+        return
+    entry = calib.check(fit_bin, ctx_obj.inv, ctx_obj.shape, fit.flags,
+                        ctx_obj.build, max_alloc=ctx_obj.machine.max_alloc)
+    if entry:
+        fit.oracle = entry["actual"]
+        ctx_obj.res = calib.Residuals(build=ctx_obj.build)
+
+
+def verdict(ctx_obj, fit):
+    mach = ctx_obj.machine
+    over = fit.gpu - mach.vram_usable
+    ram_over = fit.mem.host - mach.ram_usable
+    short = []
+    if over > 0 and not ctx_obj.tight(fit):
+        short.append("VRAM over by %s G" % g(over))
+    if ram_over > 0:
+        short.append("RAM over by %s G" % g(ram_over))
+    if short:
+        return "✗ " + ", ".join(short)
+    if over > 0:
+        return "fits, tight: %d MiB left, inside the %d MiB safety margin" % (
+            (mach.vram_free - fit.gpu) // MiB, mach.margin // MiB)
+    return "fits, %s G to spare" % g(-over)
+
+
+def ram_note(ctx_obj, fit):
+    """Over what is free now but under the limit: it loads, the OS just
+    has to page idle programs out first."""
+    mach = ctx_obj.machine
+    if mach.ram_free_now < fit.mem.host <= mach.ram_usable:
+        return ("needs %s G of RAM and %s G is free right now; loading it "
+                "pages idle programs out to make room" % (
+                    g(fit.mem.host), g(mach.ram_free_now)))
+    return None
+
+
+def kv_hint(ctx_obj, o, target, result, mach):
+    """When q8_0 KV is the wall, what 4-bit KV would buy - as a hint, not
+    a pick: the quality call is the user's."""
+    if "kv-floor" in o or (result.picks and not result.relaxed):
+        return None
+    opts = with_threads(options(dict(o, **{"kv-floor": "q4_0"}), target), mach)
+    if opts.kv_floor == (result.opts.kv_floor if result.opts else None):
+        return None
+    lean = search.solve(ctx_obj, opts)
+    if not lean.picks or (result.picks and lean.relaxed):
+        return None
+    b = lean.best
+    return ("with --kv-floor q4_0 (4-bit KV): ctx %s · kv %s · %s · %.0f t/s"
+            % (kctx(b.flags.ctx), b.flags.kv_label,
+               offload(b.flags, ctx_obj.shape), b.speed.decode_d))
+
+
 def fit_one(target, o, out):
     mach = machine_for(target, o)
     opts = with_threads(options(o, target), mach)
     ctx_obj = search.Context(target.inv, mach)
-    result = search.solve(ctx_obj, opts)
     fit_bin = None if o.get("no-oracle") else calib.env_fit_bin(target.binary)
-    result = search.verify_picks(ctx_obj, opts, result, fit_bin)
     current = None
     if target.flags:
         current = ctx_obj.evaluate(target.flags, opts.depth)
+        oracle_check(ctx_obj, current, fit_bin)
+    result = search.solve(ctx_obj, opts)
+    result = search.verify_picks(ctx_obj, opts, result, fit_bin)
     if o.get("json"):
         out.write(json.dumps(as_json(ctx_obj, opts, result, target, current),
                              indent=1) + "\n")
@@ -281,19 +348,16 @@ def fit_one(target, o, out):
         w("note      %s\n" % note)
     w("profile   %s  (%s)\n\n" % (opts.profile, opts.blurb))
     if current is not None:
-        over = current.gpu - mach.vram_usable
-        ram_over = current.mem.host - mach.ram_usable
-        short = []
-        if over > 0:
-            short.append("VRAM over by %s G" % g(over))
-        if ram_over > 0:
-            short.append("RAM over by %s G" % g(ram_over))
-        verdict = ("✗ " + ", ".join(short) if short
-                   else "fits, %s G to spare" % g(-over))
-        w("now       %s · ctx %s · kv %s · %s · ub %d · VRAM %s G · %s\n\n" % (
+        w("now       %s · ctx %s · kv %s · %s · ub %d · VRAM %s G%s · %s\n" % (
             target.name, kctx(target.flags.ctx), target.flags.kv_label,
             offload(target.flags, ctx_obj.shape), target.flags.ub,
-            g(current.gpu), verdict))
+            g(current.gpu), " ✓" if current.oracle else "",
+            verdict(ctx_obj, current)))
+        note = ram_note(ctx_obj, current)
+        if note:
+            w("          %s\n" % note)
+        w("\n")
+    hint = kv_hint(ctx_obj, o, target, result, mach)
     if not result.picks:
         w("nothing fits. %s.\n" % result.relaxed)
         if result.closest:
@@ -301,12 +365,20 @@ def fit_one(target, o, out):
             w("closest   %s · ctx 4k · kv %s · VRAM %s / %s G · RAM %s / %s G\n"
               % (offload(f, ctx_obj.shape), f.kv_label, g(m.gpu),
                  g(mach.vram_usable), g(m.host), g(mach.ram_usable)))
+        if hint:
+            w("hint      %s\n" % hint)
         return result, ctx_obj, opts
     if result.relaxed:
         w("floors not met: %s. Best this quant can do:\n\n" % result.relaxed)
     w(table(ctx_obj, result.picks, opts) + "\n\n")
+    if hint:
+        w("hint      %s\n\n" % hint)
     best = result.best
-    w(placement(ctx_obj, best) + "\n\n")
+    w(placement(ctx_obj, best) + "\n")
+    note = ram_note(ctx_obj, best)
+    if note:
+        w("note      %s\n" % note)
+    w("\n")
     w(confidence(ctx_obj, best) + "\n\n")
     feats = mach.build or {}
     argv = emit.server_argv(Path(target.binary).name, target.model_path,
@@ -394,18 +466,25 @@ def cmd_explain(target, o, out):
     opts = options(o, target)
     ctx_obj = search.Context(target.inv, mach)
     fit_bin = None if o.get("no-oracle") else calib.env_fit_bin(target.binary)
+    entry = None
     if fit_bin:                      # the oracle's view of the config as-is
         entry = calib.check(fit_bin, target.inv, ctx_obj.shape, target.flags,
                             ctx_obj.build, max_alloc=mach.max_alloc)
         if entry:
             ctx_obj.res = calib.Residuals(build=ctx_obj.build)
     base, fixes, notes = explain.fixes(ctx_obj, target.flags, opts)
+    if fit_bin and entry:
+        base.oracle = entry["actual"]
     gpu_over, host_over = explain.overshoot(ctx_obj, base)
     w = out.write
     path, found, lines = explain.log_evidence(target.name, mdl.STATE_DIR)
-    if gpu_over <= 0 and host_over <= 0 and not lines:
-        w("%s  ✓  fits: %s / %s G on the card, %s G RAM\n" % (
-            target.name, g(base.gpu), g(mach.vram_usable), g(base.mem.host)))
+    if (gpu_over <= 0 or ctx_obj.tight(base)) and host_over <= 0 and not lines:
+        w("%s  ✓  %s · VRAM %s G · RAM %s G\n" % (
+            target.name, verdict(ctx_obj, base), g(base.gpu),
+            g(base.mem.host)))
+        note = ram_note(ctx_obj, base)
+        if note:
+            w("note  %s\n" % note)
         w(placement(ctx_obj, base, target.name) + "\n")
         return
     if gpu_over > 0:
@@ -855,6 +934,11 @@ def cmd_calibrate(args, out):
 # ---------------------------------------------------------------- main --
 
 def main(args, out=None):
+    if out is None and not sys.stdout.isatty():
+        try:                         # a pipe on Windows is cp1252, and · ≥ ✓
+            sys.stdout.reconfigure(encoding="utf-8")
+        except (AttributeError, ValueError):
+            pass
     out = out or sys.stdout
     if not args or args[0] in ("-h", "--help"):
         out.write(USAGE)

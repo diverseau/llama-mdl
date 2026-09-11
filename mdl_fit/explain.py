@@ -137,7 +137,7 @@ def fixes(ctx_obj, flags, opts):
         lean = ctx_obj.memory(flags.replace(ncmoe=shape.n_layer))
         if lean.host > ctx_obj.machine.ram_usable:
             notes.append("more experts on the CPU would need %.1f G of RAM; "
-                         "%.1f G is usable now" % (
+                         "%.1f G is usable" % (
                              lean.host / model.GiB,
                              ctx_obj.machine.ram_usable / model.GiB))
     out.sort(key=Fix.cost)

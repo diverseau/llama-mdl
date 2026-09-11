@@ -33,6 +33,14 @@ Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
   guesses. `mdl fit inspect` prints the tensor inventory per layer.
 - `mdl run` books any buffer sizes a load log prints against its config,
   so fits improve from ordinary use.
+- Budgets are the ones that decide whether a load works. Free VRAM is
+  llama.cpp's own figure (under Vulkan it counts what idle desktop apps
+  give back; nvidia-smi does not, and reads a gigabyte short). The RAM
+  limit is the total less 3 G for the system; going past what is free
+  right now is a note, not a failure, since the OS pages idle programs
+  out. A config inside the free VRAM but eating the safety margin is
+  "fits, tight", not over. A config already on 4-bit KV lets the search
+  use it, and a q8_0 search that comes up short says what q4_0 would buy.
 
 ### Changed
 
