@@ -224,6 +224,32 @@ def llama_build(binary):
     return info
 
 
+_LIBS = {}
+
+
+def arch_supported(binary, arch):
+    """True if this llama.cpp build names `arch`, False if it does not,
+    None when its library cannot be read. Every architecture llama.cpp
+    loads is a C string in libllama; one it has never heard of is not."""
+    exe = Path(shutil.which(binary) or binary)
+    if exe not in _LIBS:
+        blob = b""
+        for p in [exe.parent / n for n in ("llama.dll", "libllama.so",
+                                           "libllama.dylib")] + [
+                exe.parent.parent / "lib" / "libllama.so", exe]:
+            try:
+                if p.is_file() and (p.suffix in (".dll", ".so", ".dylib")
+                                    or not blob):
+                    blob += p.read_bytes()
+            except OSError:
+                pass
+        _LIBS[exe] = blob
+    blob = _LIBS[exe]
+    if not blob or not arch:
+        return None
+    return arch.encode() + b"\x00" in blob
+
+
 def sibling(binary, name):
     """llama-bench or llama-fit-params next to llama-server, else PATH."""
     exe = name + (".exe" if os.name == "nt" else "")

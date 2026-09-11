@@ -2,7 +2,9 @@
 
 Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
 
-## [0.6.0] - 2026-09-11
+## [0.6.2] - 2026-09-12
+
+0.6.0 and 0.6.1 were never released; everything since 0.5.2 is here.
 
 ### Added
 
@@ -40,7 +42,8 @@ Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
   right now is a note, not a failure, since the OS pages idle programs
   out. A config inside the free VRAM but eating the safety margin is
   "fits, tight", not over. A config already on 4-bit KV lets the search
-  use it, and a q8_0 search that comes up short says what q4_0 would buy.
+  use it, and otherwise every fit says what q4_0 would buy - context,
+  speed and turn time over the #1 - without picking it for you.
 - Fits are planned for the machine at idle, so a scan taken mid-game or
   with a browser full of tabs gives the same answer as one taken on a
   quiet desktop. What the OS and resident programs hold is, best first:
@@ -51,6 +54,31 @@ Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
   figure per OS and desktop. When this minute's machine is short, the
   output names the apps to close; `--now` plans for it as it is. A busy
   CPU is noted, and `mdl fit hw` warns before calibrating on one.
+- `mdl eval <name>`: a private, auto-graded suite run against a model
+  the way models.toml runs it. Code (40, graded by hidden unit tests that
+  are executed), tool calls (30, single and multi-step against mock
+  tools), long-context retrieval at 32k, 64k and 128k (15), format rules
+  (20) and exact-answer reasoning (20), plus your own tasks from
+  `~/.config/mdl/evals/*.toml`. Items come from a seed that never leaves
+  the machine. `--sandbox` runs model code in a podman or docker
+  container; `--estimate` says how long a run takes; `--results` shows
+  past runs with 95% intervals.
+- `mdl catalog`: the hub's lineage graph - models, their fine-tunes and
+  merges, every GGUF quant of each, and reported eval results - in one
+  SQLite file. `build` crawls it locally, `pull` fetches the published
+  snapshot, `tree` and `search` read it.
+- `mdl find`: the best model this machine can run for a profile, across
+  the catalog and models.toml, at the quant and config it would run at.
+  Ranked by expected quality with speed as a floor. Public results
+  are down-weighted when they look trained-for, and your own `mdl eval`
+  scores take over once there are enough of them. Models nobody has rated
+  are listed under "worth testing" with the commands to rate them.
+
+### Fixed
+
+- Running `py mdl.py` directly, an error from `mdl fit` (and now
+  `eval`, `catalog`, `find`) printed a traceback instead of one line: the
+  module was loaded twice, and the second copy's error went uncaught.
 
 ### Changed
 

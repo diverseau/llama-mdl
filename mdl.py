@@ -31,7 +31,7 @@ CONFIG_DIR = _base("XDG_CONFIG_HOME", ".config") / "mdl"
 CONFIG = CONFIG_DIR / "models.toml"
 STATE_DIR = _base("XDG_STATE_HOME", ".local", "state") / "mdl"
 STATE = STATE_DIR / "state.json"
-VERSION = "0.6.0"
+VERSION = "0.6.2"
 DEFAULT_BIN = "llama-server"
 CONFIG_DATA = {}          # last parsed config, for UI-only settings
 DEFAULT_PORT = 8080
@@ -50,7 +50,8 @@ SIMPLE = (("ngl", "-ngl"), ("n_cpu_moe", "--n-cpu-moe"), ("ctx", "-c"),
 
 USAGE = ("usage: mdl {init|add <model.gguf>|check|list|run <name> [--port N]|"
          "stop [<name>|--all]|ps [--json]|logs [-f] [name]|ui [--no-fx]|"
-         "fit <gguf|hf:repo|name> [--help]} [--version]")
+         "fit <gguf|hf:repo|name> [--help]|eval <name> [--help]|"
+         "find [--help]|catalog {pull|build|tree|search|stats}} [--version]")
 
 # The model path mdl init leaves behind. check knows to treat it as a
 # to-do rather than a fault; tests keep the two in step.
@@ -561,6 +562,21 @@ def cmd_fit(args):
     cli.main(args)
 
 
+def cmd_eval(args):
+    from mdl_fit import evalrun
+    evalrun.main(args)
+
+
+def cmd_catalog(args):
+    from mdl_fit import catalog
+    catalog.main(args)
+
+
+def cmd_find(args):
+    from mdl_fit import find
+    find.main(args)
+
+
 def stop_one(name, state):
     """SIGTERM, wait, SIGKILL. True if it is gone afterwards."""
     pid = state["pid"]
@@ -837,7 +853,8 @@ def cmd_ui(args):
 
 COMMANDS = {"init": cmd_init, "add": cmd_add, "check": cmd_check, "ui": cmd_ui,
             "run": cmd_run, "stop": cmd_stop, "ps": cmd_ps, "list": cmd_list,
-            "logs": cmd_logs, "fit": cmd_fit}
+            "logs": cmd_logs, "fit": cmd_fit, "eval": cmd_eval,
+            "catalog": cmd_catalog, "find": cmd_find}
 
 
 def _dispatch():
@@ -877,4 +894,7 @@ def main():
 
 
 if __name__ == "__main__":
+    # mdl_fit reaches back with `import mdl`; without this alias that loads
+    # a second copy whose MdlError the handler above cannot catch
+    sys.modules.setdefault("mdl", sys.modules[__name__])
     main()

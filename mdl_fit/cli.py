@@ -346,12 +346,15 @@ def now_note(ctx_obj, fit):
     mach = ctx_obj.machine
     if mach.plan != "idle" or fit.gpu <= mach.vram_free_now:
         return None
-    held = mach.held("vram")
+    held = [(n, b) for n, b in mach.held("vram") if b >= 64 * MiB]
     who = (", ".join("%s %s G" % (n, g(b)) for n, b in held[:4]) if held
            else "what is open")
-    return ("right now %s G of VRAM is free, %s G short: close %s first, "
+    short = fit.gpu - mach.vram_free_now
+    return ("right now %s G of VRAM is free, %s short: close %s first, "
             "or plan for the machine as it is with --now" % (
-                g(mach.vram_free_now), g(fit.gpu - mach.vram_free_now), who))
+                g(mach.vram_free_now),
+                "%s G" % g(short) if short >= GiB // 10
+                else "%d MiB" % max(1, short // MiB), who))
 
 
 def fit_notes(ctx_obj, fit):
@@ -359,20 +362,38 @@ def fit_notes(ctx_obj, fit):
 
 
 def kv_hint(ctx_obj, o, target, result, mach):
-    """When q8_0 KV is the wall, what 4-bit KV would buy - as a hint, not
-    a pick: the quality call is the user's."""
-    if "kv-floor" in o or (result.picks and not result.relaxed):
+    """What 4-bit KV would buy over the q8_0 picks - as a hint, not a
+    pick: a 4-bit K cache costs quality you can measure on long agent
+    contexts, and that call is the user's. Shown only when it buys
+    context or speed."""
+    if "kv-floor" in o or result.opts.kv_floor == "q4_0":
         return None
     opts = with_threads(options(dict(o, **{"kv-floor": "q4_0"}), target), mach)
-    if opts.kv_floor == (result.opts.kv_floor if result.opts else None):
-        return None
     lean = search.solve(ctx_obj, opts)
-    if not lean.picks or (result.picks and lean.relaxed):
+    if not lean.picks or (lean.relaxed and not result.relaxed
+                          and result.picks):
         return None
     b = lean.best
-    return ("with --kv-floor q4_0 (4-bit KV): ctx %s · kv %s · %s · %.0f t/s"
-            % (kctx(b.flags.ctx), b.flags.kv_label,
-               offload(b.flags, ctx_obj.shape), b.speed.decode_d))
+    if max(model.KV_RANK.get(b.flags.ctk, 0),
+           model.KV_RANK.get(b.flags.ctv, 0)) < 3:
+        return None                        # the q4_0 search kept q8_0 anyway
+    gains = []
+    if result.picks:
+        a = result.best
+        if b.flags.ctx > a.flags.ctx * 1.1:
+            gains.append("+%dk ctx" % ((b.flags.ctx - a.flags.ctx) // K))
+        if b.speed.decode_d - a.speed.decode_d >= 1:
+            gains.append("+%.0f t/s" % (b.speed.decode_d - a.speed.decode_d))
+        if b.speed.s_turn < a.speed.s_turn * 0.97:
+            gains.append("%.0f%% faster turns" % (
+                (1 - b.speed.s_turn / a.speed.s_turn) * 100))
+        if not gains:
+            return None
+    return ("4-bit KV: ctx %s · kv %s · %s · %.0f t/s%s. Costs some "
+            "quality; --kv-floor q4_0 to allow it" % (
+                kctx(b.flags.ctx), b.flags.kv_label,
+                offload(b.flags, ctx_obj.shape), b.speed.decode_d,
+                " (%s over #1)" % ", ".join(gains) if gains else ""))
 
 
 def fit_one(target, o, out):

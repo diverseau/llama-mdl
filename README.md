@@ -157,6 +157,10 @@ mdl ui           The dashboard. Bare `mdl` opens it too.
 mdl logs [-f] [name]
                  Print or follow a server's log. Takes a name when more than
                  one is up, or to read a stopped one's log.
+mdl fit ...      What a GGUF will do on this machine, and the flags for it.
+mdl eval <name>  Score a model on a private, auto-graded suite.
+mdl catalog ...  The hub's models, fine-tunes and GGUF quants, offline.
+mdl find         The best model this machine can run, and how to run it.
 ```
 
 Without textual installed, `mdl ui` fails with one line and bare `mdl` prints
@@ -236,7 +240,8 @@ at least 128k of context; `chat` maximises decode at 8k; `max-ctx` takes
 all the context it can at 15 t/s or better; `speed` maximises decode.
 `--min-ctx`, `--min-tps`, `--kv-floor` and `--np` override the floors.
 The KV cache never goes below q8_0 unless you say `--kv-floor q4_0`, or
-the config being fitted already runs 4-bit KV.
+the config being fitted already runs 4-bit KV; either way the output
+says what 4-bit KV would buy in context and speed.
 
 Memory is checked against llama.cpp itself rather than trusted:
 `llama-fit-params`, which ships with llama.cpp, reports what a set of
@@ -276,6 +281,77 @@ the limit would page from disk on every token. A busy CPU is noted, and
 existing entry with pick or fix N, leaving its sampling flags, comments
 and a `.bak` behind. Every flag the prediction rests on is written out,
 including `-np` and `-fit off`, so what runs is what was predicted.
+
+## Scoring a model: `mdl eval`
+
+Leaderboards say how a model does in someone else's setup. `mdl eval`
+says how it does here, at your quant, KV type and context:
+
+```
+mdl eval qwen-small                    every suite (~15-90 min, see --estimate)
+mdl eval qwen-small --suite code,tools --limit 5
+mdl eval qwen-small --estimate         how long it would take
+mdl eval --results                     past runs, with 95% intervals
+```
+
+It starts the model as models.toml runs it (or uses it if it is already
+up) and runs five suites: code (40 functions, graded by hidden unit
+tests that are actually executed), tools (30 tool-calling tasks, single
+and multi-step, against mock tools), long-context (15 retrieval and
+multi-hop questions at 32k, 64k and 128k, those beyond the configured
+context skipped), instruct (20 checkable format rules) and reason (20
+exact-answer problems). Add your own as `[[task]]` entries in
+`~/.config/mdl/evals/*.toml`, checked by `contains`, `regex`, `exact` or
+a Python snippet.
+
+The items are generated from a seed in `~/.config/mdl/eval-seed`, so
+they exist on this machine and nowhere else, and no model can have
+trained on them. Model-written code runs in a subprocess in a temp
+directory with a timeout; `--sandbox` runs it in a throwaway podman or
+docker container with no network instead. Results go to
+`~/.config/mdl/evals.jsonl`, keyed by the file, quant, KV type and
+context they were run at.
+
+## Finding a model: `mdl catalog` and `mdl find`
+
+`mdl find` answers "what is the best thing I can run here":
+
+```
+mdl find                               agent profile: ctx ≥ 128k, ≤ 90 s a turn
+mdl find --profile chat                ≥ 20 t/s decode
+mdl find --license apache --tag code
+mdl find --new                         only what has appeared since last time
+mdl find --no-fetch                    use cached GGUF headers only
+```
+
+It looks at everything in models.toml and at the catalog: the hub's
+model tree, with each model's fine-tunes and merges, every GGUF quant of
+each, and the eval results they report. For the best-scoring candidates
+it runs `mdl fit` on up to three quants each (headers only, nothing
+downloaded), keeps what clears the profile's floors, and ranks by
+expected quality:
+
+- Public results are put on one scale (50 + 15 z against the catalog).
+  A score far above what the model's other scores predict, or one on a
+  benchmark the model card says it trained on, is down-weighted and
+  flagged with ⚑.
+- A fine-tune with no results of its own borrows its parent's, with
+  wider error bars per generation.
+- Lower-bit quants and 4-bit KV cost points; how many is relearned once
+  you have `mdl eval` results for one model at two quants.
+- Once three models have both public results and your own, scores are
+  shown on your local scale instead.
+
+Models no one has rated show up under "worth testing" when they could
+beat the #1, with the `mdl fit --write` and `mdl eval` commands that
+would rate them.
+
+The catalog is one SQLite file in `~/.config/mdl/cache/`. `mdl catalog
+pull` fetches the nightly snapshot from `$MDL_CATALOG_REPO` once one is
+published; until then, `mdl catalog build` crawls the hub locally
+(`--org LiquidAI`, `--base Qwen/Qwen3-8B`; a few minutes for a few
+orgs). `mdl catalog tree <org/repo>` lists every quant of every
+fine-tune of a model, and `mdl catalog search` finds one by name.
 
 ## The UI
 
