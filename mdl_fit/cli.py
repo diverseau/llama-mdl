@@ -15,7 +15,8 @@ MiB = model.MiB
 USAGE = """\
 usage: mdl fit <model.gguf | hf:org/repo[:quant] | name> [options]
        mdl fit inspect <model.gguf | hf:org/repo:quant>
-       mdl fit hw
+       mdl fit hw [--probe]
+       mdl fit hw --idle | --idle-vram 0.5G --idle-ram 35% | --idle-reset
        mdl fit calibrate <model.gguf | name>
 
 options:
@@ -32,13 +33,20 @@ options:
   --write NAME       append the winner to models.toml as [NAME]
   --verify           run the config: oracle + llama-bench, and learn
   --no-oracle        analytic only; skip llama-fit-params
+  --now              plan for the machine as it is this minute, open apps
+                     and all, instead of at idle
   --json             machine-readable
+
+VRAM and RAM are planned for the machine at idle: apps open during the
+scan are taken back off. `mdl fit hw --idle` books the machine as it is
+now as its idle state; --idle-vram/--idle-ram say it outright.
 """
 
 VALUE_OPTS = {"--profile", "--min-ctx", "--min-tps", "--max-ctx",
               "--kv-floor", "--np", "--mmproj", "--apply", "--write",
               "--depth"}
-BOOL_OPTS = {"--explain", "--verify", "--no-oracle", "--json", "--yes"}
+BOOL_OPTS = {"--explain", "--verify", "--no-oracle", "--json", "--yes",
+             "--now"}
 
 
 def die(msg):
@@ -259,7 +267,27 @@ def confidence(ctx_obj, fit):
 # ---------------------------------------------------------------- fit --
 
 def machine_for(target, o):
-    return hw.probe(target.binary)
+    return hw.probe(target.binary, now=bool(o.get("now")))
+
+
+def busy_words(mach):
+    """What keeps the machine from idle, in words, or ''."""
+    bits = []
+    if mach.cpu_load is not None and mach.cpu_load > 0.25:
+        bits.append("CPU %d%% busy" % round(mach.cpu_load * 100))
+    held = mach.held("vram")
+    if sum(b for _, b in held) > GiB:
+        bits.append("open apps hold %s G of VRAM (%s)" % (
+            g(sum(b for _, b in held)), ", ".join(n for n, _ in held[:3])))
+    return "; ".join(bits)
+
+
+def machine_notes(mach):
+    notes = list(mach.notes)
+    if mach.cpu_load is not None and mach.cpu_load > 0.3:
+        notes.append("CPU %d%% busy right now; the speeds assume it idle"
+                     % round(mach.cpu_load * 100))
+    return notes
 
 
 def with_threads(opts, mach):
@@ -295,18 +323,39 @@ def verdict(ctx_obj, fit):
     if over > 0:
         return "fits, tight: %d MiB left, inside the %d MiB safety margin" % (
             (mach.vram_free - fit.gpu) // MiB, mach.margin // MiB)
+    if -over < GiB:
+        return "fits, %d MiB to spare" % (-over // MiB)
     return "fits, %s G to spare" % g(-over)
 
 
 def ram_note(ctx_obj, fit):
-    """Over what is free now but under the limit: it loads, the OS just
-    has to page idle programs out first."""
+    """Over what is free at idle but under the limit: it loads, the OS
+    just has to page idle programs out first."""
     mach = ctx_obj.machine
-    if mach.ram_free_now < fit.mem.host <= mach.ram_usable:
-        return ("needs %s G of RAM and %s G is free right now; loading it "
-                "pages idle programs out to make room" % (
-                    g(fit.mem.host), g(mach.ram_free_now)))
+    if mach.ram_free_idle < fit.mem.host <= mach.ram_usable:
+        return ("needs %s G of RAM and %s G is free %s; loading it pages "
+                "idle programs out to make room" % (
+                    g(fit.mem.host), g(mach.ram_free_idle),
+                    "at idle" if mach.plan == "idle" else "right now"))
     return None
+
+
+def now_note(ctx_obj, fit):
+    """The plan is for the machine at idle; say what has to close first
+    when this minute's machine is short."""
+    mach = ctx_obj.machine
+    if mach.plan != "idle" or fit.gpu <= mach.vram_free_now:
+        return None
+    held = mach.held("vram")
+    who = (", ".join("%s %s G" % (n, g(b)) for n, b in held[:4]) if held
+           else "what is open")
+    return ("right now %s G of VRAM is free, %s G short: close %s first, "
+            "or plan for the machine as it is with --now" % (
+                g(mach.vram_free_now), g(fit.gpu - mach.vram_free_now), who))
+
+
+def fit_notes(ctx_obj, fit):
+    return [n for n in (now_note(ctx_obj, fit), ram_note(ctx_obj, fit)) if n]
 
 
 def kv_hint(ctx_obj, o, target, result, mach):
@@ -344,7 +393,7 @@ def fit_one(target, o, out):
     w = out.write
     w("%-44s %s\n" % (target.inv.name, describe(target.inv)))
     w("machine   %s\n" % mach.summary())
-    for note in mach.notes + target.notes + target.inv.warnings:
+    for note in machine_notes(mach) + target.notes + target.inv.warnings:
         w("note      %s\n" % note)
     w("profile   %s  (%s)\n\n" % (opts.profile, opts.blurb))
     if current is not None:
@@ -353,8 +402,7 @@ def fit_one(target, o, out):
             offload(target.flags, ctx_obj.shape), target.flags.ub,
             g(current.gpu), " ✓" if current.oracle else "",
             verdict(ctx_obj, current)))
-        note = ram_note(ctx_obj, current)
-        if note:
+        for note in fit_notes(ctx_obj, current):
             w("          %s\n" % note)
         w("\n")
     hint = kv_hint(ctx_obj, o, target, result, mach)
@@ -375,8 +423,7 @@ def fit_one(target, o, out):
         w("hint      %s\n\n" % hint)
     best = result.best
     w(placement(ctx_obj, best) + "\n")
-    note = ram_note(ctx_obj, best)
-    if note:
+    for note in fit_notes(ctx_obj, best):
         w("note      %s\n" % note)
     w("\n")
     w(confidence(ctx_obj, best) + "\n\n")
@@ -421,9 +468,19 @@ def as_json(ctx_obj, opts, result, target, current):
                                          mach.build or {}, target.mmproj)}
     return {"model": str(target.model_path), "arch": ctx_obj.inv.arch,
             "machine": {"gpu": mach.gpu_name, "backend": mach.backend,
+                        "plan": mach.plan,
                         "vram_free": mach.vram_free,
+                        "vram_free_now": mach.vram_free_now,
                         "vram_usable": mach.vram_usable,
                         "ram_avail": mach.ram_avail,
+                        "ram_avail_now": mach.ram_avail_now,
+                        "ram_usable": mach.ram_usable,
+                        "idle": mach.idle and {
+                            "vram": mach.idle.vram,
+                            "vram_how": mach.idle.vram_how,
+                            "ram": mach.idle.ram,
+                            "ram_how": mach.idle.ram_how},
+                        "cpu_load": mach.cpu_load,
                         "calibrated": mach.calibrated},
             "profile": opts.profile, "relaxed": result.relaxed,
             "current": one(current) if current is not None else None,
@@ -482,8 +539,7 @@ def cmd_explain(target, o, out):
         w("%s  ✓  %s · VRAM %s G · RAM %s G\n" % (
             target.name, verdict(ctx_obj, base), g(base.gpu),
             g(base.mem.host)))
-        note = ram_note(ctx_obj, base)
-        if note:
+        for note in fit_notes(ctx_obj, base):
             w("note  %s\n" % note)
         w(placement(ctx_obj, base, target.name) + "\n")
         return
@@ -741,9 +797,87 @@ def cmd_inspect(args, out):
 
 # ------------------------------------------------------------------ hw --
 
+def size(text, total):
+    """'0.5G', '512M', '35%' (of total) -> bytes."""
+    m = re.fullmatch(r"\s*([\d.]+)\s*(%|[kmgt])?i?b?\s*", str(text), re.I)
+    if not m:
+        die("not a size: %r (e.g. 0.5G, 512M or 35%%)" % text)
+    n, unit = float(m.group(1)), (m.group(2) or "g").lower()
+    if unit == "%":
+        return int(total * n / 100)
+    return int(n * {"k": K, "m": MiB, "g": GiB, "t": GiB * K}[unit])
+
+
+def idle_args(args, binary, w):
+    """--idle (this minute is what idle looks like), --idle-vram X and
+    --idle-ram X (say it outright), --idle-reset (measure again).
+    True if any of them was given."""
+    if "--idle-reset" in args:
+        hw.set_idle()
+        w("idle     forgotten; measured from what is open again\n")
+        return True
+    vals = {}
+    for flag in ("--idle-vram", "--idle-ram"):
+        if flag in args:
+            i = args.index(flag)
+            if i + 1 >= len(args):
+                die("%s needs a size, e.g. 0.5G or 35%%" % flag)
+            vals[flag[7:]] = args[i + 1]
+    if not vals and "--idle" not in args:
+        return False
+    mach = hw.probe(binary, now=True)
+    if vals:
+        totals = {"vram": mach.vram_total, "ram": mach.ram_total}
+        got = {k: size(v, totals[k]) for k, v in vals.items()}
+    else:
+        got = {"vram": mach.snap.vram_used, "ram": mach.snap.ram_used}
+    hw.set_idle(**got)
+    w("idle     booked: %s\n" % " · ".join(
+        "%s %s G" % (k.upper(), g(v)) for k, v in got.items() if v is not None))
+    return True
+
+
+IDLE_HOW = {"set": "you set it", "seen at boot": "seen just after boot",
+            "measured": "in use now, less open apps",
+            "now": "in use now; no per-app figures",
+            "typical": "typical for the OS"}
+
+
+def idle_lines(mach):
+    b, s = mach.idle, mach.snap
+    if b is None or s is None:
+        return []
+    out = ["idle     VRAM %s G (%s) · RAM %s G (%s)" % (
+        g(b.vram), IDLE_HOW[b.vram_how], g(b.ram), IDLE_HOW[b.ram_how])]
+    if {b.vram_how, b.ram_how} & {"set", "seen at boot"}:
+        meas = ["%s %s G" % (k, g(v)) for k, v in (
+            ("VRAM", b.measured_vram), ("RAM", b.measured_ram)) if v is not None]
+        if meas:
+            out.append("         measured now: %s (system, startup apps, "
+                       "this terminal)" % " · ".join(meas))
+    apps = {}
+    for p in s.apps:
+        a = apps.setdefault(p.name, [0, 0])
+        a[0] += p.vram
+        a[1] += p.ram
+    words = []
+    for n, (v, r) in sorted(apps.items(), key=lambda x: -sum(x[1]))[:6]:
+        bits = ["%s G %s" % (g(x), what) for x, what in ((v, "VRAM"),
+                                                          (r, "RAM"))
+                if x >= 64 * MiB]
+        if bits:
+            words.append("%s %s" % (n, " ".join(bits)))
+    if words:
+        out.append("open     " + " · ".join(words))
+    if mach.cpu_load is not None:
+        out.append("load     CPU %d%% busy now" % round(mach.cpu_load * 100))
+    return out
+
+
 def cmd_hw(args, out):
     models, binary = _config()
     w = out.write
+    booked = idle_args(args, binary, w)
     mach = hw.probe(binary)
     w("machine  %s\n" % mach.summary())
     w("backend  %s · build %s\n" % (mach.backend, (mach.build or {}).get(
@@ -754,14 +888,20 @@ def cmd_hw(args, out):
     if mach.pcie:
         w("pcie     gen %s x%s (max gen %s x%s)\n" % (
             mach.pcie[0], mach.pcie[2], mach.pcie[1], mach.pcie[3]))
+    for line in idle_lines(mach):
+        w(line + "\n")
     for note in mach.notes:
         w("note     %s\n" % note)
-    if "--probe" in args:
+    if "--probe" in args or booked:
         return
     bench_bin = calib.env_bench_bin(binary)
     if not bench_bin:
         die("llama-bench not found next to %s; install it to calibrate" %
             binary)
+    busy = busy_words(mach)
+    if busy:
+        w("note     %s: calibrating now measures a slower machine than "
+          "this one is at idle\n" % busy)
     invs = []
     for cfg in models.values():
         path = Path(str(cfg.get("model", "")))
@@ -880,6 +1020,8 @@ def cmd_hw(args, out):
     if not res:
         die("no benchmark completed; is llama-bench working?")
     res["build"] = (mach.build or {}).get("build")
+    if mach.cpu_load is not None:
+        res["cpu_load"] = round(mach.cpu_load, 2)
     hw.record_bench(res)
     w("\ncalibrated: %s\nsaved to %s\n" % (" · ".join(done), hw.hw_path()))
 

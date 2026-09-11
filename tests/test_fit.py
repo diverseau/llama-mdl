@@ -629,4 +629,108 @@ class _Q4:
 check("a config already on 4-bit KV lets the search go there too",
       (cli.kv_floor_of(_Q4), cli.kv_floor_of(None)), ("q4_0", "q8_0"))
 
+# =============================================================== idle ===
+
+from mdl_fit import usage  # noqa: E402
+
+check("startup commands name the program they run",
+      [usage.exe_of(c) for c in (
+          '"C:\\Users\\u\\AppData\\Local\\Discord\\Update.exe" '
+          '--processStart Discord.exe',
+          "C:\\Program Files\\Microsoft OneDrive\\26.1\\"
+          "OneDrive.Sync.Service.exe",
+          '"C:\\Program Files (x86)\\Steam\\steam.exe" -silent',
+          "C:\\WINDOWS\\system32\\SecurityHealthSystray.exe")],
+      ["discord", "onedrive.sync.service", "steam", "securityhealthsystray"])
+check("Task Manager's odd bytes are switched off",
+      [usage.enabled(b) for b in (None, b"\x02\0", b"\x03\0", b"\x07\0")],
+      [True, True, False, False])
+check("autostart entries: env and field codes skipped, off ones dropped",
+      [usage.desktop_exec(x) for x in (
+          "[Desktop Entry]\nExec=env GDK_BACKEND=x11 /usr/bin/discord %U\n",
+          "[Desktop Entry]\nExec=/usr/bin/foo\nHidden=true\n",
+          "[Desktop Entry]\nExec=flatpak run --branch=stable "
+          "com.spotify.Client\n")],
+      ["discord", None, "spotify"])
+tp = ('\r\n"(PDH-CSV 4.0)","\\\\PC\\GPU Process Memory(pid_2032_luid_0x0_0x1'
+      '_phys_0)\\Dedicated Usage","\\\\PC\\GPU Process Memory(pid_77_luid_0x0'
+      '_0x1_phys_0)\\Dedicated Usage"\r\n'
+      '"09/11/2026 20:34:31.203","1048576.0","2097152.0"\r\n')
+check("per-process VRAM from typeperf", usage.parse_typeperf(tp),
+      {2032: 1 << 20, 77: 2 << 20})
+nv = ("| Processes:                                         |\n"
+      "|    0   N/A  N/A      1234      G   /usr/lib/xorg/Xorg      412MiB |\n"
+      "|    0   N/A  N/A      5678    C+G   chrome --type=gpu        98MiB |\n"
+      "|    0   N/A  N/A      9999    C+G   C:\\Windows\\dwm.exe       N/A |\n")
+check("and from nvidia-smi's table, where it has numbers",
+      usage.parse_nvidia_procs(nv), ({1234: 412 << 20, 5678: 98 << 20}, True))
+check("the OS sets the floor",
+      [usage.os_key("win32", {}, 22631), usage.os_key("win32", {}, 19045),
+       usage.os_key("linux", {}), usage.os_key("darwin", {}),
+       usage.os_key("linux", {"WAYLAND_DISPLAY": "w",
+                              "XDG_CURRENT_DESKTOP": "KDE"})],
+      ["windows11", "windows10", "headless", "macos", "kde"])
+
+P = usage.Proc
+procs = [P(1, 0, "explorer", system=True), P(10, 1, "steam"),
+         P(11, 10, "steamwebhelper"), P(12, 1, "eldenring"),
+         P(13, 10, "chrome"), P(21, 1, "windowsterminal"),
+         P(20, 21, "python"), P(22, 21, "pwsh"), P(23, 12, "crashhandler")]
+usage.classify(procs, {"steam"}, here=20)
+check("system, startup (and its children), this terminal, and apps",
+      {p.name: p.kind for p in procs},
+      {"explorer": "system", "steam": "startup", "steamwebhelper": "startup",
+       "eldenring": "app", "chrome": "app", "windowsterminal": "here",
+       "python": "here", "pwsh": "app", "crashhandler": "app"})
+
+held = [P(5, 1, "game", ram=3 * GiB, vram=GiB),
+        P(6, 1, "wallpaper64", ram=GiB // 4, vram=GiB // 4)]
+usage.classify(held, {"wallpaper64"}, here=-1)
+snap = usage.Snapshot("windows11", held, True, int(1.5 * GiB), 8 * GiB)
+b = usage.baseline(snap)
+check("measured: in use now, less what open apps hold",
+      (b.vram, b.vram_how, b.ram, b.ram_how),
+      (GiB // 2, "measured", 5 * GiB, "measured"))
+b = usage.baseline(snap, {"set": {"vram": 400 << 20}})
+check("what you set wins", (b.vram, b.vram_how, b.ram_how),
+      (400 << 20, "set", "measured"))
+b = usage.baseline(usage.Snapshot("windows11", held, False, int(1.5 * GiB),
+                                  8 * GiB))
+check("no per-app VRAM: plan for what is in use now", (b.vram, b.vram_how),
+      (int(1.5 * GiB), "now"))
+b = usage.baseline(usage.Snapshot("windows11", [], True, 100 << 20, GiB))
+check("never below what the OS itself needs", (b.vram, b.ram),
+      (300 << 20, 3 * GiB))
+check("closing apps gives their VRAM back, capped at the card",
+      (usage.plan_free(12 * GiB, 10 * GiB, int(1.5 * GiB), GiB // 2),
+       usage.plan_free(12 * GiB, 11 * GiB, 2 * GiB, GiB // 2)),
+      (11 * GiB, int(11.5 * GiB)))
+seen = {}
+fresh = usage.Snapshot("windows11", [], True, GiB, 4 * GiB, up=120)
+b = usage.baseline(fresh)
+check("a probe soon after boot is booked, once per boot",
+      (usage.record_boot(seen, fresh, b), usage.record_boot(seen, fresh, b)),
+      (True, False))
+check("and then stands for the idle machine", usage.baseline(
+    usage.Snapshot("windows11", [], True, 3 * GiB, 9 * GiB), seen).vram_how,
+    "seen at boot")
+
+idle_box = hw.Machine(vram_total=12 * GiB, vram_free=11 * GiB,
+                      vram_free_now=5 * GiB, plan="idle", ram_total=16 * GiB,
+                      ram_avail=10 * GiB, ram_avail_now=4 * GiB)
+check("the summary says idle, and what is free this minute",
+      ["at idle" in idle_box.summary(), "5.0 now" in idle_box.summary()],
+      [True, True])
+need = model.memory(shape, fl).gpu
+tm2 = machine(vram=need + GiB)
+tm2.plan, tm2.vram_free_now = "idle", need // 2
+nctx = search.Context(inv, tm2, calib.Residuals([]))
+nf = nctx.evaluate(fl, 0)
+check("fits at idle but not this minute: it says what to close",
+      (nctx.fits(nf.mem), (cli.now_note(nctx, nf) or "")[:9]),
+      (True, "right now"))
+check("sizes: absolute or a share of the total",
+      [cli.size("0.5G", 0), cli.size("512MiB", 0), cli.size("35%", 100)],
+      [GiB // 2, 512 << 20, 35])
+
 sys.exit(t.done())

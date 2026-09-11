@@ -41,6 +41,16 @@ Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
   out. A config inside the free VRAM but eating the safety margin is
   "fits, tight", not over. A config already on 4-bit KV lets the search
   use it, and a q8_0 search that comes up short says what q4_0 would buy.
+- Fits are planned for the machine at idle, so a scan taken mid-game or
+  with a browser full of tabs gives the same answer as one taken on a
+  quiet desktop. What the OS and resident programs hold is, best first:
+  what `mdl fit hw --idle` (or `--idle-vram/--idle-ram`) was told, what a
+  probe saw in the first ten minutes after boot, or what is in use now
+  less what apps opened since boot hold - anything not the system's, not
+  a startup entry and not the terminal mdl runs in - floored at a typical
+  figure per OS and desktop. When this minute's machine is short, the
+  output names the apps to close; `--now` plans for it as it is. A busy
+  CPU is noted, and `mdl fit hw` warns before calibrating on one.
 
 ### Changed
 

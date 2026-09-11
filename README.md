@@ -216,6 +216,7 @@ mdl fit hf:someorg/Some-Model-GGUF               every quant in a repo,
 mdl fit tiel-coder-Fast --explain                why it does not fit, and fixes
 mdl fit tiel-coder-Fast --verify                 run it, measure, learn
 mdl fit hw                                       measure this machine (~3 min)
+mdl fit hw --idle                                book now as what idle looks like
 mdl fit inspect <gguf>                           per-layer tensor inventory
 ```
 
@@ -234,7 +235,8 @@ seconds for a 16k-token prompt plus an 800-token reply at 48k deep, with
 at least 128k of context; `chat` maximises decode at 8k; `max-ctx` takes
 all the context it can at 15 t/s or better; `speed` maximises decode.
 `--min-ctx`, `--min-tps`, `--kv-floor` and `--np` override the floors.
-The KV cache never goes below q8_0 unless you say `--kv-floor q4_0`.
+The KV cache never goes below q8_0 unless you say `--kv-floor q4_0`, or
+the config being fitted already runs 4-bit KV.
 
 Memory is checked against llama.cpp itself rather than trusted:
 `llama-fit-params`, which ships with llama.cpp, reports what a set of
@@ -245,10 +247,30 @@ file in `~/.config/mdl/calib.jsonl`, so the next fit starts from it.
 Speed is bytes over bandwidth per side, and the bandwidths are seeds
 until `mdl fit hw` has measured them; the confidence line says which.
 
-Free VRAM is read live (llama.cpp's own view, or nvidia-smi's if lower)
-minus a 256 MiB margin, and RAM is what is available right now minus
-1 GiB for everything else. A model whose CPU-side weights do not fit in
-RAM is not a fit: it would page from disk on every token.
+VRAM and RAM are planned for the machine at idle, not as the scan finds
+it: a game or a browser full of tabs open while you run `mdl fit` is
+taken back off. The idle figure is, best first:
+
+- what you told it: `mdl fit hw --idle` books the machine as it is now,
+  `mdl fit hw --idle-vram 0.5G --idle-ram 35%` says it outright, and
+  `--idle-reset` forgets;
+- what it saw in the first ten minutes after a boot, booked by any probe;
+- what is in use now, less what the apps opened since boot hold. An app
+  is anything that is not the system's, a startup entry (Run keys and
+  the Startup folder on Windows, XDG autostart on Linux, LaunchAgents on
+  macOS) or the terminal you ran mdl from; browsers always count as
+  apps. Totals come from the adapter and the OS, per-app figures only
+  say what to take back off;
+- never less than a typical floor for the OS and desktop.
+
+When a pick needs more VRAM than is free this minute, it names the apps
+to close; `--now` plans for the machine as it is instead. The card keeps
+a 256 MiB margin; a config inside the free VRAM but eating the margin is
+"fits, tight". RAM has a hard limit, the total less 3 G for the system:
+past what is free at idle the OS pages idle programs out, which is a
+note, not a failure, but a model whose CPU-side weights do not fit under
+the limit would page from disk on every token. A busy CPU is noted, and
+`mdl fit hw` warns before calibrating on a machine that is not idle.
 
 `--write NAME` appends the winner to models.toml; `--apply N` rewrites an
 existing entry with pick or fix N, leaving its sampling flags, comments

@@ -10,6 +10,10 @@ will give back, nvidia-smi counts it as taken, and the gap is a gigabyte.
 RAM has two numbers. What is free right now is not the limit: a load
 that needs more makes the OS page idle programs out, slowly but fine. The
 limit is the total less what the OS and desktop cannot do without.
+
+Both are planned for the machine at idle, not as the scan finds it: a
+game or a browser full of tabs open during the scan is taken back off
+(see usage.py). --now plans for the machine as it is this minute.
 """
 
 import ctypes
@@ -21,6 +25,8 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+
+from . import usage
 
 MiB = 1 << 20
 GiB = 1 << 30
@@ -250,6 +256,15 @@ class Machine:
         self.bench = kw.get("bench", {})         # measured bandwidths
         self.binary = kw.get("binary")
         self.notes = kw.get("notes", [])
+        # vram_free and ram_avail are what the plan is for: the machine at
+        # idle, or as it is now (plan "now"). The _now figures are always
+        # this minute's.
+        self.plan = kw.get("plan", "now")
+        self.vram_free_now = kw.get("vram_free_now", self.vram_free)
+        self.ram_avail_now = kw.get("ram_avail_now", self.ram_avail)
+        self.idle = kw.get("idle")            # usage.Baseline, when probed
+        self.snap = kw.get("snap")            # usage.Snapshot, when probed
+        self.cpu_load = kw.get("cpu_load")
 
     @property
     def vram_usable(self):
@@ -260,12 +275,20 @@ class Machine:
         """The hard limit: past this the machine thrashes."""
         if self.ram_total:
             return max(0, self.ram_total - self.ram_reserve)
-        return self.ram_free_now
+        return self.ram_free_idle
+
+    @property
+    def ram_free_idle(self):
+        """Past this, loading pages other programs out first."""
+        return max(0, self.ram_avail - self.os_headroom)
 
     @property
     def ram_free_now(self):
-        """Past this, loading pages other programs out first."""
-        return max(0, self.ram_avail - self.os_headroom)
+        return max(0, self.ram_avail_now - self.os_headroom)
+
+    def held(self, what):
+        """[(app, bytes)] of 'vram' or 'ram' held by apps open now."""
+        return self.snap.held(what) if self.snap else []
 
     @property
     def max_alloc(self):
@@ -282,18 +305,27 @@ class Machine:
         return dict(self.__dict__)
 
     def summary(self):
-        """RTX 3060 · 11.2 G free now (11.0 usable) · 16 G RAM (11.8 avail)"""
+        """RTX 3060 · 11.5 G free at idle (11.3 usable, 10.4 now) ·
+        16 G RAM (10.3 free at idle, 7.7 now, 12.8 max)"""
         g = self.gpu_name.replace("NVIDIA GeForce ", "")
+        when = "at idle" if self.plan == "idle" else "now"
         parts = []
         if self.vram_total:
-            parts.append("%s · %.1f G free now (%.1f usable)"
-                         % (g, self.vram_free / GiB, self.vram_usable / GiB))
+            now = ""
+            if self.vram_free - self.vram_free_now >= 64 * MiB:
+                now = ", %.1f now" % (self.vram_free_now / GiB)
+            parts.append("%s · %.1f G free %s (%.1f usable%s)"
+                         % (g, self.vram_free / GiB, when,
+                            self.vram_usable / GiB, now))
         else:
             parts.append("no GPU found")
         if self.ram_total:
-            parts.append("%.0f G RAM (%.1f free now, %.1f usable)"
-                         % (self.ram_total / GiB, self.ram_avail / GiB,
-                            self.ram_usable / GiB))
+            now = ""
+            if self.ram_avail - self.ram_avail_now >= 256 * MiB:
+                now = ", %.1f now" % (self.ram_avail_now / GiB)
+            parts.append("%.0f G RAM (%.1f free %s%s, %.1f max)"
+                         % (self.ram_total / GiB, self.ram_avail / GiB, when,
+                            now, self.ram_usable / GiB))
         parts.append("calibrated ✓" if self.calibrated else "uncalibrated")
         return " · ".join(parts)
 
@@ -317,9 +349,10 @@ def save(data):
     os.replace(tmp, path)
 
 
-def probe(binary="llama-server", quick=False):
-    """A Machine for right now. quick skips llama.cpp's own device query,
-    which has to start the backend and takes a second or two."""
+def probe(binary="llama-server", quick=False, now=False):
+    """A Machine, planned for at idle (now: as it is this minute). quick
+    skips llama.cpp's own device query, which has to start the backend,
+    and the per-app VRAM and CPU readings; a second or two each."""
     saved = load_saved()
     kw = {"binary": binary, "notes": []}
     gpus = nvidia()
@@ -346,6 +379,26 @@ def probe(binary="llama-server", quick=False):
     total, avail = ram()
     kw.update(ram_total=total or 0, ram_avail=avail or 0,
               cores=cpu_cores())
+    used_vram = gpus[0]["used"] if gpus else (
+        devs[0][3] - devs[0][4] if devs else None)
+    snap = usage.snapshot(used_vram, total - avail if total and avail
+                          else None, quick)
+    idle = saved.get("idle", {})
+    base = usage.baseline(snap, idle)
+    kw.update(vram_free_now=kw.get("vram_free", 0), ram_avail_now=avail or 0,
+              idle=base, snap=snap, cpu_load=snap.cpu,
+              ram_reserve=max(RAM_RESERVE, usage.TYPICAL.get(
+                  snap.os_key, (0, 0))[0]))
+    if not now:
+        kw["plan"] = "idle"
+        kw["vram_free"] = usage.plan_free(kw.get("vram_total", 0),
+                                          kw.get("vram_free", 0), used_vram,
+                                          base.vram)
+        if total:
+            kw["ram_avail"] = max(avail or 0, total - base.ram)
+    booked = usage.record_boot(idle, snap, base)
+    if booked:
+        saved["idle"] = idle
     kw["margin"] = int(saved.get("margin", DEFAULT_MARGIN))
     bench = saved.get("bench", {})
     if bench.get("build") and build and bench.get("build") != build.get("build"):
@@ -360,11 +413,25 @@ def probe(binary="llama-server", quick=False):
     if build:
         saved.setdefault("builds", {})[bkey] = build
         saved.setdefault("backends", {})[bkey] = m.backend
+    if build or booked:
         try:
             save(saved)
         except OSError:
             pass
     return m
+
+
+def set_idle(**values):
+    """Book what the machine holds at idle, in bytes ('vram', 'ram');
+    with no values, forget it and go back to measuring."""
+    saved = load_saved()
+    if not values:
+        saved.pop("idle", None)
+    else:
+        fixed = saved.setdefault("idle", {}).setdefault("set", {})
+        fixed.update({k: int(v) for k, v in values.items() if v is not None})
+        fixed["at"] = time.strftime("%Y-%m-%d %H:%M")
+    save(saved)
 
 
 def _binary_key(binary):
