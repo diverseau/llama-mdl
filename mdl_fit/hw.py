@@ -1,0 +1,374 @@
+"""What this machine has right now, and what it has been measured doing.
+
+Free VRAM is read live at fit time, not taken off the box: the desktop and
+a browser eat a few hundred MB, and it moves. llama.cpp's own view of the
+device (--list-devices) wins over nvidia-smi when both answer, because
+llama.cpp is the one that will be allocating.
+"""
+
+import ctypes
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+MiB = 1 << 20
+GiB = 1 << 30
+DEFAULT_MARGIN = 256 * MiB       # held back on the card, learned per machine
+OS_HEADROOM = 1024 * MiB         # RAM the rest of the machine gets to keep
+NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+
+def config_dir():
+    """$MDL_FIT_HOME, else the same place mdl keeps models.toml."""
+    if os.environ.get("MDL_FIT_HOME"):
+        return Path(os.environ["MDL_FIT_HOME"])
+    root = os.environ.get("XDG_CONFIG_HOME")
+    return (Path(root) if root else Path.home() / ".config") / "mdl"
+
+
+def cache_dir():
+    if os.environ.get("MDL_FIT_HOME"):
+        return Path(os.environ["MDL_FIT_HOME"]) / "cache"
+    root = os.environ.get("XDG_CACHE_HOME")
+    return (Path(root) if root else Path.home() / ".cache") / "mdl"
+
+
+def _run(argv, timeout=20):
+    try:
+        p = subprocess.run(argv, capture_output=True, text=True,
+                           timeout=timeout, creationflags=NO_WINDOW,
+                           errors="replace")
+        return p.stdout + p.stderr
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+# ------------------------------------------------------------------ GPU --
+
+def nvidia():
+    exe = shutil.which("nvidia-smi")
+    if not exe:
+        return []
+    fields = ("name,memory.total,memory.free,memory.used,driver_version,"
+              "pcie.link.gen.current,pcie.link.gen.max,"
+              "pcie.link.width.current,pcie.link.width.max")
+    out = _run([exe, "--query-gpu=" + fields,
+                "--format=csv,noheader,nounits"], timeout=8)
+    gpus = []
+    for line in out.strip().splitlines():
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) != 9:
+            continue
+
+        def num(x):
+            try:
+                return int(float(x))
+            except ValueError:
+                return None
+        gpus.append({"name": parts[0], "total": (num(parts[1]) or 0) * MiB,
+                     "free": (num(parts[2]) or 0) * MiB,
+                     "used": (num(parts[3]) or 0) * MiB,
+                     "driver": parts[4],
+                     "pcie": [num(parts[5]), num(parts[6]),
+                              num(parts[7]), num(parts[8])]})
+    return gpus
+
+
+_DEVICE = re.compile(r"^\s*(\w+?)(\d+):\s*(.+?)\s*\((\d+) MiB,\s*(\d+) MiB free\)",
+                     re.M)
+
+
+def llama_devices(binary):
+    """[(backend, index, name, total, free)] as llama.cpp sees them."""
+    out = _run([binary, "--list-devices"], timeout=30)
+    return [(m.group(1), int(m.group(2)), m.group(3),
+             int(m.group(4)) * MiB, int(m.group(5)) * MiB)
+            for m in _DEVICE.finditer(out)]
+
+
+# ------------------------------------------------------------------ RAM --
+
+class _MemStatus(ctypes.Structure):
+    _fields_ = [("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong),
+                ("ullTotalPhys", ctypes.c_ulonglong),
+                ("ullAvailPhys", ctypes.c_ulonglong),
+                ("ullTotalPageFile", ctypes.c_ulonglong),
+                ("ullAvailPageFile", ctypes.c_ulonglong),
+                ("ullTotalVirtual", ctypes.c_ulonglong),
+                ("ullAvailVirtual", ctypes.c_ulonglong),
+                ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
+
+
+def ram():
+    """(total, available) bytes, or (None, None)."""
+    if os.name == "nt":
+        st = _MemStatus()
+        st.dwLength = ctypes.sizeof(_MemStatus)
+        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(st)):
+            return st.ullTotalPhys, st.ullAvailPhys
+        return None, None
+    try:
+        info = {}
+        for line in Path("/proc/meminfo").read_text().splitlines():
+            key, _, rest = line.partition(":")
+            info[key] = int(rest.split()[0]) * 1024
+        return info.get("MemTotal"), info.get("MemAvailable",
+                                              info.get("MemFree"))
+    except (OSError, ValueError, IndexError):
+        pass
+    if sys.platform == "darwin":
+        out = _run(["sysctl", "-n", "hw.memsize"])
+        try:
+            total = int(out.strip())
+            return total, total // 2          # no cheap honest number; halve
+        except ValueError:
+            pass
+    return None, None
+
+
+# ------------------------------------------------------------------ CPU --
+
+def cpu_cores():
+    """(logical, physical, performance) core counts; None where unknown.
+
+    On a hybrid Intel chip the performance-core count is the one that
+    matters: decode threads parked on E-cores drag the rest down.
+    """
+    logical = os.cpu_count()
+    if os.name == "nt":
+        try:
+            return (logical,) + _win_cores()
+        except (OSError, ValueError, AttributeError):
+            return logical, None, None
+    try:
+        cores, classes = set(), {}
+        block = {}
+        for line in Path("/proc/cpuinfo").read_text().splitlines() + [""]:
+            if not line.strip():
+                if block:
+                    cores.add((block.get("physical id"), block.get("core id")))
+                block = {}
+                continue
+            k, _, v = line.partition(":")
+            block[k.strip()] = v.strip()
+        physical = len(cores) or None
+        base = Path("/sys/devices/system/cpu")
+        for d in base.glob("cpu[0-9]*/cpufreq/cpuinfo_max_freq"):
+            classes[d.read_text().strip()] = classes.get(
+                d.read_text().strip(), 0) + 1
+        perf = None
+        if len(classes) > 1 and physical:
+            top = max(classes, key=int)
+            perf = sum(1 for _ in range(classes[top]))
+            perf = max(1, perf // max(1, (logical or 1) // physical))
+        return logical, physical, perf
+    except OSError:
+        return logical, None, None
+
+
+def _win_cores():
+    k32 = ctypes.windll.kernel32
+    size = ctypes.c_ulong(0)
+    k32.GetLogicalProcessorInformationEx(0, None, ctypes.byref(size))
+    buf = ctypes.create_string_buffer(size.value)
+    if not k32.GetLogicalProcessorInformationEx(0, buf, ctypes.byref(size)):
+        raise OSError("GetLogicalProcessorInformationEx failed")
+    raw, off, classes = buf.raw, 0, []
+    while off < size.value:
+        rel = int.from_bytes(raw[off:off + 4], "little")
+        rec = int.from_bytes(raw[off + 4:off + 8], "little")
+        if rel == 0 and rec:              # RelationProcessorCore
+            classes.append(raw[off + 9])  # EfficiencyClass
+        off += rec or size.value
+    physical = len(classes) or None
+    perf = None
+    if classes and len(set(classes)) > 1:
+        perf = classes.count(max(classes))
+    return physical, perf
+
+
+# ---------------------------------------------------------- llama.cpp --
+
+_BUILD = re.compile(r"build (\d+)(?:.*?commit ([0-9a-f]+))?", re.I)
+
+
+def llama_build(binary):
+    """{'build': 10424, 'commit': ..., 'backend': 'Vulkan', ...} or {}."""
+    out = _run([binary, "--version"])
+    m = _BUILD.search(out)
+    info = {"build": int(m.group(1)) if m else None,
+            "commit": m.group(2) if m else None, "version_text":
+            out.strip().splitlines()[0] if out.strip() else ""}
+    helptext = _run([binary, "--help"], timeout=20)
+    info["load_mode"] = "--load-mode" in helptext
+    info["fit_flag"] = re.search(r"-fit,\s+--fit", helptext) is not None
+    info["no_mmproj_offload"] = "--no-mmproj-offload" in helptext
+    return info
+
+
+def sibling(binary, name):
+    """llama-bench or llama-fit-params next to llama-server, else PATH."""
+    exe = name + (".exe" if os.name == "nt" else "")
+    found = shutil.which(binary) or binary
+    here = Path(found).parent / exe
+    if here.is_file():
+        return str(here)
+    return shutil.which(name)
+
+
+# ---------------------------------------------------------------- probe --
+
+class Machine:
+    """Everything the fit needs to know about the box, in one place."""
+
+    def __init__(self, **kw):
+        self.gpu_name = kw.get("gpu_name", "no GPU")
+        self.backend = kw.get("backend", "CPU")
+        self.vram_total = kw.get("vram_total", 0)
+        self.vram_free = kw.get("vram_free", 0)
+        self.margin = kw.get("margin", DEFAULT_MARGIN)
+        self.ram_total = kw.get("ram_total", 0)
+        self.ram_avail = kw.get("ram_avail", 0)
+        self.os_headroom = kw.get("os_headroom", OS_HEADROOM)
+        self.cores = kw.get("cores", (os.cpu_count(), None, None))
+        self.pcie = kw.get("pcie")
+        self.driver = kw.get("driver")
+        self.build = kw.get("build", {})
+        self.bench = kw.get("bench", {})         # measured bandwidths
+        self.binary = kw.get("binary")
+        self.notes = kw.get("notes", [])
+
+    @property
+    def vram_usable(self):
+        return max(0, self.vram_free - self.margin)
+
+    @property
+    def ram_usable(self):
+        return max(0, self.ram_avail - self.os_headroom)
+
+    @property
+    def max_alloc(self):
+        """Largest single buffer the backend will hand out. Vulkan drivers
+        cap it (4 GiB on NVIDIA); a 262k-vocab logits tensor at ubatch
+        4096 hits exactly that, and llama.cpp moves it to the CPU."""
+        return 4 * GiB if self.backend == "Vulkan" else 1 << 62
+
+    @property
+    def calibrated(self):
+        return bool(self.bench.get("bw_gpu"))
+
+    def as_dict(self):
+        return dict(self.__dict__)
+
+    def summary(self):
+        """RTX 3060 · 11.2 G free now (11.0 usable) · 16 G RAM (11.8 avail)"""
+        g = self.gpu_name.replace("NVIDIA GeForce ", "")
+        parts = []
+        if self.vram_total:
+            parts.append("%s · %.1f G free now (%.1f usable)"
+                         % (g, self.vram_free / GiB, self.vram_usable / GiB))
+        else:
+            parts.append("no GPU found")
+        if self.ram_total:
+            parts.append("%.0f G RAM (%.1f avail)"
+                         % (self.ram_total / GiB, self.ram_avail / GiB))
+        parts.append("calibrated ✓" if self.calibrated else "uncalibrated")
+        return " · ".join(parts)
+
+
+def hw_path():
+    return config_dir() / "hw.json"
+
+
+def load_saved():
+    try:
+        return json.loads(hw_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def save(data):
+    path = hw_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp%d" % os.getpid())
+    tmp.write_text(json.dumps(data, indent=1), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def probe(binary="llama-server", quick=False):
+    """A Machine for right now. quick skips llama.cpp's own device query,
+    which has to start the backend and takes a second or two."""
+    saved = load_saved()
+    kw = {"binary": binary, "notes": []}
+    gpus = nvidia()
+    if gpus:
+        g = gpus[0]
+        kw.update(gpu_name=g["name"], backend="CUDA", vram_total=g["total"],
+                  vram_free=g["free"], pcie=g["pcie"], driver=g["driver"])
+        if len(gpus) > 1:
+            kw["notes"].append("%d GPUs found; mdl fit models the first "
+                               "only" % len(gpus))
+    bkey = _binary_key(binary)
+    build = saved.get("builds", {}).get(bkey)
+    if not build and shutil.which(binary) or not build and Path(binary).is_file():
+        build = llama_build(binary)
+    kw["build"] = build or {}
+    devs = [] if quick else llama_devices(binary)
+    if devs:
+        backend, _, name, total, free = devs[0]
+        kw.update(backend=backend, gpu_name=name, vram_total=total,
+                  vram_free=free if not gpus else min(free, gpus[0]["free"]))
+    elif gpus:
+        kw["backend"] = saved.get("backends", {}).get(bkey) or _guess_backend(
+            binary)
+    total, avail = ram()
+    kw.update(ram_total=total or 0, ram_avail=avail or 0,
+              cores=cpu_cores())
+    kw["margin"] = int(saved.get("margin", DEFAULT_MARGIN))
+    bench = saved.get("bench", {})
+    if bench.get("build") and build and bench.get("build") != build.get("build"):
+        kw["notes"].append("calibrated on build %s, running %s; speeds may "
+                           "have moved" % (bench.get("build"), build.get("build")))
+    kw["bench"] = bench
+    if os.name == "nt" and kw.get("backend") == "CUDA":
+        kw["notes"].append("set 'CUDA - Sysmem Fallback Policy' to 'Prefer No "
+                           "Sysmem Fallback' for llama-server.exe, or an "
+                           "overflow runs at 3 t/s instead of failing")
+    m = Machine(**kw)
+    if build:
+        saved.setdefault("builds", {})[bkey] = build
+        saved.setdefault("backends", {})[bkey] = m.backend
+        try:
+            save(saved)
+        except OSError:
+            pass
+    return m
+
+
+def _binary_key(binary):
+    path = shutil.which(binary) or binary
+    try:
+        return "%s@%d" % (path, int(Path(path).stat().st_mtime))
+    except OSError:
+        return str(path)
+
+
+def _guess_backend(binary):
+    here = Path(shutil.which(binary) or binary).parent
+    names = " ".join(p.name.lower() for p in here.glob("*ggml*"))
+    for key, name in (("cuda", "CUDA"), ("vulkan", "Vulkan"),
+                      ("hip", "ROCm"), ("metal", "Metal")):
+        if key in names:
+            return name
+    return "CUDA"
+
+
+def record_bench(values):
+    saved = load_saved()
+    saved["bench"] = dict(values, at=time.strftime("%Y-%m-%d %H:%M"))
+    save(saved)

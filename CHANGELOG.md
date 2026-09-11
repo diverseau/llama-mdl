@@ -2,6 +2,43 @@
 
 Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
 
+## [0.6.0] - 2026-09-11
+
+### Added
+
+- `mdl fit`: what a GGUF will do on this machine before you run it, and
+  the flags to run it with. It reads the tensor table out of the file
+  (or, for `hf:org/repo`, out of a Range request on each quant's header,
+  nothing downloaded), replays llama.cpp's placement for every
+  combination of KV type, ubatch and n-cpu-moe or -ngl, finds the most
+  context each one holds, predicts decode, prefill and seconds per agent
+  turn, and hands back the winner and two runner-ups with the
+  llama-server command and a models.toml block. Profiles: agent (the
+  default: least time per 16k-in, 800-out turn at 48k deep, 128k
+  context floor), chat, max-ctx and speed.
+- Memory is checked against llama.cpp itself. `llama-fit-params -fitp on`
+  reports model, context and compute bytes per device without
+  allocating, in well under a second, so the picks are put in front of
+  it before they are shown and anything it disagrees with is learned
+  and searched again. Weights, KV and recurrent state were exact on all
+  ten configs in the test set; the compute buffer is a seeded model
+  plus what the oracle teaches it, stored per file in `calib.jsonl`.
+- `mdl fit <name> --explain`: why a config does not fit - the component
+  that blew, and by how much - and the cheapest fixes, ranked by what
+  they cost you, context cuts last. `--apply N` writes one back into
+  models.toml, keeping comments, sampling flags and a `.bak`.
+- `mdl fit hw` measures this box with llama-bench (GPU and CPU
+  bandwidth, PCIe, matmul rate, best thread count) and `--verify` runs
+  one config for real, so speed predictions stop being spec-sheet
+  guesses. `mdl fit inspect` prints the tensor inventory per layer.
+- `mdl run` books any buffer sizes a load log prints against its config,
+  so fits improve from ordinary use.
+
+### Changed
+
+- The config writer the dashboard uses moved into `mdl.py`, so `mdl fit`
+  can edit models.toml without textual installed.
+
 ## [0.5.2] - 2026-09-05
 
 ### Fixed

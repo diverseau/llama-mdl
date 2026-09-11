@@ -199,6 +199,62 @@ mdl: 1 problem(s) found
 `add` only appends, and `check` never launches anything, so both are safe
 to run against a config you care about.
 
+## Fitting a model: `mdl fit`
+
+`mdl fit` answers "what will this do on my machine, and with which flags"
+before you run anything. It reads the exact tensor table out of the GGUF,
+replays where llama.cpp puts every tensor for a given `-ngl`,
+`--n-cpu-moe`, KV type and ubatch, costs the KV cache layer by layer
+(sliding-window, hybrid recurrent and shared-KV layers included), and
+searches every combination for the one that suits the profile.
+
+```
+mdl fit ./Tiel-Coder-35B-A3B-UD-IQ3_XXS.gguf    a file
+mdl fit tiel-coder-Fast                          a models.toml entry
+mdl fit hf:someorg/Some-Model-GGUF               every quant in a repo,
+                                                 headers only, nothing downloaded
+mdl fit tiel-coder-Fast --explain                why it does not fit, and fixes
+mdl fit tiel-coder-Fast --verify                 run it, measure, learn
+mdl fit hw                                       measure this machine (~3 min)
+mdl fit inspect <gguf>                           per-layer tensor inventory
+```
+
+```console
+$ mdl fit tiel-coder-Fast --explain
+tiel-coder-Fast  ✗  over by 0.5 G   (weights on the GPU is 8.6 G of the total)
+
+  fix                                 VRAM     decode @0   s/turn
+  1  n-cpu-moe 13 → 15                -0.5 G   -4 t/s      +4%
+  2  ubatch 1024 → 256                -0.6 G   ±0          +34%
+  3  ctx 256k → 166k                  -0.5 G   ±0          ctx cap
+```
+
+Profiles decide what "best" means: `agent` (the default) minimises the
+seconds for a 16k-token prompt plus an 800-token reply at 48k deep, with
+at least 128k of context; `chat` maximises decode at 8k; `max-ctx` takes
+all the context it can at 15 t/s or better; `speed` maximises decode.
+`--min-ctx`, `--min-tps`, `--kv-floor` and `--np` override the floors.
+The KV cache never goes below q8_0 unless you say `--kv-floor q4_0`.
+
+Memory is checked against llama.cpp itself rather than trusted:
+`llama-fit-params`, which ships with llama.cpp, reports what a set of
+flags would allocate on each device without allocating it, and `mdl fit`
+puts its picks in front of it before showing them. A `✓` next to a VRAM
+figure means the oracle agreed. What it gets wrong is stored against the
+file in `~/.config/mdl/calib.jsonl`, so the next fit starts from it.
+Speed is bytes over bandwidth per side, and the bandwidths are seeds
+until `mdl fit hw` has measured them; the confidence line says which.
+
+Free VRAM is read live (llama.cpp's own view, or nvidia-smi's if lower)
+minus a 256 MiB margin, and RAM is what is available right now minus
+1 GiB for everything else. A model whose CPU-side weights do not fit in
+RAM is not a fit: it would page from disk on every token.
+
+`--write NAME` appends the winner to models.toml; `--apply N` rewrites an
+existing entry with pick or fix N, leaving its sampling flags, comments
+and a `.bak` behind. Every flag the prediction rests on is written out,
+including `-np` and `-fit off`, so what runs is what was predicted.
+
 ## The UI
 
 `mdl ui` (or just `mdl`) opens a dashboard over the same config and the same

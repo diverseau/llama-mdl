@@ -31,7 +31,7 @@ CONFIG_DIR = _base("XDG_CONFIG_HOME", ".config") / "mdl"
 CONFIG = CONFIG_DIR / "models.toml"
 STATE_DIR = _base("XDG_STATE_HOME", ".local", "state") / "mdl"
 STATE = STATE_DIR / "state.json"
-VERSION = "0.5.2"
+VERSION = "0.6.0"
 DEFAULT_BIN = "llama-server"
 CONFIG_DATA = {}          # last parsed config, for UI-only settings
 DEFAULT_PORT = 8080
@@ -49,8 +49,8 @@ SIMPLE = (("ngl", "-ngl"), ("n_cpu_moe", "--n-cpu-moe"), ("ctx", "-c"),
           ("parallel", "-np"), ("port", "--port"))
 
 USAGE = ("usage: mdl {init|add <model.gguf>|check|list|run <name> [--port N]|"
-         "stop [<name>|--all]|ps [--json]|logs [-f] [name]|ui [--no-fx]} "
-         "[--version]")
+         "stop [<name>|--all]|ps [--json]|logs [-f] [name]|ui [--no-fx]|"
+         "fit <gguf|hf:repo|name> [--help]} [--version]")
 
 # The model path mdl init leaves behind. check knows to treat it as a
 # to-do rather than a fault; tests keep the two in step.
@@ -109,6 +109,56 @@ def toml_path(path):
     """
     return str(path).replace(chr(92), "/").replace(chr(34),
                                                    chr(92) + chr(34))
+
+
+def toml_value(v):
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, (int, float)):
+        return str(v)
+    if isinstance(v, list):
+        return "[" + ", ".join(toml_value(x) for x in v) + "]"
+    # Backslashes first, then quotes - reversing the order would escape
+    # the backslash this line just added. A value like the JSON that
+    # --chat-template-kwargs takes is nothing but quotes, and unescaped
+    # they close the string early and leave the args array open.
+    return chr(34) + (str(v).replace(chr(92), chr(92) * 2)
+                            .replace(chr(34), chr(92) + chr(34))) + chr(34)
+
+
+def write_params(name, cfg, path=None, drop=()):
+    """Rewrite [name]'s keys in the config in place.
+
+    Only key lines are touched, so comments, ordering and blank lines
+    survive - which a dump-and-rewrite through tomllib would not. Keys in
+    `drop` are removed; both the dashboard and `mdl fit` write through
+    here.
+    """
+    path = path or CONFIG
+    lines = path.read_text(encoding="utf-8").split(chr(10))
+    head = lines.index("[" + name + "]")
+    tail = head + 1
+    while tail < len(lines) and not lines[tail].startswith("["):
+        tail += 1
+    body, seen, insert_at = [], set(), 0
+    for line in lines[head + 1:tail]:
+        key = re.match(r"([A-Za-z_]\w*)\s*=", line)
+        if not key:
+            body.append(line)
+            continue
+        seen.add(key.group(1))
+        if key.group(1) in drop:
+            continue
+        if key.group(1) in cfg:
+            body.append("%s = %s" % (key.group(1), toml_value(cfg[key.group(1)])))
+            insert_at = len(body)
+    for key in cfg:
+        if key not in seen:
+            body.insert(insert_at, "%s = %s" % (key, toml_value(cfg[key])))
+            insert_at += 1
+    lines[head + 1:tail] = body
+    # Atomic, with a .bak: this is the user's own file.
+    write_atomic(path, chr(10).join(lines), keep_backup=True)
 
 
 def build_argv(name, cfg, binary):
@@ -492,6 +542,23 @@ def cmd_run(args):
     print(f"starting {name} (pid {proc.pid}), log {log}", flush=True)
     tail_until_ready(proc, log, name, port)
     print(f"ready: {name} on http://127.0.0.1:{port} (pid {proc.pid})")
+    learn_from_log(name, models[name], binary, log)
+
+
+def learn_from_log(name, cfg, binary, log):
+    """Passive calibration: whatever buffer sizes the load log printed
+    are booked against this config, so `mdl fit` improves from normal
+    use. Never allowed to fail a launch."""
+    try:
+        from mdl_fit import calib
+        calib.passive(name, build_argv(name, cfg, binary), log)
+    except Exception:            # noqa: BLE001
+        pass
+
+
+def cmd_fit(args):
+    from mdl_fit import cli
+    cli.main(args)
 
 
 def stop_one(name, state):
@@ -770,7 +837,7 @@ def cmd_ui(args):
 
 COMMANDS = {"init": cmd_init, "add": cmd_add, "check": cmd_check, "ui": cmd_ui,
             "run": cmd_run, "stop": cmd_stop, "ps": cmd_ps, "list": cmd_list,
-            "logs": cmd_logs}
+            "logs": cmd_logs, "fit": cmd_fit}
 
 
 def _dispatch():

@@ -63,51 +63,9 @@ NEWLINE = chr(10)
 BACKSLASH = chr(92)
 
 
-def toml_value(v):
-    if isinstance(v, bool):
-        return "true" if v else "false"
-    if isinstance(v, (int, float)):
-        return str(v)
-    if isinstance(v, list):
-        return "[" + ", ".join(toml_value(x) for x in v) + "]"
-    # Backslashes first, then quotes - reversing the order would escape
-    # the backslash this line just added. A value like the JSON that
-    # --chat-template-kwargs takes is nothing but quotes, and unescaped
-    # they close the string early and leave the args array open.
-    return chr(34) + (str(v).replace(chr(92), chr(92) * 2)
-                            .replace(chr(34), chr(92) + chr(34))) + chr(34)
-
-
-def write_params(name, cfg, path=None):
-    """Rewrite [name]'s keys in the config in place.
-
-    Only key lines are touched, so comments, ordering and blank lines
-    survive - which a dump-and-rewrite through tomllib would not.
-    """
-    path = path or mdl.CONFIG
-    lines = path.read_text(encoding="utf-8").split(NEWLINE)
-    head = lines.index("[" + name + "]")
-    tail = head + 1
-    while tail < len(lines) and not lines[tail].startswith("["):
-        tail += 1
-    body, seen, insert_at = [], set(), 0
-    for line in lines[head + 1:tail]:
-        key = re.match(r"([A-Za-z_]\w*)\s*=", line)
-        if not key:
-            body.append(line)
-            continue
-        seen.add(key.group(1))
-        if key.group(1) in cfg:
-            body.append("%s = %s" % (key.group(1), toml_value(cfg[key.group(1)])))
-            insert_at = len(body)
-    for key in cfg:
-        if key not in seen:
-            body.insert(insert_at, "%s = %s" % (key, toml_value(cfg[key])))
-            insert_at += 1
-    lines[head + 1:tail] = body
-    # Atomic, with a .bak: this is the user's own file, and the UI
-    # rewrites it on every save.
-    mdl.write_atomic(path, NEWLINE.join(lines), keep_backup=True)
+# Moved to mdl.py so `mdl fit` can write the config without textual.
+toml_value = mdl.toml_value
+write_params = mdl.write_params
 
 
 def fx_period(override=None):
@@ -496,6 +454,84 @@ def vram_estimate(argv, size_bytes, mmproj_bytes=0):
             ctx / 1024 * (32 if quantised else 64), partial)
 
 
+COMPUTE_COLOUR = "#e0af68"
+_SHAPES = {}          # (path, size, mtime) -> mdl_fit Shape; parsing is 0.3 s
+_FIT_ENV = {}
+
+
+def fit_placement(argv):
+    """(Memory, Speed, calibrated?, Shape) from mdl fit for this command.
+
+    None when the model is not a GGUF the engine can read, and the pane
+    falls back to the old estimate. Shapes are cached, because this runs
+    every time the selection moves.
+    """
+    try:
+        from mdl_fit import calib, gguf, hw, model, perf
+    except ImportError:
+        return None
+    flags, _, path, mmproj = model.parse_argv(argv)
+    if not path:
+        return None
+    try:
+        st = Path(path).stat()
+        key = (path, st.st_size, st.st_mtime)
+        if key not in _SHAPES:
+            _SHAPES[key] = model.Shape(gguf.load(path))
+        shape = _SHAPES[key]
+        if mmproj and Path(mmproj).is_file():
+            flags.mmproj = Path(mmproj).stat().st_size
+    except (OSError, ValueError, KeyError, IndexError, gguf.Truncated):
+        return None
+    if "res" not in _FIT_ENV:
+        saved = hw.load_saved()
+        _FIT_ENV["res"] = calib.Residuals()
+        _FIT_ENV["mach"] = hw.Machine(bench=saved.get("bench", {}),
+                                      backend=next(iter(saved.get(
+                                          "backends", {}).values()), "CUDA"))
+    mach = _FIT_ENV["mach"]
+    residual = _FIT_ENV["res"].lookup(calib.signature(shape.inv),
+                                      shape.arch, flags)
+    mem = model.memory(shape, flags, None, mach.max_alloc, residual)
+    speed = perf.speed(shape, flags, mach, depth=8192)
+    return mem, speed, mach.calibrated, shape
+
+
+def placement_text(placed, total_mib):
+    """The real placement, replacing the est-VRAM guess: what sits on the
+    card, what stays on the CPU, and how fast it should decode."""
+    mem, speed, calibrated, shape = placed
+    gib, mib = 1 << 30, 1 << 20
+    v = Text()
+    v.append("VRAM      ", style="#565f89")
+    v.append(stacked_bar([(mem.gpu_weights / mib, WEIGHTS_COLOUR),
+                          ((mem.gpu_kv + mem.gpu_rs) / mib, KV_COLOUR),
+                          ((mem.gpu_compute + mem.gpu_mmproj) / mib,
+                           COMPUTE_COLOUR)], total_mib))
+    over = mem.gpu / mib > total_mib
+    v.append("  %.1f / %.1f G" % (mem.gpu / gib, total_mib / 1024),
+             style="#f7768e" if over else "#c0caf5")
+    v.append(NEWLINE + " " * 10)
+    v.append("weights", style=WEIGHTS_COLOUR)
+    v.append(" %.1f" % (mem.gpu_weights / gib), style="#565f89")
+    v.append("  kv", style=KV_COLOUR)
+    v.append(" %.1f" % ((mem.gpu_kv + mem.gpu_rs) / gib), style="#565f89")
+    v.append("  compute", style=COMPUTE_COLOUR)
+    v.append(" %.1f" % ((mem.gpu_compute + mem.gpu_mmproj) / gib),
+             style="#565f89")
+    host = mem.host_weights - mem.host_embd
+    if host > 64 * mib:
+        v.append(NEWLINE + "CPU       ", style="#565f89")
+        what = ("experts L0–%d" % (mem.host_exps_layers - 1)
+                if mem.host_exps and mem.host_exps_layers else "layers")
+        v.append("%s %.1f G" % (what, host / gib), style="#c0caf5")
+    v.append(NEWLINE + "decode    ", style="#565f89")
+    v.append("~%.0f t/s" % speed.decode0, style="#c0caf5")
+    v.append("  %s" % ("measured box" if calibrated
+                       else "uncalibrated · mdl fit hw"), style="#565f89")
+    return v
+
+
 class ParamPane(VerticalScroll):
     """Model metadata, tunable params, and the argv preview."""
 
@@ -537,8 +573,13 @@ class ParamPane(VerticalScroll):
                 rows.append(f"{cfg[key]}\n", style="#c0caf5")
         self.query_one("#p-params", Static).update(rows)
 
-        weights, kv, partial = vram_estimate(argv, size_bytes, mmproj_bytes)
         gpu = gpu_memory()
+        placed = fit_placement(argv) if size_bytes else None
+        if gpu and placed:
+            self.query_one("#p-vram", Static).update(
+                placement_text(placed, gpu[1]))
+            return
+        weights, kv, partial = vram_estimate(argv, size_bytes, mmproj_bytes)
         v = Text()
         if gpu:
             total, room = weights + kv, gpu[1]
