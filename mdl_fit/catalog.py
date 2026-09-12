@@ -88,7 +88,7 @@ def default_path():
 
 
 def repo_name():
-    return os.environ.get("MDL_CATALOG_REPO", "diverseau/mdl-catalog")
+    return os.environ.get("MDL_CATALOG_REPO", "diversemate/mdl-catalog")
 
 
 def quant_of(name):
@@ -630,7 +630,7 @@ build options:
   --out PATH         where to write (default: the local cache)
 
 The snapshot lives in %s. $MDL_CATALOG_REPO names the
-dataset it is pulled from (default diverseau/mdl-catalog).
+dataset it is pulled from (default diversemate/mdl-catalog).
 """
 
 

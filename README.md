@@ -347,10 +347,11 @@ beat the #1, with the `mdl fit --write` and `mdl eval` commands that
 would rate them.
 
 The catalog is one SQLite file in `~/.config/mdl/cache/`. `mdl catalog
-pull` fetches the nightly snapshot from `$MDL_CATALOG_REPO` once one is
-published; until then, `mdl catalog build` crawls the hub locally
-(`--org LiquidAI`, `--base Qwen/Qwen3-8B`; a few minutes for a few
-orgs). `mdl catalog tree <org/repo>` lists every quant of every
+pull` fetches the nightly snapshot from
+[diversemate/mdl-catalog](https://huggingface.co/datasets/diversemate/mdl-catalog)
+(`$MDL_CATALOG_REPO` points it elsewhere). `mdl catalog build` crawls the
+hub yourself instead (`--org LiquidAI`, `--base Qwen/Qwen3-8B`; a few
+minutes for a few orgs). `mdl catalog tree <org/repo>` lists every quant of every
 fine-tune of a model, and `mdl catalog search` finds one by name.
 
 ## The UI

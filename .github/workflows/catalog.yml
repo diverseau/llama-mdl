@@ -3,7 +3,7 @@ name: catalog
 # Nightly crawl of the Hugging Face model tree into the SQLite snapshot
 # `mdl find` reads, published as a dataset. Needs a write token in the
 # HF_TOKEN secret and a dataset repo named by the CATALOG_REPO variable
-# (default diverseau/mdl-catalog). Off until the CATALOG_ENABLED variable
+# (default diversemate/mdl-catalog). Off until the CATALOG_ENABLED variable
 # is "true", so it does not crawl for hours only to fail at the upload;
 # does nothing on forks.
 
@@ -23,7 +23,7 @@ jobs:
     timeout-minutes: 300
     env:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
-      MDL_CATALOG_REPO: ${{ vars.CATALOG_REPO || 'diverseau/mdl-catalog' }}
+      MDL_CATALOG_REPO: ${{ vars.CATALOG_REPO || 'diversemate/mdl-catalog' }}
       MDL_FIT_HOME: ${{ github.workspace }}/.mdl
       PYTHONIOENCODING: utf-8
     steps:
