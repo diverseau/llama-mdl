@@ -102,6 +102,16 @@ def quant_of(name):
     return SPELLINGS.get(q, q)
 
 
+def _text(v):
+    """A card field is a string, or a list of them, or a dict. sqlite
+    binds none of the last two, and a crawl is too long to lose to one."""
+    if isinstance(v, (list, tuple)):
+        return ", ".join(str(x) for x in v) or None
+    if isinstance(v, dict):
+        return json.dumps(v, sort_keys=True)
+    return v
+
+
 # ---------------------------------------------------------------- http --
 
 def _headers(extra=None):
@@ -277,9 +287,9 @@ class Crawler:
         self.db.execute(
             "INSERT INTO nodes VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (mid, mid.split("/")[0], int(official), None, parent, relation,
-             method, depth, gg.get("architecture"),
+             method, depth, _text(gg.get("architecture")),
              st.get("total") or gg.get("total"), gg.get("context_length"),
-             lic, m.get("pipeline_tag"), m.get("createdAt"),
+             _text(lic), _text(m.get("pipeline_tag")), m.get("createdAt"),
              m.get("lastModified"), m.get("downloads", 0), m.get("likes", 0),
              int(bool(m.get("gated"))),
              json.dumps([t for t in m.get("tags") or []

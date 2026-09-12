@@ -53,9 +53,11 @@ HUB = {
         bases=[("Fam/Base-8B-Instruct", "quantized")]),
     # fine-tunes: one popular, one junk, one popular with only a
     # GGUF of its own, and a merge of a fine-tune
+    # a card may name several licenses, as a list
     "coder/Coder-8B": model("coder/Coder-8B", 3000,
                             bases=[("Fam/Base-8B-Instruct", "finetune")],
-                            card={"datasets": ["openai/gsm8k"]}),
+                            card={"datasets": ["openai/gsm8k"],
+                                  "license": ["apache-2.0", "other"]}),
     "junk/test-upload": model("junk/test-upload", 3,
                               bases=[("Fam/Base-8B-Instruct", "finetune")]),
     "solo/Solo-8B-GGUF": model("solo/Solo-8B-GGUF", 900, gguf=True,
@@ -209,6 +211,8 @@ check("eval results come with their verified flag",
       [("org/coding-bench", 61.5, 1)])
 check("a card's training sets are kept, for the contamination check",
       json.loads(cat.node("coder/Coder-8B")["datasets"]), ["openai/gsm8k"])
+check("several licenses become text the --license filter can match",
+      cat.node("coder/Coder-8B")["license"], "apache-2.0, other")
 check("pagination is followed", any("cursor=" in h for h in hits), True)
 check("the build says what it did", (meta["nodes"], meta["ggufs"] >= 6,
                                      meta["requests"] > 5), (5, True, True))
