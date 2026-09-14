@@ -298,40 +298,59 @@ mdl eval --compare qwen-small ornith   which of two is actually better
 It starts the model as models.toml runs it (or uses it if it is already
 up) and runs five suites: code (40 functions, graded by hidden unit
 tests that are actually executed), tools (30 tool-calling tasks, single
-and multi-step, against mock worlds, one of which freezes partway
-through so that checking the rules once is not enough), long-context (24 retrieval,
-multi-hop, counting and exhaustive-recall questions at 32k, 64k and
-128k, those beyond the configured context skipped), instruct (20
-checkable format rules) and reason (20 exact-answer problems).
+and multi-step, against mock worlds), long-context (24 questions over
+documents at 32k, 64k and 128k, those beyond the configured context
+skipped), instruct (20 checkable format rules) and reason (20
+exact-answer problems). Add your own as `[[task]]` entries in
+`~/.config/mdl/evals/*.toml`, checked by `contains`, `regex`, `exact`
+or a Python snippet.
 
-One long-context question per document asks for every match rather than
-one: three of the six people share a floor, each by way of a room named
-somewhere else again, and it is scored by overlap, so stopping after two
-is worth more than nothing and less than finishing.
+Three of every five items are the harder tier, and the report scores
+the tiers separately. A suite everything passes ranks nothing, so the
+hard items are built to be failed - and, more importantly, built so
+that recognising them does not help. Half of the hard code and reason
+items are generated rather than named: a price with five clauses that
+interact, a validator with a stated precedence over its rules, a stack
+machine whose opcodes come from the seed, a line splitter whose
+separator, quote, escape and comment characters come from the seed, a
+seating puzzle pruned until exactly one arrangement fits, a counter
+machine that has to be simulated, a set of rules to chain to a fixed
+point. There is no prior solution to recall, because the constants, the
+rules and the names are all made here.
 
-Another has no answer in the document at all.
+The other half are the classics - longest increasing subsequence,
+topological sort, an LRU cache, work rates, mixtures, lattice paths -
+and they are kept because they still catch arithmetic slips, but on
+their own they measured memory rather than reasoning: a 35B coder in a
+3-bit quant answered 36 of 40 of them.
+
+The tool worlds take four to a dozen dependent calls. One forbids the
+action the request asks for, and doing it anyway is the failure. One
+fails a call the first time. One offers eight tools, four of them
+beside the point, and a transaction list that only arrives a page at a
+time, so an agent that reads page one and stops looks exactly like one
+that finished. One freezes deploys partway through the job, so checking
+the rules once at the start is not enough.
+
+The long-context questions are not all needles. One per document asks
+for every match rather than one - three of six people share a floor,
+each by way of a room named somewhere else again - and is scored by
+overlap, so stopping after two is worth more than nothing and less than
+finishing. One counts something that has to be read for in full. And
+one has no answer in the document at all: the project is real and nine
+others do list a code, so the pull towards writing one down is strong,
+and saying it is not recorded is the only reply that scores. Nothing
+else in the suite measures making things up.
+
+Code and format items are marked in parts, so a function that handles
+the ordinary cases and trips on one edge does not score the same as one
+that does not run.
 
 Every grader is checked against replies that contain no knowledge -
 nothing, a refusal, a guessed number, the instructions read back - and
 none of them may be paid for. That check runs with the tests, because a
 grader that can be satisfied without doing the work is worse than no
-grader: it still reads as evidence. The project is real and nine other projects do list a code, so the
-pull towards writing one down is strong; saying it is not recorded is
-the only reply that scores. Nothing else in the suite measures making
-things up. Add your own as `[[task]]` entries in
-`~/.config/mdl/evals/*.toml`, checked by `contains`, `regex`, `exact` or
-a Python snippet.
-
-Three of every five items are the harder tier, and the report scores the
-tiers separately. A suite everything passes ranks nothing, so the questions
-are built to be failed: reasoning that takes several steps with a
-plausible wrong turn at each, tool calls whose arguments have to be
-worked out rather than copied out of the request, requests that are
-missing something the tool needs and should be asked about instead of
-guessed, and documents where the answer is three hops apart or is
-superseded further down. Code is marked per hidden test, so a function
-that handles the ordinary cases and trips on one edge does not score
-the same as one that does not run.
+grader: it still reads as evidence.
 
 The items are generated from a seed in `~/.config/mdl/eval-seed`, so
 they exist on this machine and nowhere else, and no model can have
