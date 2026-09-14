@@ -76,12 +76,78 @@ Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
 
 ### Fixed
 
+- `mdl eval` marked every multi-hop long-context answer wrong: the
+  question asks for just the room, the reply gave just the room, and the
+  grader wanted the word "room" in front of it.
+- The dashboard's CPU line left the embeddings out, so what sat on the
+  card plus what sat in RAM did not add up to the size of the file.
 - Running `py mdl.py` directly, an error from `mdl fit` (and now
   `eval`, `catalog`, `find`) printed a traceback instead of one line: the
   module was loaded twice, and the second copy's error went uncaught.
 
 ### Changed
 
+- Eval suite v2, because v1 could not tell models apart: a good 35B at
+  3 bits scored 1.00 on three suites of five. Most items are now a
+  harder tier, scored separately - multi-step reasoning, tool arguments
+  that must be derived, requests with something missing that should be
+  asked about, three-hop and superseded facts in long documents - and
+  code is marked per hidden test instead of all-or-nothing. The code
+  suite gained ten algorithmic tasks - a parser, a binary search on the
+  answer, a monotonic deque - each with hidden tests for the edge cases
+  a first draft gets wrong and one input big enough that a quadratic
+  answer runs out of time. Three more are not algorithms with names
+  at all: a price with five clauses that interact, a validator with a
+  stated precedence over its rules, and a stack machine whose opcodes
+  are named by the seed. A model cannot recall a solution to those,
+  because the constants, the rules and the names are generated - it has
+  to read the specification. That was the real ceiling: a 35B coder in
+  a 3-bit quant solved 36 of 40 of the named ones. The tool suite gained four worlds that take
+  four or five dependent calls, including one where the rules forbid the
+  action and doing it anyway is the failure, and one where a call fails
+  the first time. Results from v1 are kept but no longer read as
+  evidence about a model. One long-context question per document now
+  has no answer in the document, so making one up is measured directly,
+  and another asks for every match rather than one. The tool suite
+  gained a world with eight tools, four of them beside the point, a
+  transaction list that only arrives a page at a time, and a dozen
+  dependent calls to get through - an agent that reads page one and
+  stops looks exactly like one that finished, so the score is overlap
+  rather than all-or-nothing. The reason suite gained a seating puzzle
+  generated and then pruned until exactly one arrangement fits, and a
+  two-counter machine that has to be simulated round by round; the
+  eight it had were all textbook shapes a model recognises on sight.
+- Four graders could be satisfied without doing the work, which means
+  every score they ever produced carried some free credit. Found by
+  walking every item with replies that contain no knowledge at all -
+  nothing, a refusal, a guessed number, the instructions read back.
+  "No tool fits this request" only checked that no tool was called, so
+  "I don't know" scored full marks; it now has to answer as well, and
+  the questions were changed to ones with a checkable answer. Format
+  rules were scored by the fraction kept, and an empty reply keeps "no
+  commas" and "do not use the letter t" for free - up to two thirds of
+  an item for saying nothing; part marks now need a real attempt, and
+  a reply that repeats its own instructions scores nothing, which is
+  the failure a model with the wrong chat template actually has. The
+  long-context questions say to reply with just the room, just the
+  code, just the number, and are now held to it, because grading the
+  whole reply by substring paid a model that quoted a slab of the
+  document back for whatever happened to be inside it. And the count of
+  hidden tests a solution passed is now carried by a word the solution
+  could not have known, because the code under test writes to the same
+  stdout the score is read from, and `print("passed 9 of 9")` is four
+  keystrokes. The check runs as part of the test suite from now on.
+- Every run records what it cost: reply tokens, and tokens per right
+  answer. A model that thinks four times as long for the same score is
+  not as good on hardware you own, and nothing else was measuring that.
+- A run is fingerprinted by the questions it actually asked, not by the
+  seed they came from, so two runs that claim to be comparable can be
+  checked. `mdl eval --compare A B` pairs two runs item by item and
+  bootstraps the difference, and says "too close to call" when the
+  interval does not clear zero.
+- The time estimate learns: after a model has run once, the next
+  estimate uses what it actually spent per suite instead of a constant
+  multiplied by four for anything that thinks.
 - The config writer the dashboard uses moved into `mdl.py`, so `mdl fit`
   can edit models.toml without textual installed.
 

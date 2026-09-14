@@ -38,11 +38,16 @@ Runs a private, auto-graded suite against <name> the way models.toml
 runs it - starting it if it is not running - and stores the scores:
 
   code      40  functions, graded by hidden unit tests that are executed
-  tools     30  tool calls, single and multi-step against mock tools
-  longctx   15  retrieval and multi-hop at 32k / 64k / 128k
+  tools     30  tool calls, single and multi-step against mock worlds,
+                one of them paged and a dozen calls long
+  longctx   24  retrieval, multi-hop, counting, finding every match, and
+                one question the document does not answer, at 32k/64k/128k
   instruct  20  checkable format rules
   reason    20  exact-answer maths and logic
   custom        your own tasks, from ~/.config/mdl/evals/*.toml
+
+Three of every five items are the harder tier, scored separately, and
+code and format items are marked in parts rather than all or nothing.
 
 The items are generated from a seed kept in ~/.config/mdl/eval-seed, so
 they exist on this machine only. Model-written code runs in a
@@ -52,6 +57,7 @@ throwaway podman or docker container with no network instead.
   --limit N     only the first N items of each suite
   --estimate    say how long it would take, and stop
   --results     past runs
+  --compare A B  two models on the same items, scored item by item
 """
 
 
@@ -217,7 +223,8 @@ def run_item(client, item, env, cpt=4.0):
     world = item.world() if item.world else None
     prompt = completion = 0
     capped = thought = False
-    for _ in range(MAX_TURNS if world else 1):
+    budget = item.meta.get("turns", MAX_TURNS) if world else 1
+    for _ in range(budget):
         r = client.chat(msgs, item.tools, item.max_tokens, seed)
         prompt += r.prompt_tokens
         completion += r.completion_tokens
@@ -241,6 +248,7 @@ def run_item(client, item, env, cpt=4.0):
         except Exception as e:                   # noqa: BLE001 - scored, not raised
             score, why = 0.0, "grader failed: %s" % e
     return {"id": item.id, "suite": item.suite, "domain": item.domain,
+            "tier": item.meta.get("tier", "base"),
             "score": float(score), "why": why, "capped": capped,
             "error": bool(r.error), "thinking": thought,
             "reply": (r.content or "")[-400:],
@@ -258,6 +266,7 @@ def run_items(client, items, env, cpt=4.0, n_ctx=None, sink=None,
         need = it.meta.get("tokens")
         if need and n_ctx and need + evalsuite.ROOM > n_ctx:
             res = {"id": it.id, "suite": it.suite, "domain": it.domain,
+                   "tier": it.meta.get("tier", "base"),
                    "skipped": "needs %dk of context, has %dk" % (
                        (need + evalsuite.ROOM) // 1000, n_ctx // 1024)}
         else:
@@ -286,14 +295,39 @@ def summarize(results, key):
     out = {}
     for k, rs in sorted(groups.items()):
         mean, lo, hi = bootstrap([r["score"] for r in rs], seed=len(rs))
+        spend = sum(r.get("completion_tokens", 0) for r in rs)
+        earned = sum(r["score"] for r in rs)
         out[k] = {"n": len(rs), "score": round(mean, 4), "lo": round(lo, 4),
                   "hi": round(hi, 4),
                   "capped": sum(1 for r in rs if r["capped"]),
-                  "errors": sum(1 for r in rs if r["error"])}
+                  "errors": sum(1 for r in rs if r["error"]),
+                  "tokens": spend,
+                  "seconds": round(sum(r.get("seconds", 0) for r in rs), 1),
+                  # what a right answer cost: a model that thinks four
+                  # times as long for the same score is not as good
+                  "per_point": round(spend / earned) if earned else None}
     return out
 
 
 # ------------------------------------------------------------ estimate --
+
+SAMPLING = ("--temp", "--top-p", "--top-k", "--min-p", "--typical",
+            "--repeat-penalty", "--presence-penalty", "--frequency-penalty",
+            "--reasoning", "--reasoning-budget", "--chat-template-kwargs")
+
+
+def sampling_of(argv):
+    """The flags that change what a model says, for the record.
+
+    A score belongs to a model at a temperature, not to a model. Two
+    runs of one file at different sampling settings are two results.
+    """
+    out = {}
+    for i, a in enumerate(argv[:-1]):
+        if a in SAMPLING:
+            out[a.lstrip("-")] = argv[i + 1]
+    return out
+
 
 def thinking_flag(argv):
     """True or False when the command line says; None when it is left
@@ -306,12 +340,45 @@ def thinking_flag(argv):
     return None
 
 
-def estimate(items, shape, flags, mach, eff=None, thinking=False, cpt=4.0):
+def spent(name_hash, records=None, version=None):
+    """{suite: mean reply tokens} from this model's last finished run.
+
+    How much a model thinks is a property of the model and its sampling
+    flags, not something a constant can carry: a reasoning model told to
+    keep it short spends a quarter of what one left to ramble does. Once
+    it has run here, stop guessing.
+    """
+    best = None
+    for want in ([version] if version else []) + [None]:
+        # a run of a different generation of the suite answered different
+        # questions, so only fall back to one when there is nothing newer
+        for rec in (records if records is not None else load()):
+            if rec.get("hash") != name_hash or rec.get("partial"):
+                continue
+            if want is not None and rec.get("suite_version") != want:
+                continue
+            if best is None or rec.get("at", "") > best.get("at", ""):
+                best = rec
+        if best is not None:
+            break
+    if best is None:
+        return {}
+    total, n = {}, {}
+    for r in best.get("items", []):
+        if "completion_tokens" in r and "suite" in r:
+            total[r["suite"]] = total.get(r["suite"], 0) + r["completion_tokens"]
+            n[r["suite"]] = n.get(r["suite"], 0) + 1
+    return {k: total[k] / n[k] for k in total if n[k]}
+
+
+def estimate(items, shape, flags, mach, eff=None, thinking=False, cpt=4.0,
+             seen=None):
     """Seconds the items should take at this config, from the perf model:
     each prompt prefilled, each expected reply decoded at its depth. A
     long document is paid for once; the questions after it hit the
-    prompt cache."""
+    prompt cache. `seen` is what this model actually spent last time."""
     eff = eff or {}
+    seen = seen or {}
     p = perf.params(mach)
     pl = perf.Placement(shape, flags)
     e_tg, e_pp = eff.get("tg", 1.0), eff.get("pp", 1.0)
@@ -327,10 +394,11 @@ def estimate(items, shape, flags, mach, eff=None, thinking=False, cpt=4.0):
         else:
             depth = 0
             n_in = (len(it.text(cpt)) + len(json.dumps(it.tools or ""))) / cpt
-        n_out = evalsuite.EXPECT.get(it.suite, 400) * (
+        n_out = seen.get(it.suite) or evalsuite.EXPECT.get(it.suite, 400) * (
             evalsuite.THINK_FACTOR if thinking else 1)
         n_out = min(n_out, it.max_tokens)
-        turns = 3 if it.world else 1
+        turns = (it.meta["turns"] // 2 if it.meta.get("turns")
+                 else 3) if it.world else 1
         total += turns * (
             perf.prefill_time(pl, p, n_in + 150, flags.ub, depth, e_pp)
             + n_out * perf.decode_time(pl, p, depth + n_in, e_tg))
@@ -424,12 +492,29 @@ def report(rec, w):
         rec["suite_version"], sum(v["n"] for v in rec["suites"].values()),
         minutes(rec["minutes"] * 60), " · PARTIAL" if rec.get("partial")
         else ""))
-    for title, part in (("suite", rec["suites"]), ("domain", rec["domains"])):
+    for title, part in (("suite", rec["suites"]), ("domain", rec["domains"]),
+                        ("tier", rec.get("tiers") or {})):
         w("  %-13s score  95%% CI       items  capped  errors\n" % title)
         for k, v in part.items():
             w("  %-13s %.2f   %.2f–%.2f    %-6d %-7d %d\n" % (
                 k, v["score"], v["lo"], v["hi"], v["n"], v["capped"],
                 v["errors"]))
+    # one number, and it weights the five abilities equally: weighting by
+    # item count would move the headline whenever a suite changes size,
+    # which says nothing about the model
+    doms = rec.get("domains") or {}
+    if doms:
+        w("  %-13s %.2f   the five domains, equally weighted\n" % (
+            "overall", sum(v.get("score", 0) for v in doms.values())
+            / len(doms)))
+    whole = rec.get("suites") or {}
+    spend = sum(v.get("tokens", 0) for v in whole.values())
+    earned = sum(v.get("score", 0) * v.get("n", 0) for v in whole.values())
+    if spend:
+        w("cost     %s reply tokens · %s per right answer · %s\n" % (
+            "{:,}".format(spend),
+            "{:,}".format(round(spend / earned)) if earned else "-",
+            minutes(rec.get("minutes", 0) * 60)))
     items = rec.get("items", [])
     skipped = [r for r in items if "skipped" in r]
     if skipped:
@@ -447,9 +532,97 @@ def report(rec, w):
           "cap)\n" % capped)
     misses = [r for r in items if r.get("score") == 0 and not r.get("error")]
     for r in misses[:5]:
-        w("miss     %-26s %s\n" % (r["id"], r.get("why", "")[:90]))
+        # a reply cut off mid-answer failed for a different reason than
+        # one that ran and got it wrong, and the miss line is what
+        # anyone actually reads
+        w("miss     %-26s %s%s\n" % (
+            r["id"], r.get("why", "")[:90],
+            "  (reply hit the cap)" if r.get("capped") else ""))
     if len(misses) > 5:
         w("         ... and %d more\n" % (len(misses) - 5))
+
+
+def latest(name, records):
+    """The newest finished run of one model."""
+    best = None
+    for rec in records:
+        if rec.get("name") != name or rec.get("partial"):
+            continue
+        if best is None or rec.get("at", "") > best.get("at", ""):
+            best = rec
+    return best
+
+
+def paired(a, b):
+    """[(score a, score b, domain)] over the items both runs answered.
+
+    Both runs answer the same generated items, so the scores can be
+    paired item by item. That removes the variance of the item set
+    itself, which is most of it: two models differ by far less than two
+    questions do.
+    """
+    left = {r["id"]: r for r in a.get("items", []) if "score" in r}
+    out = []
+    for r in b.get("items", []):
+        if "score" in r and r["id"] in left:
+            out.append((left[r["id"]]["score"], r["score"],
+                        r.get("domain", "general")))
+    return out
+
+
+def diff_ci(pairs, n=2000, seed=7):
+    """(mean difference, lo, hi) by resampling the pairs, not the models."""
+    if not pairs:
+        return 0.0, 0.0, 0.0
+    diffs = [x - y for x, y, _ in pairs]
+    mean = sum(diffs) / len(diffs)
+    rng = random.Random(seed)
+    means = sorted(sum(rng.choice(diffs) for _ in diffs) / len(diffs)
+                   for _ in range(n))
+    return mean, means[int(0.025 * n)], means[int(0.975 * n) - 1]
+
+
+def verdict(lo, hi, a, b):
+    if lo > 0:
+        return "%s ahead" % a
+    if hi < 0:
+        return "%s ahead" % b
+    return "too close to call"
+
+
+def compare(a, b, w):
+    """Two runs, item by item, with a verdict that survives the noise."""
+    if a.get("items_hash") != b.get("items_hash"):
+        w("note     different item sets; the two runs are not comparable\n")
+        return None
+    pairs = paired(a, b)
+    if not pairs:
+        w("note     no items in common\n")
+        return None
+    na, nb = a["name"], b["name"]
+    w("compare  %s vs %s   (%d items, suite v%s, item set %s)\n" % (
+        na, nb, len(pairs), a.get("suite_version", "?"),
+        a.get("items_hash", "?")))
+    w("  %-13s %-6s %-6s %-7s %-18s %s\n" % (
+        "domain", na[:6], nb[:6], "diff", "95% CI", "verdict"))
+    rows = {}
+    for x, y, dom in pairs:
+        rows.setdefault(dom, []).append((x, y, dom))
+    for dom in sorted(rows) + ["overall"]:
+        got = pairs if dom == "overall" else rows[dom]
+        mean, lo, hi = diff_ci(got)
+        w("  %-13s %-6.2f %-6.2f %+-7.2f %+.2f to %+-10.2f %s\n" % (
+            dom, sum(x for x, _, _ in got) / len(got),
+            sum(y for _, y, _ in got) / len(got), mean, lo, hi,
+            verdict(lo, hi, na, nb)))
+    for rec in (a, b):
+        whole = rec.get("suites") or {}
+        spend = sum(v.get("tokens", 0) for v in whole.values())
+        if spend:
+            w("cost     %-10s %s reply tokens · %s\n" % (
+                rec["name"], "{:,}".format(spend),
+                minutes(rec.get("minutes", 0) * 60)))
+    return pairs
 
 
 def show_results(name, w):
@@ -484,7 +657,8 @@ def parse(args):
                 die("%s needs a value" % a)
             o[a[2:]] = args[i + 1]
             i += 2
-        elif a in ("--sandbox", "--estimate", "--json", "--results"):
+        elif a in ("--sandbox", "--estimate", "--json", "--results",
+                   "--compare"):
             o[a[2:]] = True
             i += 1
         elif a.startswith("-"):
@@ -540,6 +714,15 @@ def main(args, out=None):
     o, pos = parse(args)
     if o.get("results"):
         return show_results(pos[0] if pos else None, w)
+    if o.get("compare"):
+        if len(pos) != 2:
+            die("--compare takes two model names")
+        records = load()
+        runs = [latest(n, records) for n in pos]
+        for n, rec in zip(pos, runs, strict=True):
+            if rec is None:
+                die("no finished run for %r; run: mdl eval %s" % (n, n))
+        return compare(runs[0], runs[1], w)
     if len(pos) != 1:
         die(USAGE.rstrip())
     import mdl
@@ -571,14 +754,22 @@ def main(args, out=None):
     w("model    %s · %s · kv %s · ctx %s · build %s\n" % (
         name, target.model_path.name, flags.kv_label, cli.kctx(flags.ctx),
         build or "?"))
-    w("suites   %s   (suite v%d, item set %s)\n" % (
+    w("suites   %s   (suite v%d, item set %s/%s)\n" % (
         " · ".join("%s %d" % kv for kv in counts.items()),
-        evalsuite.SUITE_VERSION, evalsuite.seed_id(seed)))
-    fast = estimate(items, shape, flags, mach, eff, False)
-    slow = estimate(items, shape, flags, mach, eff, True)
-    est = ("~%s; it thinks, and replies are capped per suite" % minutes(slow)
-           if thinking else "~%s" % minutes(fast) if thinking is False
-           else "~%s, or ~%s if it thinks" % (minutes(fast), minutes(slow)))
+        evalsuite.SUITE_VERSION, evalsuite.seed_id(seed),
+        evalsuite.fingerprint(items)))
+    seen = spent(file_hash(target.model_path),
+                 version=evalsuite.SUITE_VERSION)
+    fast = estimate(items, shape, flags, mach, eff, False, seen=seen)
+    slow = estimate(items, shape, flags, mach, eff, True, seen=seen)
+    if seen:
+        est = "~%s, from what it spent on its last run here" % minutes(fast)
+    else:
+        est = ("~%s; it thinks, and replies are capped per suite"
+               % minutes(slow) if thinking
+               else "~%s" % minutes(fast) if thinking is False
+               else "~%s, or ~%s if it thinks" % (minutes(fast),
+                                                  minutes(slow)))
     w("estimate %s%s\n" % (est, "" if mach.calibrated
                            else " (speeds uncalibrated: mdl fit hw)"))
     if o.get("estimate"):
@@ -627,9 +818,13 @@ def main(args, out=None):
            "arch": target.inv.arch, "quant": target.inv.quant_label,
            "bpw": round(target.inv.bpw, 3), "params": target.inv.n_params,
            "kv": flags.kv_label, "ctx": flags.ctx, "build": build,
+           "sampling": sampling_of(mdl.build_argv(name, models[name],
+                                                  binary)),
            "suite_version": evalsuite.SUITE_VERSION,
            "seed_id": evalsuite.seed_id(seed),
+           "items_hash": evalsuite.fingerprint(items),
            "suites": summarize(done, "suite"),
+           "tiers": summarize(done, "tier"),
            "domains": summarize(done, "domain"),
            "thinking": any(r.get("thinking") for r in done),
            "minutes": round((time.time() - t0) / 60, 1),

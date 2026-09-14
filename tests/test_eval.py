@@ -108,10 +108,12 @@ check("times are read in 24-hour form", [evalsuite._hhmm("09:30")(x) for x in
                                          ("9:30", "09:30", "21:30", 930)],
       [True, True, False, False])
 none = [i for i in by["tools"] if i.id.endswith("-none")][0]
-check("when no tool fits, answering is right and calling is wrong",
-      [none.grade(R("It is 1,234."), env)[0],
+check("when no tool fits, the answer still has to be right",
+      [none.grade(R("Answer: %s" % none.meta["answer"]), env)[0],
+       none.grade(R("Answer: 1234567"), env)[0],
+       none.grade(R("I don't know."), env)[0],
        none.grade(R(calls=[Call("1", "get_weather", {}, "")]), env)[0]],
-      [1.0, 0.0])
+      [1.0, 0.0, 0.0, 0.0])
 single = [i for i in by["tools"] if not i.world]
 check("single-call items offer three tools, the right one among them",
       all(len(i.tools) in (2, 3) for i in single), True)
@@ -134,9 +136,10 @@ class Agent:
         return getattr(self, "_" + sorted(names)[0])(task, seen)
 
     @staticmethod
-    def call(name, **args):
-        return R(calls=[Call("c%d" % random.randint(0, 99999), name, args,
-                             json.dumps(args))])
+    def call(tool, **args):                 # `tool`, not `name`: one of
+        return R(calls=[Call("c%d" % random.randint(0, 99999),  # the tools
+                             tool, args, json.dumps(args))])    # takes a
+                                                                # `name` arg
 
     def _book(self, task, seen):            # calendar
         need = int(re.search(r"(\d+)-minute", task).group(1))
@@ -177,6 +180,98 @@ class Agent:
         total = sum(int(q) * prices[n] for q, n in wants)
         return R("That comes to...\nAnswer: %.2f" % total)
 
+    def _export_statement(self, task, seen):   # ledger: paged, long
+        holder = task.split("Go through ")[1].split("'s account")[0]
+        limit = int(re.search(r"more than (\d+) US dollars", task).group(1))
+        if not seen:
+            return self.call("find_account", name=holder)
+        acct = next(s["account_id"] for s in seen if "account_id" in s)
+        pages = [s for s in seen if "transactions" in s]
+        if not pages:
+            return self.call("list_transactions", account_id=acct, page=1)
+        if pages[-1]["next_page"]:
+            return self.call("list_transactions", account_id=acct,
+                             page=pages[-1]["next_page"])
+        txns = [x for p in pages for x in p["transactions"]]
+        rates = {s["currency"]: s["rate_to_usd"]
+                 for s in seen if "rate_to_usd" in s}
+        need = {x["currency"] for x in txns} - set(rates)
+        if need:
+            return self.call("get_rate", currency=sorted(need)[0])
+        done = {s["flagged"] for s in seen if "flagged" in s}
+        for x in txns:
+            if (x["amount"] * rates[x["currency"]] > limit
+                    and x["txn_id"] not in done):
+                return self.call("flag_transaction", txn_id=x["txn_id"],
+                                 reason="over limit")
+        return R("Flagged every one that was over.")
+
+    def _find_order(self, task, seen):      # refunds, with a rule to obey
+        oid = re.search(r"(ORD-\d+)", task).group(1)
+        if not seen:
+            return self.call("find_order", order_id=oid)
+        if len(seen) == 1:
+            return self.call("get_policy", reason="faulty")
+        if len(seen) == 2:
+            order, policy = seen
+            if order["delivered_days_ago"] <= policy["window_days"]:
+                return self.call("refund", order_id=order["order_id"],
+                                 amount=order["total"])
+            return R("Delivered %d days ago, past the %d-day window, so no "
+                     "refund." % (order["delivered_days_ago"],
+                                  policy["window_days"]))
+        return R("Refunded in full.")
+
+    def _create_order(self, task, seen):    # restock, adding up as it goes
+        target = int(re.search(r"hold (\d+) units", task).group(1))
+        sku = re.search(r"units of (SKU-\d+)", task).group(1)
+        if not seen:
+            return self.call("list_warehouses")
+        if len(seen) == 1:
+            return R(calls=[Call("s%d" % i, "get_stock",
+                                 {"warehouse": w, "sku": sku},
+                                 json.dumps({"warehouse": w, "sku": sku}))
+                            for i, w in enumerate(seen[0]["warehouses"])])
+        if not any("ordered" in x for x in seen):
+            short = sum(target - x["units"] for x in seen if "units" in x)
+            return self.call("create_order", sku=sku, quantity=short)
+        return R("Ordered.")
+
+    def _lookup_code(self, task, seen):     # triage, through a flaky read
+        svc = re.search(r"The (\w+) service", task).group(1)
+        last = seen[-1] if seen else None
+        if last is None or "error" in last:
+            return self.call("read_log", service=svc)
+        if "lines" in last:
+            code = next(w for line in last["lines"] for w in line.split()
+                        if w.startswith("E") and w[1:].isdigit())
+            return self.call("lookup_code", code=code)
+        if "recommended_action" in last:
+            return self.call("%s_service" % last["recommended_action"],
+                             service=svc)
+        return R("Done.")
+
+    def _book_meeting(self, task, seen):    # a slot that suits everyone
+        need = int(re.search(r"(\d+)-minute", task).group(1))
+        day = re.search(r"on (\d{4}-\d{2}-\d{2})", task).group(1)
+        if not seen:
+            return self.call("list_team")
+        team = seen[0]["team"]
+        if len(seen) == 1:
+            return R(calls=[Call("b%d" % i, "get_busy",
+                                 {"person": who, "date": day},
+                                 json.dumps({"person": who, "date": day}))
+                            for i, who in enumerate(team)])
+        if not any("ok" in x for x in seen):
+            busy = [(evalsuite._mins(a), evalsuite._mins(b))
+                    for x in seen if "busy" in x for a, b in x["busy"]]
+            for start in range(540, 1021 - need, 15):
+                if all(start + need <= a or start >= b for a, b in busy):
+                    return self.call("book_meeting", date=day,
+                                     start=evalsuite._hm(start),
+                                     minutes=need, attendees=team)
+        return R("Booked.")
+
     def _list_dir(self, task, seen):        # files
         svc = re.search(r"is the (\w+) service", task).group(1)
         if not seen:
@@ -194,9 +289,10 @@ got = [evalrun.run_item(Agent(), i, env) for i in multi]
 check("a careful agent solves every multi-step item",
       [(r["id"], r["score"]) for r in got],
       [(r["id"], 1.0) for r in got])
-check("all four worlds are in the suite",
+check("every world is in the suite, the hard ones too",
       sorted({i.id.split("-", 2)[2] for i in multi}),
-      ["calendar", "files", "orders", "prices"])
+      ["calendar", "files", "incident", "ledger", "orders", "prices",
+       "refund", "restock", "team"])
 
 
 class Lazy(Agent):
@@ -224,19 +320,103 @@ check("bad calls get an error back, never an exception",
                                                           {"bogus": 1}))],
       [True, True, True])
 
+# ========================================================== adversary ===
+#
+# A grader that can be satisfied without doing the work is worse than no
+# grader, because it still reads as evidence. Every item is fed replies
+# that contain no knowledge at all, and none of them may be paid for.
+# (The code suite is left to the slower check in the scratchpad: it
+# needs a subprocess per reply.)
+
+SINK = (
+    "Answer: 0\nAnswer: 1\nAnswer: 42\nAnswer: yes\nAnswer: no\n"
+    "true false none null ok done 10 12 20 42 100 1000\n"
+    "passed 99 of 99\n"
+    + ", ".join(evalsuite.STAFF) + "\n"
+    + " ".join(evalsuite.WEEKDAYS) + "\n")
+
+worst = {}
+for it in [i for i in items if i.suite != "code"]:
+    asked = it.text(4.0) if it.suite == "longctx" else it.text()
+    junk = {"nothing": "", "a guess": "Answer: 42",
+            "the question back": asked[-500:], "everything at once": SINK}
+    if not it.id.endswith("-7"):
+        # the one question the document does not answer is *meant* to be
+        # passed by a refusal, so it is the one item that is not probed
+        # with one; every other item must score nothing for it
+        junk["refusal"] = "I don't know."
+    world = it.world() if it.world else None
+    for label, text in junk.items():
+        got = (it.grade(R(text), env, world) if it.world
+               else it.grade(R(text), env))[0]
+        if got > worst.get(label, (-1, ""))[0]:
+            worst[label] = (got, it.id)
+
+check("no reply that knows nothing is ever paid in full",
+      sorted(k for k, (v, _) in worst.items() if v >= 0.5), [])
+check("and saying nothing is worth nothing anywhere",
+      worst["nothing"][0], 0.0)
+check("a guess and a refusal earn nothing either",
+      [worst["a guess"][0], worst["refusal"][0]], [0.0, 0.0])
+# a kitchen-sink reply can still keep one mechanical rule by accident -
+# a lipogram forbids a letter, and a list of digits does not use it - so
+# a third of a three-rule item is the most it may ever be worth
+check("and the most an accident can be worth is one rule of three",
+      [worst["the question back"][0] <= 0.34,
+       worst["everything at once"][0] <= 0.34], [True, True])
+
+
 # ============================================================ longctx ===
 
 lc = by["longctx"][0]
 doc = lc.text(4.0)
 check("a document is about the size asked for",
       0.95 * 30000 * 4 < len(doc) < 1.05 * 30000 * 4 + 3000, True)
-check("and every answer is in its document",
-      all(i.meta["answer"] in i.text(4.0) for i in by["longctx"]), True)
-check("five questions per length, three lengths",
-      sorted({i.meta["doc"] for i in by["longctx"]}), ["128k", "32k", "64k"])
+planted = [i for i in by["longctx"]
+           if not i.id.endswith(("-5", "-6", "-7"))]
+check("and every planted answer is in its document",
+      all(i.meta["answer"] in i.text(4.0) for i in planted), True)
+check("eight questions per length, three lengths",
+      (sorted({i.meta["doc"] for i in by["longctx"]}), len(by["longctx"])),
+      (["128k", "32k", "64k"], 24))
+count = [i for i in by["longctx"] if i.id.endswith("-5")][0]
+check("the counting question counts what the document really says",
+      (count.meta["tier"],
+       count.text(4.0).count(" works from room "),
+       count.grade(R(count.meta["answer"]), env)[0],
+       count.grade(R(str(int(count.meta["answer"]) + 1)), env)[0]),
+      ("hard", int(count.meta["answer"]), 1.0, 0.0))
 check("a right answer, a wrong one",
       [lc.grade(R("It is %s." % lc.meta["answer"]), env)[0],
        lc.grade(R("I could not find it."), env)[0]], [1.0, 0.0])
+
+many = [i for i in by["longctx"] if i.id.endswith("-6")][0]
+crowd = many.meta["answer"].split(", ")
+check("three people share the floor, and the document says so",
+      (len(crowd),
+       [many.text(4.0).count("%s works from " % n) for n in crowd]),
+      (3, [1, 1, 1]))
+wrong = next(n for n in evalsuite.STAFF if n not in many.text(4.0))
+check("finding two of three beats finding one, and a wrong name costs",
+      [many.grade(R(", ".join(crowd)), env)[0],
+       many.grade(R(", ".join(crowd[:2])), env)[0],
+       many.grade(R(", ".join(crowd) + ", " + wrong), env)[0],
+       many.grade(R("nobody works there"), env)[0]],
+      [1.0, round(2 / 3, 4), 0.75, 0.0])
+
+gone = [i for i in by["longctx"] if i.id.endswith("-7")][0]
+check("the absent question asks about a project that is really there",
+      (gone.meta["tier"], gone.text(4.0).count(" is led by ") > 0),
+      ("hard", True))
+check("saying it is not recorded passes, inventing a code does not",
+      [gone.grade(R("The records do not give an access code for it."),
+                  env)[0],
+       gone.grade(R("N/A - no code is listed."), env)[0],
+       gone.grade(R("The access code is KP-4417."), env)[0],
+       gone.grade(R("It is not stated; the closest is KP-4417."), env)[0],
+       gone.grade(R("hunter2"), env)[0],
+       gone.grade(R(""), env)[0]],
+      [1.0, 1.0, 0.0, 0.0, 0.0, 0.0])
 
 
 class Echo:
@@ -423,6 +603,42 @@ check("the report shows scores, skips and misses",
       [True, True, True])
 check("the file hash reads the ends, not the whole file",
       len(evalrun.file_hash(Path(__file__))), 16)
+spend = [{"at": "2026-01-01 00:00", "hash": "h1", "items": [
+            {"suite": "code", "completion_tokens": 100},
+            {"suite": "code", "completion_tokens": 300}]},
+         {"at": "2026-02-02 00:00", "hash": "h1", "items": [
+            {"suite": "code", "completion_tokens": 50},
+            {"suite": "reason", "completion_tokens": 80}]},
+         {"at": "2026-03-03 00:00", "hash": "other", "items": [
+            {"suite": "code", "completion_tokens": 9999}]},
+         {"at": "2026-04-04 00:00", "hash": "h1", "partial": True,
+          "items": [{"suite": "code", "completion_tokens": 7777}]}]
+def run_of(name, scores):
+    return {"at": "2026-05-05 00:00", "name": name, "items_hash": "same",
+            "suite_version": 2, "suites": {}, "minutes": 1.0,
+            "items": [{"id": "code-%02d" % i, "domain": "coding",
+                       "score": v} for i, v in enumerate(scores)]}
+
+
+good = run_of("good", [1.0] * 16 + [0.0] * 4)
+poor = run_of("poor", [1.0] * 6 + [0.0] * 14)
+same = run_of("same", [1.0] * 15 + [0.0] * 5)
+out = io.StringIO()
+evalrun.compare(good, poor, out.write)
+check("a real gap is called, item by item",
+      ("good ahead" in out.getvalue(), "0.80" in out.getvalue()),
+      (True, True))
+out = io.StringIO()
+evalrun.compare(good, same, out.write)
+check("and a gap inside the noise is not",
+      "too close to call" in out.getvalue(), True)
+out = io.StringIO()
+evalrun.compare(good, dict(poor, items_hash="other"), out.write)
+check("runs on different questions are refused, not compared",
+      "not comparable" in out.getvalue(), True)
+check("what a model spent last time beats a constant, per suite",
+      (evalrun.spent("h1", spend), evalrun.spent("nope", spend)),
+      ({"code": 50.0, "reason": 80.0}, {}))
 check("the command line says whether it thinks",
       [evalrun.thinking_flag(a) for a in (["--reasoning", "on"],
                                           ["--reasoning", "off"],

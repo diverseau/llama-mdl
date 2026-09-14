@@ -519,12 +519,21 @@ def placement_text(placed, total_mib):
     v.append("  compute", style=COMPUTE_COLOUR)
     v.append(" %.1f" % ((mem.gpu_compute + mem.gpu_mmproj) / gib),
              style="#565f89")
-    host = mem.host_weights - mem.host_embd
-    if host > 64 * mib:
+    # every weight byte that is not on the card, named: leaving the
+    # embeddings out made the two figures miss the size of the file
+    if mem.host_weights > 64 * mib:
         v.append(NEWLINE + "CPU       ", style="#565f89")
-        what = ("experts L0–%d" % (mem.host_exps_layers - 1)
-                if mem.host_exps and mem.host_exps_layers else "layers")
-        v.append("%s %.1f G" % (what, host / gib), style="#c0caf5")
+        parts = []
+        if mem.host_exps and mem.host_exps_layers:
+            parts.append("experts L0–%d %.1f G" % (
+                mem.host_exps_layers - 1, mem.host_exps / gib))
+        rest = mem.host_weights - mem.host_exps - mem.host_embd
+        if rest > 64 * mib:
+            parts.append("layers %.1f G" % (rest / gib))
+        if mem.host_embd > 64 * mib:
+            parts.append("embd %.1f G" % (mem.host_embd / gib))
+        v.append("  ".join(parts) or "%.1f G" % (mem.host_weights / gib),
+                 style="#c0caf5")
     v.append(NEWLINE + "decode    ", style="#565f89")
     v.append("~%.0f t/s" % speed.decode0, style="#c0caf5")
     v.append("  %s" % ("measured box" if calibrated

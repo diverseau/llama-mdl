@@ -275,9 +275,18 @@ class Model:
         """records: evalrun results; links: {file hash: node id}. A local
         result is booked at full quality (its quant and KV penalties added
         back), so it can speak for the model at any quant."""
+        # Scores only mean the same thing when the questions were the
+        # same. Keep the newest generation of items and drop the rest:
+        # an older run is history, not evidence about this model.
+        usable = [r for r in records
+                  if not r.get("partial") and r.get("domains")]
+        newest = max((r.get("suite_version", 0) for r in usable), default=0)
+        current = [r for r in usable if r.get("suite_version", 0) == newest]
+        latest = max(current, key=lambda r: r.get("at", ""), default=None)
+        want = latest.get("items_hash") if latest else None
         by_node = {}
-        for rec in records:
-            if rec.get("partial") or not rec.get("domains"):
+        for rec in current:
+            if rec.get("items_hash") != want:
                 continue
             node = links.get(rec.get("hash")) or "local:" + str(rec.get("hash"))
             back = self.penalty(rec.get("bpw"), rec.get("params"),

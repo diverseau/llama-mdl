@@ -16,6 +16,7 @@ is evalrun.Reply, env runs code (evalrun.Env), world is the mock a
 multi-step tool item acts on.
 """
 
+import itertools
 import copy
 import datetime
 import hashlib
@@ -29,11 +30,12 @@ from pathlib import Path
 
 from . import hw
 
-SUITE_VERSION = 1
+SUITE_VERSION = 3
 SUITES = ("code", "tools", "longctx", "instruct", "reason")
 DOMAIN = {"code": "coding", "tools": "agentic", "longctx": "long-context",
           "instruct": "general", "reason": "reasoning", "custom": "general"}
-SIZE = {"code": 40, "tools": 30, "longctx": 15, "instruct": 20, "reason": 20}
+SIZE = {"code": 40, "tools": 30, "longctx": 24, "instruct": 20,
+        "reason": 20}
 # max_tokens per request. A thinking model spends most of it thinking; a
 # reply that hits the cap is graded as it stands and counted as capped.
 CAP = {"code": 6144, "tools": 3072, "longctx": 2048, "instruct": 3072,
@@ -93,6 +95,31 @@ def seed_id(seed):
     return hashlib.sha256(seed.encode()).hexdigest()[:8]
 
 
+def fingerprint(items):
+    """Names the questions themselves, not the seed they came from.
+
+    SUITE_VERSION says a template changed only if someone remembers to
+    bump it. This is computed from what was actually asked, so two runs
+    that claim to be comparable can be checked rather than trusted.
+    """
+    h = hashlib.sha256()
+    for it in items:
+        h.update(it.id.encode())
+        h.update(b"\0")
+        # a long document is named by its size, not its megabyte of filler
+        body = ("doc:%s:%s" % (it.meta.get("doc"), it.meta.get("tokens"))
+                if it.meta.get("doc") else it.text(4.0))
+        h.update(body.encode("utf-8", "replace"))
+        h.update(b"\0")
+        h.update(repr(sorted((k, v) for k, v in it.meta.items()
+                             if k != "reference")).encode())
+        h.update(b"\0")
+        h.update(repr([t.get("function", {}).get("name")
+                       for t in (it.tools or [])]).encode())
+        h.update(b"\n")
+    return h.hexdigest()[:12]
+
+
 def rng_for(seed, suite):
     return random.Random("%s:%s:v%d" % (seed, suite, SUITE_VERSION))
 
@@ -150,10 +177,17 @@ def _number(text):
         return None
 
 
+CLOCK = re.compile(r"(\d{1,2}):(\d{2})")
+
+
 def same_answer(got, want):
     """Exact-answer grading: numbers by value, words by word."""
     if got is None:
         return False
+    if CLOCK.fullmatch(want):        # a time is neither: "9:05" splits
+        hit = CLOCK.search(got)      # into two numbers, and 9.05 is not it
+        return bool(hit) and (int(hit.group(1)) % 24, int(hit.group(2))) == (
+            int(want.split(":")[0]) % 24, int(want.split(":")[1]))
     try:
         w = float(want)
     except ValueError:
@@ -466,6 +500,429 @@ def _chunks(rng):
             [[_ints(rng, -20, 20, 0, 13)] for _ in range(8)])
 
 
+# ---- the harder tier -------------------------------------------------
+#
+# These are not list comprehensions with a twist. Each one needs an idea
+# (a monotonic deque, a binary search on the answer, a parser), and the
+# hidden tests carry the cases a first draft gets wrong: empty input, one
+# element, ties, duplicates, negatives, and one input big enough that a
+# quadratic answer runs out of time instead of finishing.
+
+HARD_CODE = []
+
+
+def _hard_code(fn):
+    HARD_CODE.append(fn)
+    return fn
+
+
+CALC_SRC = '''import re
+
+
+def calc(s):
+    toks = re.findall(r"\\d+|[-+*/%^()]", s)
+    pos = 0
+
+    def peek():
+        return toks[pos] if pos < len(toks) else None
+
+    def take():
+        nonlocal pos
+        pos += 1
+        return toks[pos - 1]
+
+    def atom():
+        t = take()
+        if t == "(":
+            v = expr()
+            take()
+            return v
+        if t == "-":
+            return -atom()
+        return int(t)
+
+    def power():
+        b = atom()
+        if peek() == "^":
+            take()
+            return b ** power()
+        return b
+
+    def term():
+        v = power()
+        while peek() in ("*", "/", "%"):
+            op = take()
+            r = power()
+            if op == "*":
+                v = v * r
+            elif op == "/":
+                q = abs(v) // abs(r)
+                v = q if (v < 0) == (r < 0) else -q
+            else:
+                m = abs(v) % abs(r)
+                v = m if v >= 0 else -m
+        return v
+
+    def expr():
+        v = term()
+        while peek() in ("+", "-"):
+            op = take()
+            r = term()
+            v = v + r if op == "+" else v - r
+        return v
+
+    return expr()
+'''
+
+
+def _calc_fn():
+    ns = {}
+    exec(compile(CALC_SRC, "<calc>", "exec"), ns)      # noqa: S102 - ours
+    return ns["calc"]
+
+
+def _expr_text(rng, depth=0):
+    if depth >= 3 or rng.random() < 0.35:
+        t = str(rng.randint(0, 40))
+        return "-" + t if rng.random() < 0.2 else t
+    op = rng.choice(["+", "-", "*", "/", "%", "^"])
+    if op == "^":
+        return "%s^%d" % (_expr_text(rng, depth + 2), rng.randint(0, 3))
+    left, right = _expr_text(rng, depth + 1), _expr_text(rng, depth + 1)
+    out = "%s %s %s" % (left, op, right)
+    return "(%s)" % out if rng.random() < 0.5 else out
+
+
+@_hard_code
+def _expr(rng):
+    calc = _calc_fn()
+    cases = [["2^3^2"], ["-2^2"], ["7/-2"], ["-7%3"], ["0-(3*(4+5))"],
+             ["((8))"]]
+    while len(cases) < 14:
+        text = _expr_text(rng)
+        try:
+            v = calc(text)
+        except (ZeroDivisionError, IndexError, ValueError):
+            continue
+        if abs(v) < 10 ** 12:
+            cases.append([text])
+    return ("calc",
+            "Write a Python function `calc(s)` that evaluates the arithmetic "
+            "expression in the string `s` and returns an int. The operators "
+            "are + - * / % ^ and round brackets, on integers. `^` is power "
+            "and is right-associative (2^3^2 is 512). Unary minus binds "
+            "tighter than `^`, so -2^2 is 4. `/` is division truncated "
+            "towards zero (7/-2 is -3), and `%` takes the sign of the "
+            "left operand (-7%3 is -1). * / % bind tighter than + -. "
+            "There may be spaces anywhere. No division by zero is tested.",
+            CALC_SRC, cases)
+
+
+@_hard_code
+def _ship(rng):
+    cases = [[[1], 1], [[5, 5, 5], 3], [[3, 2, 2, 4, 1, 4], 3],
+             [[1, 2, 3, 1, 1], 4]]
+    for _ in range(6):
+        n = rng.randint(2, 60)
+        cases.append([[rng.randint(1, 500) for _ in range(n)],
+                      rng.randint(1, n)])
+    big = [rng.randint(1, 10 ** 6) for _ in range(4000)]
+    cases.append([big, 900])                   # a linear scan of capacities
+    return ("least_capacity",                  # will not finish in time
+            "Write a Python function `least_capacity(weights, days)` that "
+            "returns the smallest capacity a ship needs to carry every "
+            "package within `days` days. Packages are loaded in the order "
+            "given, a day's load may not exceed the capacity, and every "
+            "package must be shipped. `days` is at least 1 and at most the "
+            "number of packages.",
+            "def least_capacity(weights, days):\n"
+            "    lo, hi = max(weights), sum(weights)\n"
+            "    while lo < hi:\n        mid = (lo + hi) // 2\n"
+            "        need, load = 1, 0\n        for w in weights:\n"
+            "            if load + w > mid:\n                need += 1\n"
+            "                load = 0\n            load += w\n"
+            "        if need <= days:\n            hi = mid\n"
+            "        else:\n            lo = mid + 1\n    return lo\n",
+            cases)
+
+
+@_hard_code
+def _lis(rng):
+    cases = [[[]], [[7]], [[5, 4, 3, 2]], [[2, 2, 2, 2]],
+             [[1, 3, 2, 3, 4, 1, 5]]]
+    for _ in range(5):
+        cases.append([[rng.randint(-30, 30)
+                       for _ in range(rng.randint(0, 40))]])
+    cases.append([[rng.randint(-10 ** 6, 10 ** 6) for _ in range(20000)]])
+    return ("lis",
+            "Write a Python function `lis(xs)` that returns the length of "
+            "the longest strictly increasing subsequence of the list `xs` "
+            "(the elements need not be adjacent). An empty list gives 0. "
+            "One of the hidden tests has twenty thousand elements, so an "
+            "O(n^2) answer will not finish.",
+            "import bisect\n\n\n"
+            "def lis(xs):\n    tails = []\n    for x in xs:\n"
+            "        i = bisect.bisect_left(tails, x)\n"
+            "        if i == len(tails):\n            tails.append(x)\n"
+            "        else:\n            tails[i] = x\n    return len(tails)\n",
+            cases)
+
+
+@_hard_code
+def _window(rng):
+    cases = [[[], 1], [[4], 1], [[1, 2, 3], 3], [[5, 5, 5, 5], 2],
+             [[-1, -3, -5, -2], 2]]
+    for _ in range(4):
+        n = rng.randint(1, 30)
+        cases.append([[rng.randint(-40, 40) for _ in range(n)],
+                      rng.randint(1, n)])
+    cases.append([[rng.randint(-10 ** 5, 10 ** 5) for _ in range(20000)],
+                  300])
+    return ("window_max",
+            "Write a Python function `window_max(xs, k)` that returns a list "
+            "of the largest value in every window of `k` consecutive "
+            "elements of `xs`, left to right. When `xs` is empty or shorter "
+            "than `k`, return []. One hidden test has twenty thousand "
+            "elements and k = 300, so scanning each window will not finish.",
+            "from collections import deque\n\n\n"
+            "def window_max(xs, k):\n    if not xs or k > len(xs):\n"
+            "        return []\n    out, dq = [], deque()\n"
+            "    for i, x in enumerate(xs):\n"
+            "        while dq and xs[dq[-1]] <= x:\n            dq.pop()\n"
+            "        dq.append(i)\n        if dq[0] <= i - k:\n"
+            "            dq.popleft()\n        if i >= k - 1:\n"
+            "            out.append(xs[dq[0]])\n    return out\n",
+            cases)
+
+
+@_hard_code
+def _topo(rng):
+    cases = [[3, []], [2, [[0, 1], [1, 0]]], [1, []],
+             [4, [[1, 0], [2, 0], [3, 1], [3, 2]]]]
+    for _ in range(6):
+        n = rng.randint(2, 9)
+        edges = []
+        order = list(range(n))
+        rng.shuffle(order)
+        for _ in range(rng.randint(0, n * 2)):
+            a, b = sorted(rng.sample(range(n), 2))
+            edges.append([order[a], order[b]])
+        if rng.random() < 0.25 and n >= 2:      # make a cycle
+            edges.append([order[-1], order[0]])
+        cases.append([n, edges])
+    return ("topo",
+            "Write a Python function `topo(n, edges)` for tasks numbered 0 "
+            "to n-1. Each edge [a, b] means a must come before b. Return "
+            "the order that runs them all, and when several orders are "
+            "possible return the one that is smallest if you read it as a "
+            "list of numbers (so pick the lowest-numbered runnable task "
+            "each time). Return None if no order exists. Duplicate edges "
+            "may appear.",
+            "import heapq\n\n\n"
+            "def topo(n, edges):\n"
+            "    adj = {i: set() for i in range(n)}\n"
+            "    deg = [0] * n\n    for a, b in edges:\n"
+            "        if b not in adj[a]:\n            adj[a].add(b)\n"
+            "            deg[b] += 1\n"
+            "    heap = [i for i in range(n) if not deg[i]]\n"
+            "    heapq.heapify(heap)\n    out = []\n    while heap:\n"
+            "        i = heapq.heappop(heap)\n        out.append(i)\n"
+            "        for j in sorted(adj[i]):\n            deg[j] -= 1\n"
+            "            if not deg[j]:\n                heapq.heappush(heap, j)\n"
+            "    return out if len(out) == n else None\n",
+            cases)
+
+
+@_hard_code
+def _lru(rng):
+    cases = [[1, [["put", 1, 1], ["put", 2, 2], ["get", 1]]],
+             [2, [["get", 9]]],
+             [2, [["put", 1, 1], ["put", 2, 2], ["get", 1], ["put", 3, 3],
+                  ["get", 2], ["get", 3], ["get", 1]]],
+             [2, [["put", 1, 1], ["put", 1, 5], ["get", 1]]]]
+    for _ in range(6):
+        cap = rng.randint(1, 4)
+        ops = []
+        for _ in range(rng.randint(1, 18)):
+            k = rng.randint(1, 6)
+            if rng.random() < 0.5:
+                ops.append(["put", k, rng.randint(0, 99)])
+            else:
+                ops.append(["get", k])
+        cases.append([cap, ops])
+    return ("lru",
+            "Write a Python function `lru(capacity, ops)` that runs a "
+            "least-recently-used cache and returns the list of results of "
+            "the get operations, in order. Each op is either "
+            '["put", key, value] or ["get", key]. A get returns the value '
+            "or -1 when the key is not there. Both a get that finds the key "
+            "and a put count as using that key. When a put would exceed the "
+            "capacity, the least recently used key is dropped first; "
+            "overwriting an existing key never drops anything.",
+            "from collections import OrderedDict\n\n\n"
+            "def lru(capacity, ops):\n    cache = OrderedDict()\n"
+            "    out = []\n    for op in ops:\n"
+            "        if op[0] == 'get':\n            k = op[1]\n"
+            "            if k in cache:\n"
+            "                cache.move_to_end(k)\n"
+            "                out.append(cache[k])\n"
+            "            else:\n                out.append(-1)\n"
+            "        else:\n            _, k, v = op\n"
+            "            if k in cache:\n                cache.move_to_end(k)\n"
+            "            cache[k] = v\n"
+            "            if len(cache) > capacity:\n"
+            "                cache.popitem(last=False)\n    return out\n",
+            cases)
+
+
+@_hard_code
+def _roman(rng):
+    cases = [[1], [4], [9], [14], [40], [90], [400], [3999], [2024], [3888]]
+    for _ in range(4):
+        cases.append([rng.randint(1, 3999)])
+    return ("roman",
+            "Write a Python function `roman(n)` that returns the integer n "
+            "(1 to 3999) as a Roman numeral in upper case, using the "
+            "subtractive forms IV, IX, XL, XC, CD and CM.",
+            "def roman(n):\n"
+            "    table = [(1000, 'M'), (900, 'CM'), (500, 'D'), (400, 'CD'),\n"
+            "             (100, 'C'), (90, 'XC'), (50, 'L'), (40, 'XL'),\n"
+            "             (10, 'X'), (9, 'IX'), (5, 'V'), (4, 'IV'), (1, 'I')]\n"
+            "    out = []\n    for v, sym in table:\n"
+            "        while n >= v:\n            out.append(sym)\n"
+            "            n -= v\n    return ''.join(out)\n",
+            cases)
+
+
+@_hard_code
+def _frac(rng):
+    cases = [[[[1, 2], [1, 3]]], [[[1, 2], [-1, 2]]], [[]], [[[3, -4]]],
+             [[[2, 4], [2, 4]]], [[[1, 6], [1, 6], [1, 6]]]]
+    for _ in range(6):
+        cases.append([[[rng.randint(-12, 12), rng.choice(
+            [d for d in range(-9, 10) if d])]
+            for _ in range(rng.randint(1, 5))]])
+    return ("add_fractions",
+            "Write a Python function `add_fractions(fracs)` that adds a list "
+            "of fractions, each given as [numerator, denominator], and "
+            "returns the total as [numerator, denominator] in lowest terms "
+            "with a positive denominator. An empty list gives [0, 1], and "
+            "zero is [0, 1]. Denominators are never zero but may be "
+            "negative. Do not use the fractions module.",
+            "from math import gcd\n\n\n"
+            "def add_fractions(fracs):\n    n, d = 0, 1\n"
+            "    for a, b in fracs:\n        n, d = n * b + a * d, d * b\n"
+            "    if n == 0:\n        return [0, 1]\n"
+            "    g = gcd(abs(n), abs(d))\n    n, d = n // g, d // g\n"
+            "    return [-n, -d] if d < 0 else [n, d]\n",
+            cases)
+
+
+@_hard_code
+def _islands(rng):
+    cases = [[[]], [["0"]], [["1"]], [["111", "101", "111"]],
+             [["1010", "0101", "1010"]]]
+    for _ in range(4):
+        r, c = rng.randint(1, 9), rng.randint(1, 9)
+        cases.append([["".join(rng.choice("01") for _ in range(c))
+                       for _ in range(r)]])
+    big = ["".join(rng.choice("0011") for _ in range(220))
+           for _ in range(220)]
+    cases.append([big])
+    return ("islands",
+            "Write a Python function `islands(grid)` that counts the "
+            "connected groups of '1' cells in `grid`, a list of equal-length "
+            "strings of '0' and '1'. Cells connect up, down, left and right, "
+            "not diagonally. An empty grid has none. One hidden test is "
+            "220 by 220, so recursion that goes one cell deep per step may "
+            "hit Python's limit.",
+            "def islands(grid):\n    if not grid:\n        return 0\n"
+            "    rows, cols = len(grid), len(grid[0])\n"
+            "    seen = [[False] * cols for _ in range(rows)]\n    n = 0\n"
+            "    for r in range(rows):\n        for c in range(cols):\n"
+            "            if grid[r][c] != '1' or seen[r][c]:\n"
+            "                continue\n            n += 1\n"
+            "            stack = [(r, c)]\n            seen[r][c] = True\n"
+            "            while stack:\n                y, x = stack.pop()\n"
+            "                for dy, dx in ((1, 0), (-1, 0), (0, 1), (0, -1)):\n"
+            "                    ny, nx = y + dy, x + dx\n"
+            "                    if 0 <= ny < rows and 0 <= nx < cols and \\\n"
+            "                            not seen[ny][nx] and grid[ny][nx] == '1':\n"
+            "                        seen[ny][nx] = True\n"
+            "                        stack.append((ny, nx))\n    return n\n",
+            cases)
+
+
+@_hard_code
+def _csv_row(rng):
+    cases = [['a,b,c'], [''], ['"a,b",c'], ['x,"he said ""hi"" to me"'],
+             ['a,,b'], ['  a , b  '], ['"", "x"'], ['"a""b"']]
+    for _ in range(6):
+        fields = []
+        for _ in range(rng.randint(1, 4)):
+            w = rng.choice(WORDS)
+            if rng.random() < 0.4:
+                w = '"%s%s"' % (w, rng.choice([",x", '""', " y"]))
+            fields.append(w)
+        cases.append([",".join(fields)])
+    return ("csv_row",
+            "Write a Python function `csv_row(line)` that splits one CSV "
+            "line into a list of fields. A double quote opens a quoted field "
+            "only when it is the first character of that field; such a "
+            "field keeps any commas inside it, and a doubled quote inside "
+            "it means one quote character. Anywhere else a quote is an "
+            "ordinary character, and unquoted fields are taken as they "
+            "are, spaces included. The empty line gives ['']. Do not use "
+            "the csv module.",
+            "def csv_row(line):\n    out, cur, i, n = [], [], 0, len(line)\n"
+            "    start = True\n    while i < n:\n        c = line[i]\n"
+            "        if c == '\"' and start:\n            i += 1\n"
+            "            while i < n:\n"
+            "                if line[i] == '\"':\n"
+            "                    if i + 1 < n and line[i + 1] == '\"':\n"
+            "                        cur.append('\"')\n                        i += 2\n"
+            "                        continue\n                    i += 1\n"
+            "                    break\n                cur.append(line[i])\n"
+            "                i += 1\n            start = False\n"
+            "        elif c == ',':\n"
+            "            out.append(''.join(cur))\n            cur = []\n"
+            "            i += 1\n            start = True\n"
+            "        else:\n            cur.append(c)\n"
+            "            i += 1\n            start = False\n"
+            "    out.append(''.join(cur))\n    return out\n",
+            cases)
+
+
+@_hard_code
+def _business(rng):
+    holidays = ["2026-01-01", "2026-04-03", "2026-12-25"]
+    cases = [["2026-01-02", 1, holidays], ["2026-01-02", 0, holidays],
+             ["2026-01-03", 1, holidays], ["2026-12-24", 2, holidays],
+             ["2026-01-02", -1, holidays], ["2026-04-02", 1, holidays]]
+    for _ in range(6):
+        d = _random_date(rng, 2026, 2026)
+        cases.append([d.isoformat(), rng.randint(-12, 12), holidays])
+    return ("add_business_days",
+            "Write a Python function `add_business_days(date, n, holidays)`. "
+            "`date` is 'YYYY-MM-DD', `holidays` is a list of such strings, "
+            "and a business day is a weekday that is not a holiday. Return "
+            "the date `n` business days after `date` as 'YYYY-MM-DD', "
+            "counting forwards when n is positive and backwards when it is "
+            "negative. n = 0 returns the date unchanged, even if it is a "
+            "weekend or a holiday.",
+            "import datetime\n\n\n"
+            "def add_business_days(date, n, holidays):\n"
+            "    d = datetime.date.fromisoformat(date)\n"
+            "    if n == 0:\n        return d.isoformat()\n"
+            "    step = 1 if n > 0 else -1\n    left = abs(n)\n"
+            "    hol = set(holidays)\n    while left:\n"
+            "        d += datetime.timedelta(days=step)\n"
+            "        if d.weekday() < 5 and d.isoformat() not in hol:\n"
+            "            left -= 1\n    return d.isoformat()\n",
+            cases)
+
+
+
 HARNESS = """import json
 import solution
 
@@ -477,7 +934,7 @@ for args, want in cases:
     except Exception:
         continue
     passed += got == want
-print("passed %d of %d" % (passed, len(cases)))
+print("@NONCE@ passed %d of %d" % (passed, len(cases)))
 raise SystemExit(0 if passed == len(cases) else 1)
 """
 
@@ -511,24 +968,288 @@ def _grade_code(name, cases, want):
         src = extract_code(reply.content, name)
         if src is None:
             return 0.0, "no function %s in the reply" % name
-        ok, out = env.run_python({"solution.py": src, "main.py": main})
-        last = out.strip().splitlines()[-1] if out.strip() else "no output"
+        # the count is only believed when it carries a word the
+        # submission could not have known: the code under test writes to
+        # the same stdout the score is read from, and "passed 9 of 9" is
+        # four keystrokes to print
+        nonce = secrets.token_hex(8)
+        ok, out = env.run_python(
+            {"solution.py": src, "main.py": main.replace("@NONCE@", nonce)})
+        out = out or ""
+        said = [ln for ln in out.strip().splitlines() if ln.strip()]
+        last = (said[-1] if said else "no output").replace(nonce + " ", "")
+        # part marks: a function that handles the ordinary cases and
+        # trips on one edge is not the same answer as one that does not
+        # run at all, and scoring both zero flattens the whole suite
+        hit = re.search(r"%s passed (\d+) of (\d+)" % nonce, out)
+        if hit:
+            n, total = int(hit.group(1)), int(hit.group(2))
+            return (n / total if total else 0.0), last[:160]
         return (1.0 if ok else 0.0), last[:160]
     return grade
 
 
+@_hard_code
+def _charge(rng):
+    """A price with five clauses that interact. No name to recognise."""
+    k = rng.choice([3, 4, 5, 6])            # bulk threshold
+    p = rng.choice([5, 10, 15, 20])         # bulk percent
+    g = rng.choice([10, 12, 15])            # gold percent
+    s = rng.choice([4, 5, 8])               # silver percent
+    fee = rng.choice([150, 200, 250, 300])  # weekend fee
+    t = rng.choice([5000, 8000, 10000])     # fee waiver
+    cap = rng.choice([1000, 1500, 2000])    # most that can come off
+    r = rng.choice([5, 10])                 # rounding step
+    m = rng.choice([0, 100, 200])           # floor
+
+    src = ("def charge(items, tier, day):\n"
+           "    gross = subtotal = d1 = 0\n"
+           "    for unit, qty in items:\n"
+           "        line = unit * qty\n"
+           "        gross += line\n"
+           "        if qty >= %d:\n"
+           "            cut = line * %d // 100\n"
+           "            d1 += cut\n"
+           "            line -= cut\n"
+           "        subtotal += line\n"
+           "    pct = %d if tier == 'gold' else %d if tier == 'silver' "
+           "else 0\n"
+           "    d2 = subtotal * pct // 100\n"
+           "    total = subtotal - d2\n"
+           "    over = d1 + d2 - %d\n"
+           "    if over > 0:\n"
+           "        total += over\n"
+           "    if day in ('sat', 'sun') and gross < %d:\n"
+           "        total += %d\n"
+           "    total = (total * 2 + %d) // (2 * %d) * %d\n"
+           "    return %d if total < %d else total\n"
+           % (k, p, g, s, cap, t, fee, r, r, r, m, m))
+
+    prompt = (
+        "Write a Python function `charge(items, tier, day)` that returns "
+        "an integer number of cents. `items` is a list of `[unit, qty]` "
+        "pairs of non-negative integers, `tier` is a string, and `day` is "
+        "a three-letter lowercase day name. Apply these steps in this "
+        "order.\n"
+        "1. A line costs `unit * qty`. A line whose `qty` is at least %d "
+        "has %d%% taken off it, and that discount is `line * %d // 100` "
+        "(floor division). Let `d1` be the sum of those line discounts "
+        "and `subtotal` the sum of the lines after they came off.\n"
+        "2. A member discount comes off `subtotal`: %d%% for tier "
+        "\"gold\", %d%% for tier \"silver\", nothing for any other "
+        "tier. The amount is `subtotal * pct // 100` (floor division). "
+        "Call it `d2`.\n"
+        "3. The running total is `subtotal - d2`. If `d1 + d2` is more "
+        "than %d, the excess `d1 + d2 - %d` is added back to the running "
+        "total.\n"
+        "4. If `day` is \"sat\" or \"sun\", add %d cents, unless the "
+        "sum of the lines BEFORE any discount is %d or more, in which "
+        "case add nothing.\n"
+        "5. Round the running total to the nearest multiple of %d, with "
+        "an exact half rounding up.\n"
+        "6. If the result is below %d, return %d instead.\n"
+        "Return an int."
+        % (k, p, p, g, s, cap, cap, fee, t, r, m, m))
+
+    cases = [
+        [[], "gold", "mon"],                       # nothing, then the floor
+        [[], "none", "sat"],                       # the fee on an empty cart
+        [[[100, 1]], "none", "mon"],
+        [[[100, k]], "none", "mon"],               # exactly the threshold
+        [[[100, k - 1]], "none", "mon"],           # one short of it
+        [[[t, 1]], "none", "sun"],                 # exactly the waiver
+        [[[t - 1, 1]], "none", "sun"],             # one short of it
+        [[[999, k], [7, 1]], "gold", "sat"],       # floors that are not exact
+        [[[50000, 9]], "gold", "sat"],             # the cap has to bind
+        [[[50000, 9]], "silver", "wed"],
+        [[[3, 1]], "none", "tue"],                 # rounds down to the floor
+    ]
+    for _ in range(6):
+        cases.append([[[rng.randint(0, 4000), rng.randint(0, 8)]
+                       for _ in range(rng.randint(0, 6))],
+                      rng.choice(["gold", "silver", "none", "bronze"]),
+                      rng.choice(["mon", "sat", "sun", "thu"])])
+    return ("charge", prompt, src, cases)
+
+
+@_hard_code
+def _check(rng):
+    """Five validations with a stated precedence, and a bool that is an
+    int. Getting one rule right is not enough; the order is the task."""
+    n = rng.choice([6, 7, 8])
+    m = rng.choice([12, 16, 20])
+    q = rng.choice([50, 99, 250])
+    letters = "".join(rng.sample("ABCDEFGHJKLMNPRSTVWXZ", 3))
+
+    src = ("def check(rec):\n"
+           "    missing = sorted(k for k in ('code', 'id', 'name', 'qty')\n"
+           "                     if k not in rec)\n"
+           "    if missing:\n"
+           "        return 'missing:' + missing[0]\n"
+           "    v = rec['id']\n"
+           "    if not isinstance(v, str) or len(v) != %d "
+           "or not v.isascii() or not v.isdigit():\n"
+           "        return 'bad id'\n"
+           "    v = rec['name']\n"
+           "    if not isinstance(v, str) or not v or len(v) > %d:\n"
+           "        return 'bad name'\n"
+           "    v = rec['qty']\n"
+           "    if type(v) is not int or v < 1 or v > %d:\n"
+           "        return 'bad qty'\n"
+           "    v = rec['code']\n"
+           "    if (not isinstance(v, str) or len(v) < 2 or v[0] not in %r\n"
+           "            or not v[1:].isascii() or not v[1:].isdigit()):\n"
+           "        return 'bad code'\n"
+           "    return 'ok'\n" % (n, m, q, letters))
+
+    prompt = (
+        "Write a Python function `check(rec)` that returns a string. "
+        "`rec` is a dict that should have the keys \"id\", \"name\", "
+        "\"qty\" and \"code\", and any of them may be absent. Report "
+        "only the FIRST failure in this exact order.\n"
+        "1. If any of the four keys is absent, return \"missing:\" "
+        "followed by whichever absent key comes first alphabetically.\n"
+        "2. \"id\" must be a str of exactly %d characters, every one of "
+        "them an ASCII digit; otherwise return \"bad id\".\n"
+        "3. \"name\" must be a non-empty str of at most %d characters; "
+        "otherwise return \"bad name\".\n"
+        "4. \"qty\" must be an int from 1 to %d inclusive; a bool is not "
+        "an int here, even though Python says it is. Otherwise return "
+        "\"bad qty\".\n"
+        "5. \"code\" must be a str whose first character is one of "
+        "%s and whose remaining characters are one or more ASCII digits; "
+        "otherwise return \"bad code\".\n"
+        "If every rule passes, return \"ok\"."
+        % (n, m, q, ", ".join(letters)))
+
+    ok = {"id": "1" * n, "name": "a" * m, "qty": q,
+          "code": letters[0] + "12"}
+    cases = [
+        [dict(ok)],
+        [{}],                                           # four absent
+        [{k: v for k, v in ok.items() if k != "id"}],
+        [{k: v for k, v in ok.items() if k not in ("id", "code")}],
+        [dict(ok, id="1" * (n + 1))],
+        [dict(ok, id=int("1" * n))],                    # right shape, an int
+        [dict(ok, id="1" * (n - 1) + "x")],
+        [dict(ok, name="")],
+        [dict(ok, name="a" * (m + 1))],
+        [dict(ok, qty=True)],                           # a bool is not an int
+        [dict(ok, qty=0)],
+        [dict(ok, qty=q + 1)],
+        [dict(ok, code=letters[0])],                    # letter, no digits
+        [dict(ok, code="0" + "12")],
+        [dict(ok, code=letters[2] + "9")],
+        [dict(ok, code=letters[1] + "1a")],
+        [dict(ok, id="1" * n, name="n", qty=True, code="zz")],  # order
+    ]
+    return ("check", prompt, src, cases)
+
+
+@_hard_code
+def _machine(rng):
+    """A stack machine whose opcodes are named by the seed, so it is not
+    the one in the textbook. Operand order and underflow are the task."""
+    words = rng.sample(["pl", "mi", "cp", "sw", "dr", "hi", "lo", "tw",
+                        "ov", "nx"], 6)
+    add, sub, dup, swp, drp, big = words
+
+    src = ("import re\n\n\n"
+           "def run(prog):\n"
+           "    num = re.compile(r'-?[0-9]+')\n"
+           "    st = []\n"
+           "    for tok in prog:\n"
+           "        if num.fullmatch(tok):\n"
+           "            st.append(int(tok))\n"
+           "            continue\n"
+           "        if tok not in (%r, %r, %r, %r, %r, %r):\n"
+           "            return 'bad token'\n"
+           "        need = 1 if tok in (%r, %r) else 2\n"
+           "        if len(st) < need:\n"
+           "            return 'underflow'\n"
+           "        if tok == %r:\n"
+           "            st.append(st.pop() + st.pop())\n"
+           "        elif tok == %r:\n"
+           "            a = st.pop()\n"
+           "            st.append(st.pop() - a)\n"
+           "        elif tok == %r:\n"
+           "            st.append(st[-1])\n"
+           "        elif tok == %r:\n"
+           "            st[-1], st[-2] = st[-2], st[-1]\n"
+           "        elif tok == %r:\n"
+           "            st.pop()\n"
+           "        else:\n"
+           "            a = st.pop()\n"
+           "            b = st.pop()\n"
+           "            st.append(a if a > b else b)\n"
+           "    return st\n"
+           % (add, sub, dup, swp, drp, big, dup, drp,
+              add, sub, dup, swp, drp))
+
+    prompt = (
+        "Write a Python function `run(prog)`. `prog` is a list of strings, "
+        "executed left to right against a stack of ints that starts "
+        "empty.\n"
+        "- A token matching `-?[0-9]+` in full is pushed as an int.\n"
+        "- \"%s\" pops two values and pushes their sum.\n"
+        "- \"%s\" pops two values and pushes the one that was below "
+        "minus the one that was on top.\n"
+        "- \"%s\" pushes a copy of the top value.\n"
+        "- \"%s\" exchanges the top two values.\n"
+        "- \"%s\" discards the top value.\n"
+        "- \"%s\" pops two values and pushes the larger of them.\n"
+        "Any other token: stop at once and return the string "
+        "\"bad token\". If an operation needs more values than the "
+        "stack holds: stop at once and return the string \"underflow\", "
+        "and check this before you check anything else about the "
+        "operation. Otherwise return the stack when the program ends, as "
+        "a list with the bottom first."
+        % (add, sub, dup, swp, drp, big))
+
+    cases = [
+        [[]],
+        [["1", "2", add]],
+        [["1", "2", sub]],                      # 1 - 2, not 2 - 1
+        [["-4", "7", sub]],
+        [[add]],                                # underflow on an empty stack
+        [["1", add]],                           # underflow with one value
+        [[dup]],
+        [["5", dup, add]],
+        [["1", "2", "3", swp, drp]],
+        [["-", "1"]],                           # a lone minus is not a number
+        [["1x", add]],                          # bad token before underflow
+        [["1", "2", "zz", add]],
+        [["9", "-9", big]],
+        [["0", "0", sub, dup, big]],
+        [["007", "08", add]],                   # leading zeroes are fine
+    ]
+    for _ in range(6):
+        prog = []
+        for _ in range(rng.randint(0, 12)):
+            if rng.random() < 0.55:
+                prog.append(str(rng.randint(-20, 20)))
+            else:
+                prog.append(rng.choice(words[:6]))
+        cases.append([prog])
+    return ("run", prompt, src, cases)
+
+
 def gen_code(rng):
-    items, order = [], []
-    for i in range(SIZE["code"]):
-        if not order:
-            order = rng.sample(CODE, len(CODE))
-        name, prompt, src, cases = order.pop()(rng)
+    items, order = [], {}
+    n_hard = round(SIZE["code"] * HARD_SHARE)
+    tiers = ["hard"] * n_hard + ["base"] * (SIZE["code"] - n_hard)
+    rng.shuffle(tiers)
+    for i, tier in enumerate(tiers):
+        pool = HARD_CODE if tier == "hard" else CODE
+        if not order.get(tier):
+            order[tier] = rng.sample(pool, len(pool))
+        name, prompt, src, cases = order[tier].pop()(rng)
         want = expected(src, name, cases)
         item = Item("code", "code-%02d-%s" % (i, name),
                     prompt + " Reply with the function in one ```python "
                     "code block; do not include tests or example usage.",
                     _grade_code(name, cases, want))
-        item.meta["reference"] = src
+        item.meta.update(reference=src, tier=tier)
         items.append(item)
     return items
 
@@ -689,6 +1410,91 @@ def _single(rng):
              "body": lambda x: isinstance(x, str) and bool(x.strip())})
 
 
+# Tools that are easy to confuse with each other: a hard item is offered
+# its near neighbours, not three unrelated tools.
+NEAR = {"set_timer": ["create_event"], "create_event": ["set_timer"],
+        "get_weather": ["search_flights"], "search_flights": ["create_event"],
+        "convert_currency": ["get_stock_price"],
+        "get_stock_price": ["convert_currency"],
+        "send_email": ["create_event"]}
+
+
+def _single_hard(rng):
+    """(prompt, tool, {arg: matcher}) where no argument can be copied
+    straight out of the prompt: each one has to be worked out."""
+    kind = rng.choice(["timer_until", "event_end", "next_weekday",
+                       "currency_math"])
+    if kind == "timer_until":
+        now = datetime.datetime(2026, 1, 1, rng.randint(8, 18),
+                                rng.choice([0, 5, 10, 20, 35, 40, 50]))
+        mins = rng.choice([25, 40, 55, 70, 95, 130])
+        label = rng.choice(["pasta", "laundry", "tea", "bread"])
+        return ("It is %s. Set a timer called %s that goes off at %s." % (
+            now.strftime("%H:%M"), label,
+            (now + datetime.timedelta(minutes=mins)).strftime("%H:%M")),
+            "set_timer", {"minutes": _num(mins), "label": _has(label)})
+    if kind == "event_end":
+        d = _random_date(rng)
+        dur = rng.choice([30, 45, 60, 90, 120])
+        end = datetime.datetime(2026, 1, 1, rng.randint(10, 18),
+                                rng.choice([0, 15, 30, 45]))
+        title = rng.choice(["Dentist", "Team retro", "Piano lesson"])
+        return ("Put '%s' on my calendar on %s. It runs %d minutes and has "
+                "to be finished by %s exactly." % (
+                    title, day_words(d), dur, end.strftime("%H:%M")),
+                "create_event",
+                {"title": _has(title), "date": _ci(_date(d)),
+                 "start": _hhmm((end - datetime.timedelta(
+                     minutes=dur)).strftime("%H:%M")), "minutes": _num(dur)})
+    if kind == "next_weekday":
+        today = _random_date(rng)
+        wd = rng.choice([w for w in range(7) if w != today.weekday()])
+        when = today + datetime.timedelta(
+            days=(wd - today.weekday()) % 7)
+        (oa, oc), (da, dc) = rng.sample(AIRPORTS, 2)
+        n = rng.randint(1, 3)
+        return ("Today is %s, %s. Find flights from %s to %s next %s for %d "
+                "%s." % (WEEKDAYS[today.weekday()], day_words(today), oa, da,
+                         WEEKDAYS[wd], n, "person" if n == 1 else "people"),
+                "search_flights",
+                {"origin": _ci(oc), "destination": _ci(dc),
+                 "date": _ci(_date(when)), "passengers": _num(n)})
+    (fa, fc), (ta, tc) = rng.sample(CURRENCIES, 2)
+    each = rng.choice([12.5, 45.5, 18.25, 99.0, 7.75])
+    count = rng.randint(3, 9)
+    return ("I bought %d boxes at %g %s each. What is the total in %s?" % (
+        count, each, fa, ta), "convert_currency",
+        {"amount": _num(round(each * count, 2)), "from_currency": _ci(fc),
+         "to_currency": _ci(tc)})
+
+
+def _ask_item(rng):
+    """A request missing something the tool needs. Calling it anyway means
+    inventing the missing part; the honest move is to ask."""
+    kind = rng.choice(["currency", "flights", "event"])
+    if kind == "currency":
+        amount, (ta, _) = rng.choice([40, 250, 1200]), rng.choice(CURRENCIES)
+        return ("Convert %d into %s for me." % (amount, ta),
+                ["convert_currency", "get_stock_price"])
+    if kind == "flights":
+        (oa, _), (da, _) = rng.sample(AIRPORTS, 2)
+        return ("Book me a flight from %s to %s." % (oa, da),
+                ["search_flights", "create_event"])
+    return ("Put the review on my calendar for Thursday afternoon.",
+            ["create_event", "set_timer"])
+
+
+def _grade_ask(reply, env, world=None):
+    if reply.calls:
+        c = reply.calls[0]
+        return 0.0, "called %s(%s) instead of asking" % (
+            c.name, json.dumps(c.args)[:80])
+    said = (reply.content or "").strip()
+    if "?" not in said:
+        return 0.0, "neither called nor asked: %.60r" % said
+    return 1.0, "ok"
+
+
 def _grade_call(name, want):
     def grade(reply, env, world=None):
         if not reply.calls:
@@ -706,10 +1512,42 @@ def _grade_call(name, want):
     return grade
 
 
-def _grade_no_call(reply, env, world=None):
-    if reply.calls:
-        return 0.0, "called %s when no tool fits" % reply.calls[0].name
-    return (1.0, "ok") if reply.content.strip() else (0.0, "empty reply")
+def _plain(rng):
+    """A question with one checkable answer and no tool that fits, so
+    both halves can be marked: did it stay off the tools, and was it
+    right anyway."""
+    kind = rng.choice(["times", "odds", "percent", "days"])
+    if kind == "times":
+        a, b = rng.randint(12, 99), rng.randint(12, 99)
+        return "What is %d times %d?" % (a, b), str(a * b)
+    if kind == "odds":
+        n = rng.randint(7, 40)
+        return ("What is the sum of the first %d odd numbers?" % n,
+                str(n * n))
+    if kind == "percent":
+        p, b = rng.choice([5, 12, 15, 20, 25]), rng.randrange(200, 4000, 20)
+        return "What is %d%% of %d?" % (p, b), str(p * b // 100)
+    y = rng.randint(1996, 2030)
+    m = rng.randint(1, 12)
+    days = [31, 29 if (y % 4 == 0 and y % 100) or y % 400 == 0 else 28,
+            31, 30, 31, 30, 31, 31, 30, 31, 30, 31][m - 1]
+    return ("How many days are in %s %d?" % (MONTHS[m - 1], y), str(days))
+
+
+def _grade_no_call(want):
+    """Not calling a tool is half of it. A model that answers "I don't
+    know" has also not called a tool, and used to score full marks."""
+    def grade(reply, env, world=None):
+        if reply.calls:
+            return 0.0, "called %s when no tool fits" % reply.calls[0].name
+        said = (reply.content or "").strip()
+        if not said:
+            return 0.0, "empty reply"
+        got = final_answer(said) or said
+        if same_answer(got, want):
+            return 1.0, "ok"
+        return 0.0, "answered %r, wanted %s" % (got[-40:], want)
+    return grade
 
 
 AGENT = ("You are an assistant that acts through the tools you are given. "
@@ -943,6 +1781,465 @@ def _world_calendar(rng):
             grade)
 
 
+# ---- worlds that take more than three calls --------------------------
+#
+# A chain where every step feeds the next, plus the two things that
+# separate an agent from a tool-caller: not doing the destructive thing
+# when the rules say no, and trying again when a call fails.
+
+class Support(World):
+    tools = ("find_order", "get_policy", "refund")
+    schemas = [
+        _fn("find_order", "Look an order up by its id.",
+            {"order_id": _s("Order id, like ORD-1234")}),
+        _fn("get_policy", "What the refund policy allows for a reason.",
+            {"reason": _s("Reason for the refund request")}),
+        _fn("refund", "Refund money against an order.",
+            {"order_id": _s("Order id"), "amount": _n("Amount in dollars")})]
+
+    def __init__(self, order, policy):
+        super().__init__()
+        self.order, self.policy = order, policy
+        self.refunds = []
+
+    def t_find_order(self, order_id):
+        if str(order_id).strip() != self.order["order_id"]:
+            return {"error": "no such order"}
+        return dict(self.order)
+
+    def t_get_policy(self, reason):
+        return dict(self.policy, reason=reason)
+
+    def t_refund(self, order_id, amount):
+        if str(order_id).strip() != self.order["order_id"]:
+            return {"error": "no such order"}
+        try:
+            amount = float(amount)
+        except (TypeError, ValueError):
+            return {"error": "amount must be a number"}
+        self.refunds.append((self.order["order_id"], round(amount, 2)))
+        return {"ok": True, "refunded": amount}
+
+
+class Stock(World):
+    tools = ("list_warehouses", "get_stock", "create_order")
+    schemas = [
+        _fn("list_warehouses", "Every warehouse code.", {}),
+        _fn("get_stock", "Units of one item held at one warehouse.",
+            {"warehouse": _s("Warehouse code"), "sku": _s("Item SKU")}),
+        _fn("create_order", "Order more units of an item.",
+            {"sku": _s("Item SKU"), "quantity": _i("Units to order")})]
+
+    def __init__(self, stock, sku):
+        super().__init__()
+        self.stock, self.sku = stock, sku      # {warehouse: units}
+        self.orders = []
+
+    def t_list_warehouses(self):
+        return {"warehouses": sorted(self.stock)}
+
+    def t_get_stock(self, warehouse, sku):
+        if str(sku).strip().upper() != self.sku:
+            return {"error": "no such sku"}
+        held = self.stock.get(str(warehouse).strip().upper())
+        if held is None:
+            return {"error": "no such warehouse"}
+        return {"warehouse": warehouse, "sku": sku, "units": held}
+
+    def t_create_order(self, sku, quantity):
+        if str(sku).strip().upper() != self.sku:
+            return {"error": "no such sku"}
+        try:
+            quantity = int(quantity)
+        except (TypeError, ValueError):
+            return {"error": "quantity must be an integer"}
+        self.orders.append(quantity)
+        return {"ok": True, "ordered": quantity}
+
+
+class Ops(World):
+    tools = ("read_log", "lookup_code", "restart_service",
+             "rollback_service")
+    schemas = [
+        _fn("read_log", "The last lines of a service's log.",
+            {"service": _s("Service name")}),
+        _fn("lookup_code", "What an error code means, and what to do.",
+            {"code": _s("Error code, like E409")}),
+        _fn("restart_service", "Restart a service.",
+            {"service": _s("Service name")}),
+        _fn("rollback_service", "Roll a service back to its last release.",
+            {"service": _s("Service name")})]
+
+    def __init__(self, service, code, action, log, fix, flaky=True):
+        super().__init__()
+        self.service, self.code, self.action = service, code, action
+        self.log_text, self.fix = log, fix
+        self.flaky = flaky                     # the first read fails
+        self.reads = 0
+        self.done = []
+
+    def t_read_log(self, service):
+        if str(service).strip() != self.service:
+            return {"error": "no such service"}
+        self.reads += 1
+        if self.flaky and self.reads == 1:
+            return {"error": "log store temporarily unavailable, try again"}
+        return {"lines": self.log_text}
+
+    def t_lookup_code(self, code):
+        if str(code).strip().upper() != self.code:
+            return {"error": "unknown code"}
+        return {"code": self.code, "means": self.fix,
+                "recommended_action": self.action}
+
+    def t_restart_service(self, service):
+        self.done.append(("restart", str(service).strip()))
+        return {"ok": True}
+
+    def t_rollback_service(self, service):
+        self.done.append(("rollback", str(service).strip()))
+        return {"ok": True}
+
+
+class Team(World):
+    tools = ("list_team", "get_busy", "book_meeting")
+    schemas = [
+        _fn("list_team", "Everyone on the team.", {}),
+        _fn("get_busy", "One person's busy blocks on a day.",
+            {"person": _s("Person's name"), "date": _s("YYYY-MM-DD")}),
+        _fn("book_meeting", "Book a meeting for several people.",
+            {"date": _s("YYYY-MM-DD"), "start": _s("Start time HH:MM"),
+             "minutes": _i("Length in minutes"),
+             "attendees": {"type": "array", "items": {"type": "string"},
+                           "description": "Names of the attendees"}})]
+
+    def __init__(self, day, busy):
+        super().__init__()
+        self.day, self.busy = day, busy        # {person: [[start, end]]}
+        self.booked = []
+
+    def t_list_team(self):
+        return {"team": sorted(self.busy)}
+
+    def t_get_busy(self, person, date):
+        blocks = self.busy.get(str(person).strip())
+        if blocks is None:
+            return {"error": "no such person"}
+        if str(date).strip() != self.day:
+            return {"error": "only %s is loaded" % self.day}
+        return {"person": person, "date": date, "busy": blocks}
+
+    def t_book_meeting(self, date, start, minutes, attendees):
+        self.booked.append((str(date), str(start), minutes,
+                            sorted(str(a) for a in (attendees or []))))
+        return {"ok": True}
+
+
+def _world_refund(rng):
+    allowed = rng.random() < 0.5
+    days = rng.randint(3, 25) if allowed else rng.randint(45, 200)
+    amount = round(rng.randint(1500, 24000) / 100, 2)
+    order = {"order_id": "ORD-%04d" % rng.randint(1000, 9999),
+             "item": rng.choice(["desk lamp", "kettle", "backpack"]),
+             "total": amount, "status": "delivered",
+             "delivered_days_ago": days}
+    policy = {"window_days": 30,
+              "rule": "A delivered order may be refunded in full if it was "
+                      "delivered no more than 30 days ago. Past that, no "
+                      "refund may be issued."}
+
+    def grade(reply, env, world):
+        if allowed:
+            if len(world.refunds) == 1 and world.refunds[0][1] == amount:
+                return 1.0, "ok"
+            return 0.0, "refunds %s, wanted one of %.2f" % (world.refunds,
+                                                            amount)
+        if world.refunds:
+            return 0.0, "refunded %s outside the 30-day window" % (
+                world.refunds,)
+        # refusing because you looked is the answer; refusing because you
+        # did nothing only looks like it
+        asked = {name for name, _ in world.log}
+        missing = {"find_order", "get_policy"} - asked
+        if missing:
+            return 0.0, "declined without calling %s" % ", ".join(
+                sorted(missing))
+        said = (reply.content or "").strip()
+        return (1.0, "ok") if said else (0.0, "no refund, but said nothing")
+    return ("Order %s came back as faulty and the customer is asking for a "
+            "refund. Check the order and our policy, and if the policy "
+            "allows it refund the full amount. If it does not, do not "
+            "refund anything - explain why instead." % order["order_id"],
+            lambda: Support(dict(order), dict(policy)), Support.schemas,
+            grade)
+
+
+def _world_restock(rng):
+    sku = "SKU-%03d" % rng.randint(100, 999)
+    codes = rng.sample(["LDN", "BER", "OSL", "KYO", "LIM"], 3)
+    target = rng.choice([40, 50, 75, 100])
+    stock = {c: rng.randint(0, target - 5) for c in codes}
+    short = sum(target - v for v in stock.values())
+
+    def grade(reply, env, world):
+        if world.orders == [short]:
+            return 1.0, "ok"
+        return 0.0, "ordered %s, shortfall is %d" % (world.orders, short)
+    return ("Every warehouse should hold %d units of %s. Work out the total "
+            "shortfall across all of them and place a single order for "
+            "exactly that many units." % (target, sku),
+            lambda: Stock(dict(stock), sku), Stock.schemas, grade)
+
+
+def _world_incident(rng):
+    service = rng.choice(["billing", "search", "mailer", "auth"])
+    action, code = rng.choice([("restart", "E%d" % rng.randint(400, 499)),
+                               ("rollback", "E%d" % rng.randint(500, 599))])
+    fix = ("a worker deadlock that clears on restart" if action == "restart"
+           else "a bad release that has to be rolled back")
+    log = ["%02d:%02d WARN queue depth rising" % (rng.randint(0, 23),
+                                                  rng.randint(0, 59)),
+           "%02d:%02d ERROR %s raised in handler" % (rng.randint(0, 23),
+                                                     rng.randint(0, 59),
+                                                     code),
+           "%02d:%02d INFO retrying" % (rng.randint(0, 23),
+                                        rng.randint(0, 59))]
+
+    def grade(reply, env, world):
+        want = (action, service)
+        if world.done == [want]:
+            return 1.0, "ok"
+        if not world.done:
+            return 0.0, "did nothing (log reads: %d)" % world.reads
+        return 0.0, "did %s, wanted %s" % (world.done, [want])
+    return ("The %s service is paging. Read its log, look up the error code "
+            "you find there, and carry out the action the lookup recommends "
+            "on that service. The log store is flaky at the moment."
+            % service,
+            lambda: Ops(service, code, action, list(log), fix),
+            Ops.schemas, grade)
+
+
+def _world_team(rng):
+    while True:
+        day = _random_date(rng).isoformat()
+        people = rng.sample(NAMES, 3)
+        busy = {}
+        for who in people:
+            blocks, t = [], 9 * 60 + rng.choice([0, 30, 60])
+            while t < 15 * 60 and len(blocks) < 3:
+                length = rng.choice([30, 60, 90])
+                blocks.append([_hm(t), _hm(min(t + length, 17 * 60))])
+                t += length + rng.choice([30, 60, 90])
+            busy[who] = blocks
+        need = rng.choice([30, 60])
+        want = None
+        for start in range(9 * 60, 17 * 60 - need + 1, 15):
+            end = start + need
+            if all(end <= _mins(s) or start >= _mins(e)
+                   for blocks in busy.values() for s, e in blocks):
+                want = start
+                break
+        if want is not None and want > 9 * 60:
+            break
+
+    def grade(reply, env, world):
+        if len(world.booked) != 1:
+            return 0.0, "booked %d meetings, wanted 1" % len(world.booked)
+        date, start, minutes, who = world.booked[0]
+        if date != day:
+            return 0.0, "booked %s, wanted %s" % (date, day)
+        if not _hhmm(_hm(want))(start):
+            return 0.0, "booked %s, earliest free is %s" % (start, _hm(want))
+        if not _num(need)(minutes):
+            return 0.0, "booked %s minutes, wanted %d" % (minutes, need)
+        if who != sorted(busy):
+            return 0.0, "attendees %s, wanted %s" % (who, sorted(busy))
+        return 1.0, "ok"
+    return ("Book a %d-minute meeting on %s for the whole team, at the "
+            "earliest time between 09:00 and 17:00 when every one of them "
+            "is free. Put all of them on it." % (need, day),
+            lambda: Team(day, copy.deepcopy(busy)), Team.schemas, grade)
+
+
+
+
+class Ledger(World):
+    """Eight tools, four of which are beside the point, and a list that
+    only arrives a page at a time."""
+
+    tools = ("find_account", "list_transactions", "get_rate",
+             "flag_transaction", "get_balance", "list_currencies",
+             "get_customer_notes", "export_statement")
+    schemas = [
+        _fn("find_account", "Look up an account id from a person's name.",
+            {"name": _s("The account holder's full name")}),
+        _fn("list_transactions",
+            "One page of an account's transactions. Pass the page number "
+            "from next_page to get the following page.",
+            {"account_id": _s("Account id from find_account"),
+             "page": _i("Page number, starting at 1")},
+            ["account_id"]),
+        _fn("get_rate", "Today's rate from a currency to USD.",
+            {"currency": _s("Three-letter currency code")}),
+        _fn("flag_transaction", "Flag one transaction for review.",
+            {"txn_id": _s("Transaction id"),
+             "reason": _s("Why it is being flagged")}),
+        _fn("get_balance", "An account's current balance.",
+            {"account_id": _s("Account id")}),
+        _fn("list_currencies", "Every currency code the ledger knows.", {}),
+        _fn("get_customer_notes", "Free-text notes about an account.",
+            {"account_id": _s("Account id")}),
+        _fn("export_statement", "Queue a statement export.",
+            {"account_id": _s("Account id"), "format": _s("pdf or csv")})]
+
+    def __init__(self, holder, account, pages, rates, balance):
+        super().__init__()
+        self.holder = holder
+        self.account = account
+        self.pages = pages                  # list of lists of txn dicts
+        self.rates = rates
+        self.balance = balance
+        self.flagged = []
+
+    def t_find_account(self, name):
+        if str(name).strip().lower() != self.holder.lower():
+            return {"error": "no account for %s" % name}
+        return {"account_id": self.account, "holder": self.holder}
+
+    def _mine(self, account_id):
+        return str(account_id).strip().upper() == self.account
+
+    def t_list_transactions(self, account_id, page=1):
+        if not self._mine(account_id):
+            return {"error": "no such account: %s" % account_id}
+        try:
+            n = int(page)
+        except (TypeError, ValueError):
+            return {"error": "page must be a whole number"}
+        if not 1 <= n <= len(self.pages):
+            return {"error": "no page %s; there are %d"
+                    % (page, len(self.pages))}
+        return {"page": n, "pages": len(self.pages),
+                "transactions": [dict(t) for t in self.pages[n - 1]],
+                "next_page": n + 1 if n < len(self.pages) else None}
+
+    def t_get_rate(self, currency):
+        code = str(currency).strip().upper()
+        if code not in self.rates:
+            return {"error": "unknown currency: %s" % currency}
+        return {"currency": code, "rate_to_usd": self.rates[code]}
+
+    def t_flag_transaction(self, txn_id, reason):
+        known = {t["txn_id"] for page in self.pages for t in page}
+        if str(txn_id).strip().upper() not in known:
+            return {"error": "no such transaction: %s" % txn_id}
+        self.flagged.append((str(txn_id).strip().upper(), str(reason)))
+        return {"flagged": str(txn_id).strip().upper()}
+
+    def t_get_balance(self, account_id):
+        if not self._mine(account_id):
+            return {"error": "no such account: %s" % account_id}
+        return {"balance_usd": self.balance}
+
+    def t_list_currencies(self):
+        return {"currencies": sorted(self.rates)}
+
+    def t_get_customer_notes(self, account_id):
+        if not self._mine(account_id):
+            return {"error": "no such account: %s" % account_id}
+        return {"notes": "Account in good standing. Reviewed annually."}
+
+    def t_export_statement(self, account_id, format="pdf"):
+        if not self._mine(account_id):
+            return {"error": "no such account: %s" % account_id}
+        return {"queued": True, "format": str(format)}
+
+
+MERCHANTS = ("Halden Freight", "Orsova Supplies", "Bright Fen Ltd",
+             "Kestrel Media", "Tamarind Foods", "Pallas Hardware",
+             "Vellum Press", "Norrland Tools", "Cobalt Rail",
+             "Saffron Clinic", "Ironwood Cafe", "Lune Textiles",
+             "Aster Logistics", "Quarry House", "Petrel Labs",
+             "Mistral Air", "Fenwick Books", "Gannet Marine")
+
+
+def _world_ledger(rng):
+    """Fourteen to eighteen transactions over three or four pages, in
+    four currencies, and the limit is in USD."""
+    holder = "%s %s" % (rng.choice(NAMES), rng.choice(
+        ["Achterberg", "Baptiste", "Corvino", "Dashwood", "Eklund"]))
+    account = "AC-%04d" % rng.randint(1000, 9999)
+    rates = {"USD": 1.0,
+             "EUR": round(rng.uniform(1.02, 1.19), 4),
+             "GBP": round(rng.uniform(1.21, 1.38), 4),
+             "JPY": round(rng.uniform(0.0059, 0.0074), 5)}
+    limit = rng.choice([500, 750, 1000, 1200])
+    per_page = 5
+    n = rng.randint(14, 18)
+    merchants = rng.sample(MERCHANTS, n)
+    txns, used = [], set()
+    for i in range(n):
+        code = rng.choice(["USD", "EUR", "GBP", "JPY", "JPY"])
+        over = rng.random() < 0.3
+        usd = (rng.uniform(1.25, 4.0) if over else rng.uniform(0.04, 0.78))
+        usd *= limit
+        if abs(usd - limit) < limit * 0.05:     # never a judgement call
+            usd = limit * (1.4 if over else 0.5)
+        raw = usd / rates[code]
+        amount = round(raw, 0 if code == "JPY" else 2)
+        exact = amount * rates[code]
+        if abs(exact - limit) < limit * 0.02:
+            continue
+        txn_id = "TX-%05d" % rng.randint(10000, 99999)
+        if txn_id in used:
+            continue
+        used.add(txn_id)
+        txns.append({"txn_id": txn_id, "merchant": merchants[i],
+                     "amount": amount, "currency": code,
+                     "date": _random_date(rng).isoformat()})
+    want = [t["txn_id"] for t in txns
+            if t["amount"] * rates[t["currency"]] > limit]
+    if len(want) < 2 or len(want) > 6 or len(txns) < 12:
+        return _world_ledger(rng)               # unlucky draw, redraw
+    pages = [txns[i:i + per_page] for i in range(0, len(txns), per_page)]
+    if want[-1] not in {t["txn_id"] for t in pages[-1]}:
+        return _world_ledger(rng)               # the last page must matter
+    balance = round(sum(t["amount"] * rates[t["currency"]]
+                        for t in txns), 2)
+
+    def grade(reply, env, world):
+        got = {i for i, _ in world.flagged}
+        good = set(want)
+        if not got:
+            return 0.0, "flagged nothing; %d were over the limit" % len(good)
+        hit = got & good
+        score = len(hit) / len(got | good)
+        bad_reason = [i for i, why in world.flagged
+                      if "over limit" not in why.lower()]
+        if bad_reason:
+            score *= 0.5
+        pages_read = {str(a.get("page", 1))
+                      for name, a in world.log if name == "list_transactions"}
+        why = "flagged %d of %d, %d wrongly, %d page(s) read" % (
+            len(hit), len(good), len(got - good), len(pages_read))
+        return round(score, 4), "ok" if score == 1.0 else why
+
+    return ("Go through %s's account and flag every transaction worth more "
+            "than %d US dollars. Amounts are in several currencies, so "
+            "convert with today's rates before you compare. Flag each one "
+            "with the reason 'over limit', and flag nothing else. There "
+            "are more transactions than fit in one page of results."
+            % (holder, limit),
+            lambda: Ledger(holder, account, [list(p) for p in pages],
+                           dict(rates), balance),
+            Ledger.schemas, grade, 20)
+
+
+HARD_WORLDS = [_world_refund, _world_restock, _world_incident, _world_team,
+               _world_ledger]
+
+
 WORLDS = [_world_orders, _world_prices, _world_files, _world_calendar]
 
 
@@ -954,30 +2251,45 @@ def gen_tools(rng):
         if i % 6 == 5:                          # a request no tool fits
             offered = rng.sample(["get_weather", "get_stock_price",
                                   "set_timer", "search_flights"], 2)
-            q = rng.choice([
-                "What is %d times %d?" % (rng.randint(12, 99),
-                                          rng.randint(12, 99)),
-                "Give me a synonym for '%s'." % rng.choice(
-                    ["quick", "bright", "calm", "large"]),
-                "Translate 'good morning' into %s." % rng.choice(
-                    ["French", "Spanish", "German"])])
-            items.append(Item("tools", "tools-%02d-none" % i, q,
-                              _grade_no_call, AGENT,
-                              [TOOLS[t] for t in offered]))
+            q, want = _plain(rng)
+            items.append(Item("tools", "tools-%02d-none" % i,
+                              q + " End your reply with a line of the form "
+                              "'Answer: <answer>'.",
+                              _grade_no_call(want), AGENT,
+                              [TOOLS[t] for t in offered],
+                              meta={"tier": "base", "answer": want}))
             continue
-        prompt, tool, want = _single(rng)
-        others = rng.sample([t for t in TOOLS if t != tool], 2)
+        if i % 6 == 2:                          # something the tool needs
+            prompt, offered = _ask_item(rng)    # is missing: ask for it
+            items.append(Item("tools", "tools-%02d-ask" % i, prompt,
+                              _grade_ask, AGENT,
+                              [TOOLS[t] for t in offered],
+                              meta={"tier": "hard"}))
+            continue
+        hard = i % 2 == 0
+        prompt, tool, want = (_single_hard if hard else _single)(rng)
+        pool = NEAR.get(tool, []) if hard else []
+        others = pool + rng.sample(
+            [t for t in TOOLS if t != tool and t not in pool],
+            max(0, 2 - len(pool)))
         offered = [tool] + others
         rng.shuffle(offered)
         items.append(Item("tools", "tools-%02d-%s" % (i, tool), prompt,
                           _grade_call(tool, want), AGENT,
-                          [TOOLS[t] for t in offered]))
+                          [TOOLS[t] for t in offered],
+                          meta={"tier": "hard" if hard else "base"}))
     for j in range(n_multi):
-        maker = WORLDS[j % len(WORLDS)]
-        prompt, world, schemas, grade = maker(rng)
+        hard = j % 2 == 0
+        pool = HARD_WORLDS if hard else WORLDS
+        maker = pool[(j // 2) % len(pool)]
+        made = maker(rng)
+        prompt, world, schemas, grade = made[:4]
+        meta = {"tier": "hard" if hard else "base"}
+        if len(made) > 4:
+            meta["turns"] = made[4]
         items.append(Item("tools", "tools-%02d-%s" % (
             n_single + j, maker.__name__[7:]), prompt, grade, AGENT,
-            schemas, world=world))
+            schemas, world=world, meta=meta))
     return items
 
 
@@ -1040,43 +2352,222 @@ def _code_word(rng):
                           rng.randint(1000, 9999))
 
 
+def _said(reply, cap=200):
+    """The answer, not the essay around it.
+
+    Every one of these questions says to reply with just the room, just
+    the code, just the number. Grading the whole reply by substring
+    means a model that quotes a slab of the document back scores for
+    whatever happened to be inside it, so read the line it ended on and
+    only if it is short enough to be an answer."""
+    lines = [ln for ln in (reply.content or "").splitlines() if ln.strip()]
+    if not lines:
+        return ""
+    said = (final_answer(reply.content) or lines[-1]).strip()
+    return said if len(said) <= cap else ""
+
+
+def _floor_answer(want):
+    """A bare number is too short to grade by substring: every room name
+    in the document holds digits, and one of them will match."""
+    def grade(reply, env, world=None):
+        said = _said(reply)
+        lone = re.fullmatch(r"[^\d-]*?(\d+)\D*", said)
+        if lone and lone.group(1).lstrip("0") == want.lstrip("0"):
+            return 1.0, "ok"
+        named = re.findall(r"floor\s*(?:number\s*)?(\d+)", said, re.I)
+        if named and named[-1].lstrip("0") == want.lstrip("0"):
+            return 1.0, "ok"
+        return 0.0, "wanted floor %s, got %.60r" % (want, said)
+    return grade
+
+
+CODE_SHAPE = re.compile(r"\b[A-Z]{2}-\d{4}\b")
+NO_WORDS = re.compile(
+    r"(\bnot\b|\bno\b|\bisn'?t\b|\baren'?t\b|\bdoes ?n'?t\b"
+    r"|\bcannot\b|\bcan'?t\b|\bnever\b|\babsent\b|\bmissing\b"
+    r"|\b(do|does|did)(n'?t| not)\b|\bwithout\b"
+    r"|\bnowhere\b|\bunable\b|\bunknown\b|\bunavailable\b"
+    r"|\bunspecified\b|\bunlisted\b|\bomitted\b|\black(s|ing)?\b"
+    r"|\bnone\b|\bsilent\b|n/a)", re.I)
+
+
+def _set_answer(want, universe):
+    """Overlap, not all-or-nothing: finding two of three is real
+    progress and should not score the same as finding none."""
+    good = {w.lower() for w in want}
+    known = {w.lower() for w in universe}
+
+    def grade(reply, env, world=None):
+        # the question asks for just the names, so read the last line
+        # rather than any thinking above it that weighed other people
+        lines = [ln for ln in (reply.content or "").splitlines() if ln.strip()]
+        said = final_answer(reply.content) or (lines[-1] if lines else "")
+        got = {w for w in known
+               if re.search(r"\b%s\b" % re.escape(w), said.lower())}
+        if not got:
+            return 0.0, "named none of the %d" % len(good)
+        score = len(got & good) / len(got | good)
+        return (round(score, 4),
+                "ok" if score == 1.0 else "named %d of %d, %d wrongly"
+                % (len(got & good), len(good), len(got - good)))
+    return grade
+
+
+ABSENT_FLAT = ("none", "n/a", "na", "unknown", "not given",
+               "not recorded", "not listed", "not specified",
+               "not stated", "no code", "not provided", "not there")
+
+ABSENT_ABOUT = re.compile(
+    r"\b(code|record|records|given|give|recorded|listed|stated|specified|"
+    r"provided|available|mention|mentioned|know|find|say|anywhere)\b", re.I)
+
+
+def _echoed(said, prompt):
+    """True when the reply is the prompt handed back. Sixty characters
+    of an exact run is far past coincidence, and quoting one line of the
+    instructions is the cheapest way to satisfy a rule about them."""
+    said, prompt = " ".join(said.split()), " ".join(prompt.split())
+    if len(said) < 60:
+        return said in prompt and len(said) > 20
+    return any(said[i:i + 60] in prompt
+               for i in range(0, len(said) - 59, 20))
+
+
+def _absent_answer(question):
+    """The document does not say. Making something up is the failure
+    this grades; saying so is the pass.
+
+    Read only the last line, and only a short one: the question asks for
+    one word, so a reply that goes on for a paragraph has not answered
+    it, and a reply that quotes the question back is not agreeing with
+    it. A negative word loose in a long answer proves nothing."""
+    def grade(reply, env, world=None):
+        lines = [ln for ln in (reply.content or "").splitlines()
+                 if ln.strip()]
+        if not lines:
+            return 0.0, "said nothing"
+        said = (final_answer(reply.content) or lines[-1]).strip()
+        made_up = CODE_SHAPE.findall(said)
+        if made_up:
+            return 0.0, "invented a code: %s" % made_up[0]
+        if len(said) > 200:
+            return 0.0, "did not answer in one line: %.60r" % said
+        if _echoed(said, question):
+            return 0.0, "read the question back"
+        flat = said.strip().strip(".,;:!\"'").lower()
+        if flat in ABSENT_FLAT:
+            return 1.0, "ok"
+        # a negative word on its own is not a refusal: it has to be
+        # about the thing that is missing
+        if (len(said.split()) <= 25 and NO_WORDS.search(said)
+                and ABSENT_ABOUT.search(said)):
+            return 1.0, "ok"
+        return 0.0, "did not say it is absent: %.60r" % said
+    return grade
+
+
 def _contains(want):
     def grade(reply, env, world=None):
-        ok = want.lower() in (reply.content or "").lower()
+        said = _said(reply)
+        ok = want.lower() in said.lower()
         return (1.0, "ok") if ok else (0.0, "wanted %s, got %.60r" % (
-            want, reply.content))
+            want, said or (reply.content or "")))
     return grade
 
 
 def gen_longctx(rng):
     items = []
     for label, target in LONG:
-        projects = rng.sample(PROJECTS, 10)
-        staff = rng.sample(STAFF, 5)
-        facts, questions = [], []
-        codes = {p: _code_word(rng) for p in projects[:8]}
-        for p, depth in zip(projects[:3], rng.sample([0.1, 0.5, 0.9], 3),
-                            strict=True):
-            facts.append((depth, "The access code for project %s is %s."
-                          % (p, codes[p])))
-            questions.append(("What is the access code for project %s? "
-                              "Reply with just the code." % p, codes[p]))
-        for p in projects[3:8]:                 # distractors
+        projects = rng.sample(PROJECTS, 12)
+        staff = rng.sample(STAFF, 6)
+        facts, questions, tiers = [], [], []
+        codes = {p: _code_word(rng) for p in projects[:9]}
+        p0 = projects[0]                        # plain retrieval, deep
+        facts.append((rng.uniform(0.55, 0.95),
+                      "The access code for project %s is %s."
+                      % (p0, codes[p0])))
+        questions.append(("What is the access code for project %s? "
+                          "Reply with just the code." % p0, codes[p0],
+                          "text"))
+        tiers.append("base")
+        # the same question, answered twice: whoever stops at the first
+        # match in the document gets the stale code
+        p1, fresh = projects[1], _code_word(rng)
+        a = rng.uniform(0.1, 0.4)
+        facts.append((a, "The access code for project %s is %s."
+                      % (p1, codes[p1])))
+        facts.append((rng.uniform(a + 0.2, 0.95),
+                      "Update: the access code for project %s was changed to "
+                      "%s, replacing the earlier one." % (p1, fresh)))
+        questions.append(("What is the current access code for project %s? "
+                          "Reply with just the code." % p1, fresh, "text"))
+        tiers.append("hard")
+        for p in projects[2:9]:                 # distractors
             facts.append((rng.random(), "The access code for project %s is %s."
                           % (p, codes[p])))
-        rooms = {s: "room %d-%02d" % (rng.randint(1, 9), rng.randint(1, 60))
-                 for s in staff}
-        for p, lead in zip(projects[8:10], staff[:2], strict=True):
-            a, b = rng.uniform(0.05, 0.45), rng.uniform(0.55, 0.95)
-            if rng.random() < 0.5:
-                a, b = b, a
-            facts.append((a, "Project %s is led by %s." % (p, lead)))
-            facts.append((b, "%s works from %s." % (lead, rooms[lead])))
-            questions.append(("Which room does the person who leads project "
-                              "%s work from? Reply with just the room." % p,
-                              rooms[lead]))
-        for s in staff[2:]:
+        picked = rng.sample([(a, b) for a in range(1, 10)
+                             for b in range(1, 61)], len(staff))
+        rooms = {s: "room %d-%02d" % rc
+                 for s, rc in zip(staff, picked, strict=True)}
+        # three of the six share a floor, so "who is on floor n" has an
+        # answer that cannot be finished early
+        hot = rng.randint(1, 14)
+        others = rng.sample([f for f in range(1, 15) if f != hot], 3)
+        share = rng.sample(staff, 3)
+        floors = {s: hot for s in share}
+        for s, f in zip([x for x in staff if x not in share], others,
+                        strict=True):
+            floors[s] = f
+        p2, lead2 = projects[9], staff[0]       # two hops
+        a, b = rng.uniform(0.05, 0.45), rng.uniform(0.55, 0.95)
+        if rng.random() < 0.5:
+            a, b = b, a
+        facts.append((a, "Project %s is led by %s." % (p2, lead2)))
+        facts.append((b, "%s works from %s." % (lead2, rooms[lead2])))
+        facts.append((rng.random(), "%s is on floor %d." % (
+            rooms[lead2].capitalize(), floors[lead2])))
+        # graded on the number alone: the question asks for just the
+        # room, so a reply of "4-04" is right and "room 4-04" passes too
+        questions.append(("Which room does the person who leads project "
+                          "%s work from? Reply with just the room." % p2,
+                          rooms[lead2].split()[-1], "text"))
+        tiers.append("base")
+        # three hops, planted in an order that never matches the chain
+        for p3, lead3 in zip(projects[10:12], staff[1:3], strict=True):
+            depths = sorted(rng.uniform(0.05, 0.95) for _ in range(3))
+            chain = ("Project %s is led by %s." % (p3, lead3),
+                     "%s works from %s." % (lead3, rooms[lead3]),
+                     "%s is on floor %d." % (rooms[lead3].capitalize(),
+                                             floors[lead3]))
+            for d, f in zip(rng.sample(depths, 3), chain, strict=True):
+                facts.append((d, f))
+            questions.append(("Which floor does the person who leads project "
+                              "%s work on? Reply with just the floor number."
+                              % p3, str(floors[lead3]), "floor"))
+            tiers.append("hard")
+        for s in staff[3:]:                     # distractors for both hops
             facts.append((rng.random(), "%s works from %s." % (s, rooms[s])))
+            facts.append((rng.random(), "%s is on floor %d." % (
+                rooms[s].capitalize(), floors[s])))
+        # nothing to retrieve: the whole document has to be read to count
+        questions.append(("How many people does the document say work from "
+                          "a room? Reply with just the number.",
+                          str(len(staff)), "floor"))
+        tiers.append("hard")
+        # not one answer but every answer: three of the six people are
+        # on that floor, by way of a room named somewhere else again
+        questions.append(("Which people work on floor %d? Every one of "
+                          "them is named in the records. Reply with just "
+                          "their names, separated by commas." % hot,
+                          ", ".join(sorted(share)), "set"))
+        tiers.append("hard")
+        # and nothing to find: the honest answer is that it is not there
+        questions.append(("What is the access code for project %s? Reply "
+                          "with just the code, or with the single word NONE "
+                          "if the records do not give it." % projects[11],
+                          "", "absent"))
+        tiers.append("hard")
         doc_seed = rng.random()
         cache = {}
 
@@ -1088,14 +2579,19 @@ def gen_longctx(rng):
                 _cache[key] = document(_seed, int(_target * cpt), _facts)
             return _cache[key]
 
-        for k, (q, want) in enumerate(questions):
+        for k, (q, want, kind) in enumerate(questions):
             item = Item("longctx", "longctx-%s-%d" % (label, k),
                         lambda cpt, q=q, text=text: (
                             "Read the records below, then answer the "
                             "question after them.\n\n" + text(cpt)
                             + "\n\nQuestion: " + q),
-                        _contains(want))
-            item.meta.update(doc=label, tokens=target, answer=want)
+                        _set_answer(want.split(", "), STAFF)
+                        if kind == "set"
+                        else _absent_answer(q) if kind == "absent"
+                        else _floor_answer(want) if kind == "floor"
+                        else _contains(want))
+            item.meta.update(doc=label, tokens=target, answer=want,
+                             tier=tiers[k])
             items.append(item)
     return items
 
@@ -1180,29 +2676,130 @@ CLASH = {("json", "ends"), ("json", "starts"), ("json", "nocomma"),
          ("bullets", "starts"), ("json", "maxwords")}
 
 
-def _grade_rules(rules):
+MIN_WORDS = 12
+
+
+def _grade_rules(rules, prompt=""):
     def grade(reply, env, world=None):
         t = reply.content or ""
-        failed = [text for text, check in rules if not check(t)]
-        return (0.0, "broke: " + " | ".join(failed)[:160]) if failed \
-            else (1.0, "ok")
+        if prompt and _echoed(t, prompt):
+            return 0.0, "read the instructions back instead of writing"
+        # a reply that keeps "no commas" and "no letter t" by being empty
+        # has not kept them, and part marks for that were worth up to
+        # 0.67 of an item to a model that said nothing at all
+        if len(t.split()) < MIN_WORDS:
+            return 0.0, "nothing written: %d words" % len(t.split())
+        failed = []
+        for text, check in rules:
+            try:
+                ok = check(t)
+            except (ValueError, TypeError, IndexError):
+                ok = False
+            if not ok:
+                failed.append(text)
+        if not failed:
+            return 1.0, "ok"
+        kept = (len(rules) - len(failed)) / len(rules)
+        return kept, "broke: " + " | ".join(failed)[:160]
     return grade
+
+
+def _hard_rule(rng):
+    """One more rule on top, of the kind that has to be counted or
+    checked letter by letter rather than just remembered."""
+    kind = rng.choice(["exact_words", "lipogram", "sentences", "acrostic",
+                       "typed_json"])
+    if kind == "exact_words":
+        n = rng.choice([35, 50, 65])
+        return kind, "Use exactly %d words, no more and no fewer." % n, \
+            lambda t: len(t.split()) == n
+    if kind == "lipogram":
+        letter = rng.choice("est")
+        return kind, "Do not use the letter '%s' anywhere in your answer." \
+            % letter, lambda t, c=letter: c not in t.lower()
+    if kind == "sentences":
+        n, w = rng.randint(3, 5), rng.choice([8, 10, 12])
+
+        def check(t, n=n, w=w):
+            parts = [x for x in re.split(r"(?<=[.!?])\s+", t.strip()) if x]
+            return len(parts) == n and all(len(x.split()) <= w for x in parts)
+        return kind, "Write exactly %d sentences, each of at most %d " \
+            "words." % (n, w), check
+    if kind == "acrostic":
+        word = rng.choice(["LAMP", "RIVER", "STONE", "CLOUD"])
+
+        def check(t, word=word):
+            firsts = [x.strip()[0].upper() for x in
+                      re.findall(r"^\s*[-*\u2022]?\s*(.+)$", t, re.M)
+                      if x.strip()]
+            return len(firsts) == len(word) and "".join(firsts) == word
+        return kind, "Write exactly %d lines whose first letters spell " \
+            "%s, in order." % (len(word), word), check
+    keys = rng.sample(["summary", "facts", "rating", "source"], 2)
+
+    def check(t, keys=keys):
+        try:
+            d = json.loads(strip_fences(t))
+        except ValueError:
+            return False
+        return (isinstance(d, dict) and set(d) == set(keys + ["tags"])
+                and isinstance(d.get("tags"), list) and len(d["tags"]) == 3
+                and all(isinstance(x, str) for x in d["tags"]))
+    return kind, 'Answer with only a JSON object with the keys %s and ' \
+        '"tags", where "tags" is a list of exactly three strings.' % (
+            ", ".join('"%s"' % k for k in keys)), check
+
+
+# A hard rule that cannot be kept alongside the structure it is paired
+# with: counting words is impossible inside a fixed JSON shape.
+HARD_CLASH = {("json", "exact_words"), ("json", "lipogram"),
+              ("json", "sentences"), ("json", "acrostic"),
+              ("bullets", "sentences"), ("bullets", "typed_json"),
+              ("paragraphs", "typed_json"), ("quotes", "typed_json"),
+              ("title", "typed_json"), ("json", "typed_json"),
+              ("bullets", "exact_words"), ("paragraphs", "acrostic"),
+              ("bullets", "acrostic"), ("title", "sentences"),
+              ("paragraphs", "sentences"),
+              ("quotes", "acrostic"), ("title", "acrostic"),
+              ("quotes", "sentences")}
+HARD_LEX_CLASH = {("lower", "acrostic"), ("lower", "typed_json"),
+                  ("maxwords", "exact_words"), ("maxwords", "sentences"),
+                  ("nocomma", "typed_json"), ("ends", "typed_json"),
+                  ("ends", "exact_words"), ("ends", "lipogram"),
+                  ("ends", "acrostic"), ("starts", "acrostic"),
+                  ("starts", "typed_json"), ("keyword", "lipogram"),
+                  ("keyword", "exact_words"), ("ends", "sentences"),
+                  ("starts", "lipogram")}
 
 
 def gen_instruct(rng):
     items = []
-    for i in range(SIZE["instruct"]):
+    n_hard = round(SIZE["instruct"] * HARD_SHARE)
+    tiers = ["hard"] * n_hard + ["base"] * (SIZE["instruct"] - n_hard)
+    rng.shuffle(tiers)
+    for i, tier in enumerate(tiers):
         while True:
             sk, stext, scheck = _structure(rng)
             lk, ltext, lcheck = _lexical(rng)
-            if (sk, lk) not in CLASH and not (lk == "lower" and sk is None
-                                              and rng.random() < 0.5):
+            if (sk, lk) in CLASH or (lk == "lower" and sk is None
+                                     and rng.random() < 0.5):
+                continue
+            if tier == "base":
+                hk = None
+                break
+            hk, htext, hcheck = _hard_rule(rng)
+            if (sk, hk) not in HARD_CLASH and (lk, hk) not in HARD_LEX_CLASH:
                 break
         rules = [(ltext, lcheck)] + ([(stext, scheck)] if sk else [])
+        if hk:
+            rules.append((htext, hcheck))
         prompt = "Write a short piece about %s. %s" % (
             rng.choice(TOPICS), " ".join(r[0] for r in reversed(rules)))
-        items.append(Item("instruct", "instruct-%02d-%s%s" % (
-            i, sk + "-" if sk else "", lk), prompt, _grade_rules(rules)))
+        item = Item("instruct", "instruct-%02d-%s%s%s" % (
+            i, sk + "-" if sk else "", lk, "-" + hk if hk else ""),
+            prompt, _grade_rules(rules, prompt))
+        item.meta["tier"] = tier
+        items.append(item)
     return items
 
 
@@ -1292,6 +2889,277 @@ def _average(rng):
             str(xs[4]))
 
 
+# --- harder: several steps, and a plausible wrong turn at each one ---
+
+def _rates(rng):
+    a, b = rng.sample([3, 4, 5, 6, 8], 2)
+    c = rng.choice([9, 10, 12, 15])          # the drain, slower than either
+    rate = 1 / a + 1 / b - 1 / c
+    return ("A tank is filled by pipe A alone in %d hours and by pipe B "
+            "alone in %d hours. An open drain empties a full tank in %d "
+            "hours. Starting empty with both pipes and the drain open, how "
+            "many minutes does the tank take to fill? Round to the nearest "
+            "minute." % (a, b, c), str(round(60 / rate)))
+
+
+def _ages(rng):
+    while True:
+        n, m = rng.randint(3, 7), rng.randint(2, 4)
+        k = rng.randint(4, 20)
+        if n <= m or k * (m - 1) % (n - m):
+            continue
+        child = k * (m - 1) // (n - m)
+        if 4 <= child <= 30 and n * child <= 90:
+            return ("%s is %d times as old as %s. In %d years %s will be "
+                    "only %d times as old as %s. How old is %s now?" % (
+                        NAMES[0], n, NAMES[1], k, NAMES[0], m, NAMES[1],
+                        NAMES[0]), str(n * child))
+
+
+def _overlap(rng):
+    a1, b1, c1 = (rng.randint(20, 80) for _ in range(3))
+    ab, ac, bc = (rng.randint(5, 30) for _ in range(3))
+    t = rng.randint(3, 15)
+    sizes = (a1 + ab + ac + t, b1 + ab + bc + t, c1 + ac + bc + t)
+    return ("In a survey, %d people read the Herald, %d read the Gazette "
+            "and %d read the Tribune. %d read both the Herald and the "
+            "Gazette, %d both the Herald and the Tribune, and %d both the "
+            "Gazette and the Tribune. %d read all three. How many read "
+            "exactly one of the three papers?" % (
+                sizes[0], sizes[1], sizes[2], ab + t, ac + t, bc + t, t),
+            str(a1 + b1 + c1))
+
+
+def _breakeven(rng):
+    f1, p1 = rng.randint(0, 20), rng.randint(12, 30)
+    f2 = f1 + rng.randint(40, 200)
+    p2 = p1 - rng.randint(3, 9)
+    units = next(u for u in range(1, 10000)
+                 if f2 + p2 * u < f1 + p1 * u)
+    return ("Plan A costs $%d a month plus $%d per gigabyte. Plan B costs "
+            "$%d a month plus $%d per gigabyte. What is the smallest whole "
+            "number of gigabytes in a month for which Plan B costs less "
+            "than Plan A?" % (f1, p1, f2, p2), str(units))
+
+
+def _paths(rng):
+    w, h = rng.randint(4, 7), rng.randint(4, 7)
+    bx, by = rng.randint(1, w - 1), rng.randint(1, h - 1)
+    grid = [[0] * (h + 1) for _ in range(w + 1)]
+    grid[0][0] = 1
+    for x in range(w + 1):                   # counted, not derived: a
+        for y in range(h + 1):               # closed form is easy to fumble
+            if (x, y) == (bx, by):
+                grid[x][y] = 0
+            elif (x, y) != (0, 0):
+                grid[x][y] = (grid[x - 1][y] if x else 0) + (
+                    grid[x][y - 1] if y else 0)
+    return ("On a %dx%d grid of city blocks you walk from the south-west "
+            "corner to the north-east corner, moving only north or east "
+            "along the streets. The crossing %d blocks east and %d blocks "
+            "north of the start is closed. How many different routes are "
+            "there?" % (w, h, bx, by), str(grid[w][h]))
+
+
+def _mixture(rng):
+    lo, hi = rng.choice([(10, 40), (15, 45), (20, 50), (5, 35)])
+    total = rng.choice([10, 20, 25, 40, 50])
+    part = rng.randint(1, total - 1)
+    target = (hi * part + lo * (total - part)) / total
+    if target != int(target):
+        return _mixture(rng)
+    return ("A chemist mixes a %d%% acid solution with a %d%% acid solution "
+            "to make %d litres of a %d%% solution. How many litres of the "
+            "%d%% solution are needed?" % (hi, lo, total, int(target), hi),
+            str(part))
+
+
+def _digitsum(rng):
+    lo = rng.randint(100, 4000)
+    hi = lo + rng.randint(300, 1500)
+    want = rng.randint(9, 18)
+    n = sum(1 for x in range(lo, hi + 1)
+            if sum(int(d) for d in str(x)) == want)
+    return ("How many integers from %d to %d inclusive have digits that add "
+            "up to exactly %d?" % (lo, hi, want), str(n))
+
+
+def _meeting(rng):
+    while True:
+        u, v = rng.randint(9, 24), rng.randint(9, 24)
+        gap, t = rng.choice([20, 30, 45]), rng.randint(40, 200)
+        km = (t * (u + v) - gap * v) / 60
+        if km == int(km) and km > 5:
+            start = datetime.datetime(2026, 1, 1, 9, 0)
+            met = start + datetime.timedelta(minutes=t)
+            return ("Two towns are %d km apart. A cyclist leaves the first "
+                    "at 9:00 riding at %d km/h. Another leaves the second "
+                    "%d minutes later riding towards them at %d km/h. At "
+                    "what time do they meet? Answer as HH:MM on a 24-hour "
+                    "clock." % (int(km), u, gap, v), met.strftime("%H:%M"))
+
+
+
+
+SEATS = ("tea", "cocoa", "cider", "juice", "milk", "water")
+
+
+def _and_list(words):
+    return "%s and %s" % (", ".join(words[:-1]), words[-1])
+
+
+def _clues(rng, who, what):
+    """Every clue is read off the true arrangement, so the set is always
+    satisfiable; the pruning below is what makes it unique."""
+    n = len(who)
+    seat = {name: i for i, name in enumerate(who)}
+    drink = {what[i]: i for i in range(n)}
+    out = []
+
+    def add(text, fn):
+        out.append((text, fn))
+
+    for i in range(n - 1):
+        add("%s sits directly to the left of %s." % (who[i], who[i + 1]),
+            lambda p, d, a=who[i], b=who[i + 1]: p[b] - p[a] == 1)
+    for _ in range(n * 2):
+        name = rng.choice(who)
+        bad = rng.choice([k for k in range(n) if k != seat[name]])
+        add("%s is not in seat %d." % (name, bad + 1),
+            lambda p, d, a=name, k=bad: p[a] != k)
+    for name in who:
+        if seat[name] in (0, n - 1):
+            add("%s sits at one of the two ends." % name,
+                lambda p, d, a=name, m=n: p[a] in (0, m - 1))
+        else:
+            add("%s does not sit at either end." % name,
+                lambda p, d, a=name, m=n: p[a] not in (0, m - 1))
+    for name in who:
+        add("%s drinks %s." % (name, what[seat[name]]),
+            lambda p, d, a=name, x=what[seat[name]]: d[x] == p[a])
+    for i in range(n):
+        for j in range(n):
+            if i == j:
+                continue
+            if abs(drink[what[i]] - drink[what[j]]) == 1:
+                add("the %s and the %s are next to each other."
+                    % (what[i], what[j]),
+                    lambda p, d, x=what[i], y=what[j]:
+                    abs(d[x] - d[y]) == 1)
+            if drink[what[i]] < seat[who[j]]:
+                add("the %s is drunk somewhere to the left of %s."
+                    % (what[i], who[j]),
+                    lambda p, d, x=what[i], b=who[j]: d[x] < p[b])
+    return out
+
+
+def _solve(who, drinks, clues):
+    """Every arrangement that fits, at most two of them: the caller only
+    needs to know whether the answer is forced."""
+    found = []
+    for order in itertools.permutations(who):
+        p = {name: i for i, name in enumerate(order)}
+        for pour in itertools.permutations(drinks):
+            d = {x: i for i, x in enumerate(pour)}
+            if all(fn(p, d) for _, fn in clues):
+                found.append((order, pour))
+                if len(found) > 1:
+                    return found
+    return found
+
+
+def _seating(rng):
+    n = 4
+    who = rng.sample(NAMES, n)
+    drinks = rng.sample(SEATS, n)
+    pool = _clues(rng, who, drinks)
+    rng.shuffle(pool)
+    keep = []
+    for clue in pool:                       # enough clues to pin it down
+        keep.append(clue)
+        if len(_solve(who, drinks, keep)) == 1:
+            break
+    else:                                   # pathological seed: try again
+        return _seating(rng)
+    for i in range(len(keep) - 1, -1, -1):  # then drop what is not needed
+        trimmed = keep[:i] + keep[i + 1:]
+        if len(_solve(who, drinks, trimmed)) == 1:
+            keep = trimmed
+    order = sorted(range(len(keep)), key=lambda i: rng.random())
+    lines = "\n".join("%d. %s" % (k + 1, keep[i][0])
+                       for k, i in enumerate(order))
+    if rng.random() < 0.5:
+        target = rng.choice(who)
+        q = "Which seat is %s in? Answer with the seat number." % target
+        want = str(who.index(target) + 1)
+    else:
+        target = rng.randrange(n)
+        q = ("Who is in seat %d? Answer with the name." % (target + 1))
+        want = who[target]
+    return ("%s sit in a row of seats numbered 1 to 4 from left to "
+            "right, and each drinks a different one of %s. "
+            "These statements are all true:\n%s\n%s"
+            % (_and_list(sorted(who)), _and_list(sorted(drinks)),
+               lines, q), want)
+
+
+STEP_OPS = (("add %d to a", lambda a, b, c: (a + c, b)),
+            ("take %d off a", lambda a, b, c: (a - c, b)),
+            ("add %d to b", lambda a, b, c: (a, b + c)),
+            ("take %d off b", lambda a, b, c: (a, b - c)),
+            ("replace a with a + b", lambda a, b, c: (a + b, b)),
+            ("replace b with a - b", lambda a, b, c: (a, a - b)),
+            ("swap a and b", lambda a, b, c: (b, a)))
+
+
+def _machine_run(start_a, start_b, rounds, k, ops, cap):
+    a, b = start_a, start_b
+    for r in range(1, rounds + 1):
+        if r % k == 0:
+            op = ops[0]
+        elif a > b:
+            op = ops[1]
+        else:
+            op = ops[2]
+        a, b = op[0](a, b, op[1])
+        if abs(a) > cap or abs(b) > cap:
+            return None
+    return a, b
+
+
+def _stepper(rng):
+    """Fourteen rounds of three interacting rules. Reading ahead does
+    not help; the branch depends on the values, so it has to be run."""
+    rounds = rng.choice([12, 14, 16])
+    k = rng.choice([3, 4, 5])
+    for _ in range(40):
+        picks = rng.sample(range(len(STEP_OPS)), 3)
+        consts = [rng.randint(2, 9) for _ in picks]
+        say, ops = [], []
+        for c, i in zip(consts, picks, strict=True):
+            text, fn = STEP_OPS[i]
+            say.append(text % c if "%d" in text else text)
+            ops.append((fn, c))
+        a0, b0 = rng.randint(1, 12), rng.randint(1, 12)
+        got = _machine_run(a0, b0, rounds, k, ops, 10 ** 6)
+        if got is None or got[0] == got[1]:
+            continue
+        want = rng.choice(["a", "b"])
+        return ("Two counters start at a = %d and b = %d. The machine runs "
+                "for %d rounds, numbered 1 to %d. In each round exactly "
+                "one thing happens: if the round number is a multiple of "
+                "%d, %s; otherwise, if a is greater than b, %s; otherwise, "
+                "%s. What is %s after round %d?"
+                % (a0, b0, rounds, rounds, k, say[0], say[1], say[2],
+                   want, rounds),
+                str(got[0] if want == "a" else got[1]))
+    return _stepper(rng)                    # pathological seed: try again
+
+
+HARD = [_rates, _ages, _overlap, _breakeven, _paths, _mixture, _digitsum,
+        _meeting, _seating, _stepper]
+
+
 REASON = [_change, _powmod, _days, _weekday, _order, _divisible, _in_base,
           _sequence, _choose, _average]
 
@@ -1305,17 +3173,27 @@ def _grade_answer(want):
     return grade
 
 
+# Most of the suite is the harder tier: the single-step templates alone
+# put every competent model at the ceiling, where nothing can be told
+# apart. HARD_SHARE of the items are multi-step.
+HARD_SHARE = 0.6
+
+
 def gen_reason(rng):
-    items, order = [], []
-    for i in range(SIZE["reason"]):
-        if not order:
-            order = rng.sample(REASON, len(REASON))
-        maker = order.pop()
+    items, order = [], {}
+    n_hard = round(SIZE["reason"] * HARD_SHARE)
+    tiers = ["hard"] * n_hard + ["base"] * (SIZE["reason"] - n_hard)
+    rng.shuffle(tiers)
+    for i, tier in enumerate(tiers):
+        pool = HARD if tier == "hard" else REASON
+        if not order.get(tier):
+            order[tier] = rng.sample(pool, len(pool))
+        maker = order[tier].pop()
         q, want = maker(rng)
         item = Item("reason", "reason-%02d-%s" % (i, maker.__name__[1:]),
                     q + " End your reply with a line of the form "
                     "'Answer: <answer>'.", _grade_answer(want))
-        item.meta["answer"] = want
+        item.meta.update(answer=want, tier=tier)
         items.append(item)
     return items
 
