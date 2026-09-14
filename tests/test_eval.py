@@ -630,6 +630,15 @@ check("results are kept and listed", "tiny" in out.getvalue()
       and "0.50" in out.getvalue(), True)
 out = io.StringIO()
 evalrun.report(rec, out.write)
+hot = io.StringIO()
+evalrun.report(dict(rec, sampling={"temp": "0.7"}), hot.write)
+cold = io.StringIO()
+evalrun.report(dict(rec, sampling={"temp": "0"}), cold.write)
+check("a run that was sampled says the interval is not over runs",
+      ["not over runs" in hot.getvalue(),
+       "not over runs" in cold.getvalue(),
+       "overall" in hot.getvalue()],
+      [True, False, True])
 check("the report shows scores, skips and misses",
       [s in out.getvalue() for s in ("0.50", "skipped", "miss")],
       [True, True, True])

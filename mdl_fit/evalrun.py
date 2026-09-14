@@ -487,6 +487,13 @@ class Progress:
             self.suite = None
 
 
+def _float(x, default=1.0):
+    try:
+        return float(x)
+    except (TypeError, ValueError):
+        return default
+
+
 def report(rec, w):
     w("\nresults  suite v%d · %d items · %s%s\n" % (
         rec["suite_version"], sum(v["n"] for v in rec["suites"].values()),
@@ -526,6 +533,15 @@ def report(rec, w):
         w("note     tool calls need --jinja in the config's args\n")
     elif errs:
         w("note     %d errors, e.g. %s\n" % (len(errs), whys[0][:120]))
+    # the interval is sampling error over items. It says nothing about
+    # the same model answering differently next time, which is what
+    # temperature buys, and two runs of one model at 0.8 can differ by
+    # more than the interval printed above
+    temp = (rec.get("sampling") or {}).get("temp")
+    if temp is None or _float(temp) > 0.3:
+        w("note     sampled at %s; the intervals above are over items, "
+          "not over runs\n" % ("the server default" if temp is None
+                               else "temp " + str(temp)))
     if rec.get("thinking"):
         capped = sum(1 for r in items if r.get("capped"))
         w("note     it thinks; replies are capped per suite (%d hit the "
