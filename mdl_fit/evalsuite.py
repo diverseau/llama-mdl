@@ -2677,6 +2677,17 @@ CLASH = {("json", "ends"), ("json", "starts"), ("json", "nocomma"),
 
 
 MIN_WORDS = 12
+WORDISH = re.compile(r"[A-Za-z0-9']+")
+
+
+def _wordish(t):
+    """Words, counted so that compact JSON is not one of them.
+
+    A valid answer to the JSON rule can be written without a single
+    space in it, and splitting on whitespace calls that one word. The
+    rules that count words keep their own definition; this is only for
+    telling a piece of writing from a reply that is not one."""
+    return len(WORDISH.findall(t))
 
 
 def _grade_rules(rules, prompt=""):
@@ -2684,11 +2695,10 @@ def _grade_rules(rules, prompt=""):
         t = reply.content or ""
         if prompt and _echoed(t, prompt):
             return 0.0, "read the instructions back instead of writing"
-        # a reply that keeps "no commas" and "no letter t" by being empty
-        # has not kept them, and part marks for that were worth up to
-        # 0.67 of an item to a model that said nothing at all
-        if len(t.split()) < MIN_WORDS:
-            return 0.0, "nothing written: %d words" % len(t.split())
+        # the task says at least six words, so this is a rule the model
+        # was told, not a floor sprung on it afterwards
+        if _wordish(t) < 6:
+            return 0.0, "fewer than six words: %d" % _wordish(t)
         failed = []
         for text, check in rules:
             try:
@@ -2699,6 +2709,12 @@ def _grade_rules(rules, prompt=""):
                 failed.append(text)
         if not failed:
             return 1.0, "ok"
+        # part marks are for a piece of writing that broke a rule, not
+        # for silence: an empty reply keeps "no commas" and "do not use
+        # the letter t" for free, and that was worth two thirds of an
+        # item to a model that said nothing at all
+        if _wordish(t) < MIN_WORDS:
+            return 0.0, "nothing written: %d words" % _wordish(t)
         kept = (len(rules) - len(failed)) / len(rules)
         return kept, "broke: " + " | ".join(failed)[:160]
     return grade
@@ -2793,8 +2809,9 @@ def gen_instruct(rng):
         rules = [(ltext, lcheck)] + ([(stext, scheck)] if sk else [])
         if hk:
             rules.append((htext, hcheck))
-        prompt = "Write a short piece about %s. %s" % (
-            rng.choice(TOPICS), " ".join(r[0] for r in reversed(rules)))
+        prompt = ("Write a short piece of at least six words about %s. %s"
+                  % (rng.choice(TOPICS),
+                     " ".join(r[0] for r in reversed(rules))))
         item = Item("instruct", "instruct-%02d-%s%s%s" % (
             i, sk + "-" if sk else "", lk, "-" + hk if hk else ""),
             prompt, _grade_rules(rules, prompt))

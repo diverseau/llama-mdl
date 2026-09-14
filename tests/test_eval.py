@@ -320,6 +320,38 @@ check("bad calls get an error back, never an exception",
                                                           {"bogus": 1}))],
       [True, True, True])
 
+# The format items have a length floor, so that an empty reply cannot
+# bank "no commas" and "do not use the letter t" for free. It must never
+# cost a model that did exactly what it was told, and three of the rules
+# allow a correct answer to be very short indeed.
+
+need = {"sentences": None, "acrostic": None, "typed_json": None}
+guard = 0
+while not all(need.values()) and guard < 500:
+    guard += 1
+    k, text, chk = evalsuite._hard_rule(random.Random(guard))
+    if k in need and need[k] is None:
+        need[k] = (text, chk)
+
+n = int(re.search(r"exactly (\d+) sentences", need["sentences"][0]).group(1))
+terse = {"sentences": " ".join(["Bees hum."] * n)}
+spell = re.search(r"spell (\w+)", need["acrostic"][0]).group(1)
+terse["acrostic"] = "\n".join("%sees hums" % c for c in spell)
+keys = re.findall(r'"(\w+)"', need["typed_json"][0])
+terse["typed_json"] = json.dumps(
+    {k: ["a", "b", "c"] if k == "tags" else "x" for k in keys},
+    separators=(",", ":"))
+
+check("the shortest correct answer to a rule still keeps it",
+      [need[k][1](v) for k, v in sorted(terse.items())], [True, True, True])
+check("and is never short enough to trip the floor",
+      [evalsuite._wordish(v) >= 6 for v in terse.values()],
+      [True, True, True])
+check("while a reply that is not writing is under it",
+      [evalsuite._wordish(t) for t in
+       ("", "I don't know.", "Answer: 42", "none")], [0, 3, 2, 1])
+
+
 # ========================================================== adversary ===
 #
 # A grader that can be satisfied without doing the work is worse than no
