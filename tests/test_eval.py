@@ -180,6 +180,22 @@ class Agent:
         total = sum(int(q) * prices[n] for q, n in wants)
         return R("That comes to...\nAnswer: %.2f" % total)
 
+    def _get_freeze(self, task, seen):      # a freeze that starts late
+        target = re.search(r"behind version (\S+) forward", task).group(1)
+        if not seen:
+            return self.call("list_services")
+        behind = [s["name"] for s in seen[0]["services"]
+                  if s["version"] != target]
+        done = [s["rolled_out"] for s in seen if "rolled_out" in s]
+        left = [n for n in behind if n not in done]
+        if not left:
+            return R("All of them are on %s now." % target)
+        if "frozen" not in seen[-1]:        # look again before each one
+            return self.call("get_freeze")
+        if seen[-1]["frozen"]:
+            return R("The board froze deploys, so I stopped.")
+        return self.call("rollout", service=left[0], version=target)
+
     def _export_statement(self, task, seen):   # ledger: paged, long
         holder = task.split("Go through ")[1].split("'s account")[0]
         limit = int(re.search(r"more than (\d+) US dollars", task).group(1))
@@ -291,8 +307,8 @@ check("a careful agent solves every multi-step item",
       [(r["id"], 1.0) for r in got])
 check("every world is in the suite, the hard ones too",
       sorted({i.id.split("-", 2)[2] for i in multi}),
-      ["calendar", "files", "incident", "ledger", "orders", "prices",
-       "refund", "restock", "team"])
+      ["calendar", "files", "freeze", "incident", "ledger", "orders",
+       "prices", "refund", "restock", "team"])
 
 
 class Lazy(Agent):

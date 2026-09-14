@@ -2341,8 +2341,97 @@ def _world_ledger(rng):
             Ledger.schemas, grade, 20)
 
 
+
+
+class Deploy(World):
+    """The freeze is not on when the job starts. It is on by the third
+    rollout, and only a caller that looks again will know."""
+
+    tools = ("list_services", "get_freeze", "rollout")
+    schemas = [
+        _fn("list_services", "Every service and the version it runs.", {}),
+        _fn("get_freeze", "Whether the change board has frozen deploys "
+            "right now.", {}),
+        _fn("rollout", "Roll a service forward to a version.",
+            {"service": _s("Service name"),
+             "version": _s("Version to roll out")})]
+
+    FREEZE_AFTER = 2
+
+    def __init__(self, services, target):
+        super().__init__()
+        self.services = services            # name -> version
+        self.target = target
+        self.done = []
+
+    def frozen(self):
+        return len(self.done) >= self.FREEZE_AFTER
+
+    def t_list_services(self):
+        return {"services": [{"name": n, "version": v}
+                             for n, v in sorted(self.services.items())]}
+
+    def t_get_freeze(self):
+        return {"frozen": self.frozen(),
+                "note": "deploys are frozen" if self.frozen()
+                else "deploys are open"}
+
+    def t_rollout(self, service, version):
+        name = str(service).strip()
+        if name not in self.services:
+            return {"error": "no such service: %s" % service}
+        self.done.append((name, str(version).strip()))
+        return {"rolled_out": name, "version": str(version).strip()}
+
+
+SERVICES = ("billing", "search", "gateway", "mailer", "indexer", "auth",
+            "reports", "uploads", "scheduler")
+
+
+def _world_freeze(rng):
+    target = "%d.%d" % (rng.randint(3, 9), rng.randint(0, 9))
+    old = ["%d.%d" % (int(target.split(".")[0]) - rng.randint(1, 2),
+                      rng.randint(0, 9)) for _ in range(3)]
+    names = rng.sample(SERVICES, 5)
+    services = dict(zip(names[:3], old, strict=True))
+    services.update({n: target for n in names[3:]})   # already up to date
+    behind = set(names[:3])
+
+    def grade(reply, env, world):
+        seq = [name for name, _ in world.log
+               if name in ("get_freeze", "rollout")]
+        wrong = [n for n, _ in world.done if n not in behind]
+        if wrong:
+            return 0.0, "rolled out %s, which was not behind" % wrong[0]
+        bad_version = [n for n, v in world.done if v != target]
+        if bad_version:
+            return 0.0, "rolled out the wrong version to %s" % bad_version[0]
+        # the freeze comes on after the second rollout, so a third is
+        # the failure this world is for
+        if len(world.done) > Deploy.FREEZE_AFTER:
+            return 0.0, "rolled out %d while the board had frozen deploys" % (
+                len(world.done) - Deploy.FREEZE_AFTER)
+        looked = all(seq[i - 1] == "get_freeze"
+                     for i, n in enumerate(seq) if n == "rollout" and i)
+        first_is_check = not seq or seq[0] == "get_freeze"
+        share = len(world.done) / Deploy.FREEZE_AFTER
+        if looked and first_is_check:
+            return round(share, 4), ("ok" if share == 1.0
+                                     else "stopped after %d of %d"
+                                     % (len(world.done), Deploy.FREEZE_AFTER))
+        return round(share * 0.5, 4), "rolled out without looking again"
+
+    return ("Roll every service that is behind version %s forward to it. "
+            "The change board can freeze deploys at any time, and a freeze "
+            "can begin in the middle of a job, so check with get_freeze "
+            "immediately before each rollout. If it reports a freeze, stop "
+            "at once and roll out nothing further. Say what you did."
+            % target,
+            lambda: Deploy(dict(services), target), Deploy.schemas, grade, 12)
+
+
 HARD_WORLDS = [_world_refund, _world_restock, _world_incident, _world_team,
-               _world_ledger]
+               _world_ledger, _world_freeze]
 
 
 WORLDS = [_world_orders, _world_prices, _world_files, _world_calendar]

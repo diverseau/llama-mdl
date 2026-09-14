@@ -111,7 +111,12 @@ Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
   a score. The tool suite gained four worlds that take
   four or five dependent calls, including one where the rules forbid the
   action and doing it anyway is the failure, and one where a call fails
-  the first time. Results from v1 are kept but no longer read as
+  the first time. A sixth asks for something none of the others do:
+  looking again. Every other world can be solved by gathering the facts
+  once and then acting on them, which is the habit that goes wrong
+  against a real system, so in this one a deploy freeze begins in the
+  middle of the job and is only visible to an agent that checks before
+  each step rather than once at the start. Results from v1 are kept but no longer read as
   evidence about a model. One long-context question per document now
   has no answer in the document, so making one up is measured directly,
   and another asks for every match rather than one. The tool suite

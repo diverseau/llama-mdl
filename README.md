@@ -298,7 +298,8 @@ mdl eval --compare qwen-small ornith   which of two is actually better
 It starts the model as models.toml runs it (or uses it if it is already
 up) and runs five suites: code (40 functions, graded by hidden unit
 tests that are actually executed), tools (30 tool-calling tasks, single
-and multi-step, against mock worlds), long-context (24 retrieval,
+and multi-step, against mock worlds, one of which freezes partway
+through so that checking the rules once is not enough), long-context (24 retrieval,
 multi-hop, counting and exhaustive-recall questions at 32k, 64k and
 128k, those beyond the configured context skipped), instruct (20
 checkable format rules) and reason (20 exact-answer problems).
