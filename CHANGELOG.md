@@ -102,7 +102,13 @@ Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
   are named by the seed. A model cannot recall a solution to those,
   because the constants, the rules and the names are generated - it has
   to read the specification. That was the real ceiling: a 35B coder in
-  a 3-bit quant solved 36 of 40 of the named ones. The tool suite gained four worlds that take
+  a 3-bit quant solved 36 of 40 of the named ones. A fourth splits a
+  line whose separator, quote, escape and comment characters all come
+  from the seed, so it is nobody's CSV parser. The hard pool is drawn
+  from in halves - one named task, one generated - because pooled
+  together the generated ones were four templates in fifteen and
+  reached only a fifth of the hard items, which is not enough to move
+  a score. The tool suite gained four worlds that take
   four or five dependent calls, including one where the rules forbid the
   action and doing it anyway is the failure, and one where a call fails
   the first time. Results from v1 are kept but no longer read as

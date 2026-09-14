@@ -509,10 +509,23 @@ def _chunks(rng):
 # quadratic answer runs out of time instead of finishing.
 
 HARD_CODE = []
+SPEC_CODE = []
 
 
 def _hard_code(fn):
     HARD_CODE.append(fn)
+    return fn
+
+
+def _spec_code(fn):
+    """A task built from the seed rather than named after an algorithm.
+
+    These are kept apart from the named ones and drawn from in turn, so
+    that half the hard items are tasks a model cannot have a solution
+    to. Pooled together they were three templates in fourteen, which
+    reached about five of twenty-four items - not enough to matter.
+    """
+    SPEC_CODE.append(fn)
     return fn
 
 
@@ -989,7 +1002,7 @@ def _grade_code(name, cases, want):
     return grade
 
 
-@_hard_code
+@_spec_code
 def _charge(rng):
     """A price with five clauses that interact. No name to recognise."""
     k = rng.choice([3, 4, 5, 6])            # bulk threshold
@@ -1072,7 +1085,7 @@ def _charge(rng):
     return ("charge", prompt, src, cases)
 
 
-@_hard_code
+@_spec_code
 def _check(rng):
     """Five validations with a stated precedence, and a bool that is an
     int. Getting one rule right is not enough; the order is the task."""
@@ -1146,7 +1159,7 @@ def _check(rng):
     return ("check", prompt, src, cases)
 
 
-@_hard_code
+@_spec_code
 def _machine(rng):
     """A stack machine whose opcodes are named by the seed, so it is not
     the one in the textbook. Operand order and underflow are the task."""
@@ -1234,16 +1247,108 @@ def _machine(rng):
     return ("run", prompt, src, cases)
 
 
+@_spec_code
+def _splitter(rng):
+    """Four pieces of punctuation, chosen by the seed, and the rules for
+    how they interact. Not a parser anyone has written before."""
+    sep = rng.choice("|;:#")
+    quo = rng.choice("'\"`")
+    esc = rng.choice("~^\\")
+    com = rng.choice("%!@")
+
+    src = ("def split_line(s):\n"
+           "    out, cur, quoted, i = [], '', False, 0\n"
+           "    if not s:\n"
+           "        return []\n"
+           "    while i < len(s):\n"
+           "        c = s[i]\n"
+           "        if c == %r:\n"
+           "            if i + 1 < len(s):\n"
+           "                cur += s[i + 1]\n"
+           "                i += 2\n"
+           "            else:\n"
+           "                i += 1\n"
+           "            continue\n"
+           "        if c == %r:\n"
+           "            quoted = not quoted\n"
+           "        elif c == %r and not quoted:\n"
+           "            break\n"
+           "        elif c == %r and not quoted:\n"
+           "            out.append(cur)\n"
+           "            cur = ''\n"
+           "        else:\n"
+           "            cur += c\n"
+           "        i += 1\n"
+           "    out.append(cur)\n"
+           "    if out == ['']:\n"
+           "        return []\n"
+           "    return out\n" % (esc, quo, com, sep))
+
+    prompt = (
+        "Write a Python function `split_line(s)` that splits the string "
+        "`s` into a list of fields, reading it one character at a time "
+        "from the left.\n"
+        "- %r separates one field from the next.\n"
+        "- %r before any character puts that character into the field as "
+        "it is, and the %r itself is not kept. This holds everywhere, "
+        "inside quotes as well as outside. A %r as the very last "
+        "character of `s` is dropped.\n"
+        "- %r turns quoting on, and the next %r turns it off. The %r "
+        "characters themselves are never kept. While quoting is on, %r "
+        "and %r are ordinary characters. Quoting that is never turned "
+        "off simply runs to the end of `s`.\n"
+        "- %r, when quoting is off, ends the line: it and everything "
+        "after it are dropped.\n"
+        "- Spaces are never stripped from anything.\n"
+        "- If `s` is empty, or nothing at all is left once a comment is "
+        "dropped, return []. Otherwise a `s` that ends in %r has an "
+        "empty last field, and two %r in a row have an empty field "
+        "between them."
+        % (sep, esc, esc, esc, quo, quo, quo, sep, com, com, sep, sep))
+
+    cases = [
+        [""],
+        ["a"],
+        ["a" + sep + "b"],
+        [sep],                                  # two empty fields
+        [sep + sep],
+        ["a" + sep],                            # empty last field
+        [com + "all of it"],                    # nothing survives
+        ["a" + sep + "b" + com + "c" + sep + "d"],
+        [quo + "a" + sep + "b" + quo],          # separator inside quotes
+        [quo + "a" + com + "b" + quo + sep + "c"],
+        [esc + sep + "a"],                      # escaped separator
+        [esc + quo + "a" + quo],
+        ["a" + esc],                            # trailing escape
+        [quo + "a" + sep + "b"],                # quoting never closed
+        ["  a  " + sep + "  b  "],              # spaces are kept
+        ["a" + quo + "b" + quo + "c"],          # quotes in the middle
+        [quo + esc + quo + quo + sep + "x"],    # escaped quote inside
+        [esc + esc + sep + "x"],                # escaped escape
+        [com],
+        ["a" + sep + com],
+    ]
+    alphabet = "ab " + sep + quo + esc + com
+    for _ in range(8):
+        n = rng.randint(0, 14)
+        cases.append(["".join(rng.choice(alphabet) for _ in range(n))])
+    return ("split_line", prompt, src, cases)
+
 def gen_code(rng):
     items, order = [], {}
     n_hard = round(SIZE["code"] * HARD_SHARE)
     tiers = ["hard"] * n_hard + ["base"] * (SIZE["code"] - n_hard)
     rng.shuffle(tiers)
     for i, tier in enumerate(tiers):
-        pool = HARD_CODE if tier == "hard" else CODE
-        if not order.get(tier):
-            order[tier] = rng.sample(pool, len(pool))
-        name, prompt, src, cases = order[tier].pop()(rng)
+        if tier == "base":
+            key, pool = "base", CODE
+        else:                               # alternate named / generated
+            key = "hard" if sum(1 for t in tiers[:i]
+                                if t == "hard") % 2 else "spec"
+            pool = HARD_CODE if key == "hard" else SPEC_CODE
+        if not order.get(key):
+            order[key] = rng.sample(pool, len(pool))
+        name, prompt, src, cases = order[key].pop()(rng)
         want = expected(src, name, cases)
         item = Item("code", "code-%02d-%s" % (i, name),
                     prompt + " Reply with the function in one ```python "
