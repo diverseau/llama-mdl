@@ -2326,8 +2326,9 @@ def _world_ledger(rng):
             score *= 0.5
         pages_read = {str(a.get("page", 1))
                       for name, a in world.log if name == "list_transactions"}
-        why = "flagged %d of %d, %d wrongly, %d page(s) read" % (
-            len(hit), len(good), len(got - good), len(pages_read))
+        why = "flagged %d of %d, %d wrongly, %d page(s) read%s" % (
+            len(hit), len(good), len(got - good), len(pages_read),
+            ", not with the reason asked for" if bad_reason else "")
         return round(score, 4), "ok" if score == 1.0 else why
 
     return ("Go through %s's account and flag every transaction worth more "
