@@ -355,6 +355,14 @@ changed template, a different machine - are refused rather than
 compared, and every result carries a fingerprint of the questions
 themselves so that can be checked rather than assumed.
 
+Nothing about the model goes into making the questions - only the seed
+on this machine - so two entries in `models.toml` always get the same
+items. That is what makes the question people actually have answerable:
+run the same model at Q4_K_M and at IQ3_XXS, compare the two, and the
+answer is either a number with an interval that clears zero or "too
+close to call", rather than a feeling about whether the smaller one
+seems worse.
+
 ## Finding a model: `mdl catalog` and `mdl find`
 
 `mdl find` answers "what is the best thing I can run here":
