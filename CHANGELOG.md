@@ -121,8 +121,11 @@ Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
   stops looks exactly like one that finished, so the score is overlap
   rather than all-or-nothing. The reason suite gained a seating puzzle
   generated and then pruned until exactly one arrangement fits, and a
-  two-counter machine that has to be simulated round by round; the
-  eight it had were all textbook shapes a model recognises on sight.
+  two-counter machine that has to be simulated round by round, and a
+  set of rules to chain to a fixed point where stopping after the
+  obvious step gives a wrong answer that looks finished; the eight it
+  had were all textbook shapes a model recognises on sight. Its hard
+  pool is drawn in halves too, one named and one generated.
 - Four graders could be satisfied without doing the work, which means
   every score they ever produced carried some free credit. Found by
   walking every item with replies that contain no knowledge at all -

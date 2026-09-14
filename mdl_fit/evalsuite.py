@@ -3127,6 +3127,9 @@ SEATS = ("tea", "cocoa", "cider", "juice", "milk", "water")
 
 
 def _and_list(words):
+    words = list(words)
+    if len(words) == 1:
+        return words[0]
     return "%s and %s" % (", ".join(words[:-1]), words[-1])
 
 
@@ -3278,8 +3281,76 @@ def _stepper(rng):
     return _stepper(rng)                    # pathological seed: try again
 
 
-HARD = [_rates, _ages, _overlap, _breakeven, _paths, _mixture, _digitsum,
-        _meeting, _seating, _stepper]
+
+
+CLAIMS = ("the kiln is hot", "the vent is open", "the tank is full",
+          "the alarm is armed", "the gate is locked", "the pump is running",
+          "the light is on", "the door is shut", "the fan is spinning",
+          "the valve is sealed")
+
+
+def _closure(start, rules):
+    """Everything that follows, applied until nothing new follows."""
+    true = set(start)
+    changed = True
+    while changed:
+        changed = False
+        for need, then in rules:
+            if then not in true and set(need) <= true:
+                true.add(then)
+                changed = True
+    return true
+
+
+def _deduce(rng):
+    """Six statements, a handful of rules, and one question: which are
+    true once everything that follows has been followed."""
+    for _ in range(200):
+        n = 6
+        letters = "ABCDEF"
+        claims = rng.sample(CLAIMS, n)
+        start = sorted(rng.sample(range(n), 2))
+        rules = []
+        for _ in range(rng.randint(5, 7)):
+            then = rng.randrange(n)
+            need = rng.sample([i for i in range(n) if i != then],
+                              rng.choice([1, 1, 2]))
+            if (sorted(need), then) not in [(sorted(a), b) for a, b in rules]:
+                rules.append((need, then))
+        true = _closure(start, rules)
+        if not 3 <= len(true) <= 5:
+            continue
+        # it must take more than one step, or reading the rules once is
+        # the whole of the work
+        one_step = _closure(start, rules) == _closure(
+            start, [(nd, th) for nd, th in rules if set(nd) <= set(start)])
+        if one_step:
+            continue
+        lines = []
+        for need, then in rules:
+            lines.append("If %s, then %s." % (
+                _and_list([letters[i] for i in need]), letters[then]))
+        rng.shuffle(lines)
+        says = "\n".join("%s: %s." % (letters[i], claims[i].capitalize())
+                          for i in range(n))
+        return ("Six statements:\n%s\nThese rules hold:\n%s\n"
+                "To begin with, %s are true, and every other statement is "
+                "false unless a rule makes it true. Apply the rules until "
+                "nothing further follows. Which statements are true then? "
+                "Answer with just their letters in alphabetical order and "
+                "nothing between them, like ABC."
+                % (says, "\n".join(lines),
+                   _and_list([letters[i] for i in start])),
+                "".join(letters[i] for i in sorted(true)))
+    return _deduce(rng)                     # pathological seed: try again
+
+
+HARD = [_rates, _ages, _overlap, _breakeven, _paths, _mixture,
+        _digitsum, _meeting]
+# generated rather than named: half the hard items come from
+# here, because pooled with the archetypes they reached two
+# items in twelve and could not move a score
+SPEC_REASON = [_seating, _stepper, _deduce]
 
 
 REASON = [_change, _powmod, _days, _weekday, _order, _divisible, _in_base,
@@ -3307,10 +3378,15 @@ def gen_reason(rng):
     tiers = ["hard"] * n_hard + ["base"] * (SIZE["reason"] - n_hard)
     rng.shuffle(tiers)
     for i, tier in enumerate(tiers):
-        pool = HARD if tier == "hard" else REASON
-        if not order.get(tier):
-            order[tier] = rng.sample(pool, len(pool))
-        maker = order[tier].pop()
+        if tier == "base":
+            key, pool = "base", REASON
+        else:                               # alternate named / generated
+            key = "hard" if sum(1 for t in tiers[:i]
+                                if t == "hard") % 2 else "spec"
+            pool = HARD if key == "hard" else SPEC_REASON
+        if not order.get(key):
+            order[key] = rng.sample(pool, len(pool))
+        maker = order[key].pop()
         q, want = maker(rng)
         item = Item("reason", "reason-%02d-%s" % (i, maker.__name__[1:]),
                     q + " End your reply with a line of the form "
