@@ -174,10 +174,18 @@ machines share a suite. Consequences worth holding on to:
 ## Catalog
 
 The nightly hub crawl (`.github/workflows/catalog.yml`) is gated behind the
-repo variable `CATALOG_ENABLED == "true"` and does nothing on forks. It is
-deliberately off: a full crawl takes longer than the job cap, and a killed
-run uploads nothing, because the snapshot is only written at the end. Leave
-it off unless the maintainer asks.
+repo variable `CATALOG_ENABLED == "true"` and does nothing on forks. Leave
+it off unless the maintainer asks. Manual dispatch bypasses the schedule's
+enable flag, but still requires the owner check; do not dispatch without
+the maintainer's approval.
+
+The default builder (`mdl_fit/catalog_crawl.py`) takes 800 GGUF repos by
+downloads plus 200 by creation date, deduplicates them, and fetches only
+file lists and direct source-model metadata. Its 40-minute budget saves a
+partial with the work queue in SQLite; the workflow publishes that file.
+Data and cursors commit per HTTP page. Do not prune a partial refresh or
+publish an incomplete shard inventory. Explicit --org/--base builds still
+use the old, unbudgeted lineage traversal in catalog.py.
 
 Known sharp edge: the Hugging Face API **ignores `other=`** on the
 quantized-children query — both conditions have to go in `filter=`. And

@@ -410,9 +410,9 @@ mdl find --new                         only what has appeared since last time
 mdl find --no-fetch                    use cached GGUF headers only
 ```
 
-It looks at everything in models.toml and at the catalog: the hub's
-model tree, with each model's fine-tunes and merges, every GGUF quant of
-each, and the eval results they report. For the best-scoring candidates
+It looks at everything in models.toml and at the catalog: a mix of popular
+and newly created GGUF repositories, grouped by their source models, with
+the eval results those models report. For the best-scoring candidates
 it runs `mdl fit` on up to three quants each (headers only, nothing
 downloaded), keeps what clears the profile's floors, and ranks by
 expected quality:
@@ -432,7 +432,8 @@ Models no one has rated show up under "worth testing" when they could
 beat the #1, with the `mdl fit --write` and `mdl eval` commands that
 would rate them.
 
-The catalog is one SQLite file in `~/.config/mdl/cache/`. `mdl catalog
+The catalog is one SQLite file in `~/.cache/mdl/` (`$XDG_CACHE_HOME` is
+honoured). `mdl catalog
 pull` fetches a published snapshot from
 [diversemate/mdl-catalog](https://huggingface.co/datasets/diversemate/mdl-catalog)
 (`$MDL_CATALOG_REPO` points it elsewhere).
@@ -441,12 +442,41 @@ As of September 17, 2026, nightly publication is deliberately disabled
 (`CATALOG_ENABLED=false` in GitHub Actions), and the public dataset has no
 `catalog.sqlite` yet. Until a snapshot is published, `mdl catalog pull`
 reports that no published catalog is available. Build one locally with
-`mdl catalog build --org LiquidAI` (or `--base Qwen/Qwen3-8B`) instead.
+`mdl catalog build` instead.
 The nightly job requires `CATALOG_ENABLED=true` and a write-capable
 `HF_TOKEN`; a skipped run does not refresh the catalog.
 
-`mdl catalog tree <org/repo>` lists every quant of every fine-tune of a
-model, and `mdl catalog search` finds one by name.
+The default build takes the top 800 GGUF repositories by downloads and
+the newest 200 by creation date, deduplicates the overlap, and reads their
+file lists. It fetches each distinct quantization source's metadata once
+to retain benchmark evidence, without walking descendants. This is at most
+1,000 repositories, not 1,000 distinct models; it deliberately omits much
+of the long tail and does not promise complete model family trees.
+
+```sh
+mdl catalog build --popular 800 --recent 200 --budget-minutes 40
+```
+
+At the time budget, the builder saves a usable partial, including its
+pending work and pagination cursors in the same SQLite file. Run it again
+to resume; `--from snapshot.sqlite` resumes a downloaded copy. Once a cycle
+finishes, the next build refreshes both seed lists. During a partial
+refresh the previous rows remain available; obsolete rows are removed only
+after completion. Unchanged repositories reuse their file inventories.
+`pull`, `stats` and `find` label partial snapshots. A killed local process
+can resume its committed pages from the adjacent `.building` file, but a
+cancelled Actions run cannot upload work that never reached Publish.
+
+The workflow gives the crawl 40 minutes and the job 60, leaving time to
+publish a partial. A manual dispatch can run while the nightly switch
+stays off, with separate inputs for both seed sizes and the time budget.
+It reports the publishing account and API quota without printing the token.
+
+`mdl catalog tree <org/repo>` lists the relationships and quants present
+in the catalog, and `mdl catalog search` finds models by name. Explicit
+`build --org LiquidAI` or `--base Qwen/Qwen3-8B` retains the original,
+unbudgeted lineage traversal for targeted exploration; it does not use the
+mixed-seed checkpoint engine.
 
 ## The UI
 

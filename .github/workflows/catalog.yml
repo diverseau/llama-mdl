@@ -1,18 +1,30 @@
 name: catalog
 # Keep the reason visible even when the job is skipped before any steps run.
-run-name: "catalog (${{ github.repository_owner != 'diverseau' && 'disabled on forks' || vars.CATALOG_ENABLED != 'true' && 'disabled - CATALOG_ENABLED is not true' || 'build and publish' }})"
+run-name: "catalog (${{ github.repository_owner != 'diverseau' && 'disabled on forks' || github.event_name == 'workflow_dispatch' && 'manual build and publish' || vars.CATALOG_ENABLED != 'true' && 'disabled - CATALOG_ENABLED is not true' || 'build and publish' }})"
 
-# Nightly crawl of the Hugging Face model tree into the SQLite snapshot
-# `mdl find` reads, published as a dataset. Needs a write token in the
-# HF_TOKEN secret and a dataset repo named by the CATALOG_REPO variable
+# Bounded mixed GGUF seed, with its resume queue in the published SQLite.
+# Needs a write token in HF_TOKEN and a dataset repo named by CATALOG_REPO
 # (default diversemate/mdl-catalog). Off until the CATALOG_ENABLED variable
-# is "true", so it does not crawl for hours only to fail at the upload;
-# does nothing on forks.
+# is "true". Manual dispatch is independent, for an approved test while
+# the schedule stays off. Does nothing on forks.
 
 on:
   schedule:
     - cron: "17 3 * * *"
   workflow_dispatch:
+    inputs:
+      popular:
+        description: GGUF repos by downloads
+        default: '800'
+        type: string
+      recent:
+        description: GGUF repos by creation date
+        default: '200'
+        type: string
+      budget_minutes:
+        description: Crawl budget before publishing a partial
+        default: '40'
+        type: string
 
 concurrency:
   group: catalog
@@ -20,26 +32,70 @@ concurrency:
 
 jobs:
   crawl:
-    if: github.repository_owner == 'diverseau' && vars.CATALOG_ENABLED == 'true'
+    if: github.repository_owner == 'diverseau' && (github.event_name == 'workflow_dispatch' || vars.CATALOG_ENABLED == 'true')
     runs-on: ubuntu-latest
-    timeout-minutes: 300
+    timeout-minutes: 60
     env:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
       MDL_CATALOG_REPO: ${{ vars.CATALOG_REPO || 'diversemate/mdl-catalog' }}
       MDL_FIT_HOME: ${{ github.workspace }}/.mdl
       PYTHONIOENCODING: utf-8
+      CATALOG_POPULAR: ${{ inputs.popular || '800' }}
+      CATALOG_RECENT: ${{ inputs.recent || '200' }}
+      CATALOG_MINUTES: ${{ inputs.budget_minutes || '40' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
       - run: python -m pip install --upgrade pip huggingface_hub
-      - name: Last night's snapshot, to reuse unchanged file lists
-        run: python mdl.py catalog pull || true
+      - name: Report publishing account and API quota
+        run: |
+          python - <<'PY'
+          import json, os, urllib.request
+          import math
+          minutes = float(os.environ['CATALOG_MINUTES'])
+          if not math.isfinite(minutes) or not 0 < minutes <= 40:
+              raise SystemExit('Crawl budget must be > 0 and <= 40 minutes')
+          request = urllib.request.Request(
+              'https://huggingface.co/api/whoami-v2',
+              headers={'Authorization': 'Bearer ' + os.environ['HF_TOKEN']})
+          with urllib.request.urlopen(request, timeout=30) as response:
+              identity = json.load(response)
+              print('HF account:', identity.get('name', 'unknown'))
+              print('PRO:', identity.get('isPro', 'unknown'))
+              print('API quota:', response.headers.get('RateLimit-Policy', 'unknown'))
+          PY
+      - name: Download catalog and resume queue
+        run: |
+          python - <<'PY'
+          from mdl_fit.catalog import CatalogNotPublished, pull
+          try:
+              print('Catalog checkpoint:', pull())
+          except CatalogNotPublished:
+              print('No snapshot published yet; starting the first cycle.')
+          PY
       - name: Crawl
         run: |
-          python mdl.py catalog build --max-nodes 40000 \
+          python mdl.py catalog build \
+            --popular "$CATALOG_POPULAR" --recent "$CATALOG_RECENT" \
+            --budget-minutes "$CATALOG_MINUTES" \
             --from .mdl/cache/catalog.sqlite --out catalog.sqlite
+      - name: Describe snapshot
+        run: |
+          python - <<'PY'
+          import os
+          from mdl_fit.catalog import Catalog, progress
+          cat = Catalog('catalog.sqlite')
+          meta = cat.meta()
+          if meta['stop_reason'].startswith('request failed:'):
+              print('::warning::Catalog crawl paused after a request failure; see summary')
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
+              summary.write('Catalog: ' + progress(meta) + '\n\n')
+              summary.write(f"{meta['nodes']} models, {meta['ggufs']} GGUF quants, "
+                            f"{meta['requests']} requests, {meta['seconds']} seconds.\n")
+          cat.db.close()
+          PY
       - name: Publish
         run: |
           hf upload "$MDL_CATALOG_REPO" catalog.sqlite catalog.sqlite \

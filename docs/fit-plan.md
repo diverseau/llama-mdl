@@ -112,6 +112,16 @@ here (no such model on the box). Multi-GPU is out of scope for the MVP.
 
 ## Part 2 (M6-M8)
 
+Catalog update (September 17, 2026): the nightly/default builder now uses
+800 GGUF repos by downloads plus 200 by creation date, deduplicated, with
+one direct source-model metadata fetch per model. `catalog_crawl.py`
+commits page results and cursors into the snapshot itself, stops at a
+40-minute budget, and publishes a labeled partial to resume next run.
+Completed cycles refresh the seeds; partial refreshes retain old rows.
+The recursive crawler described below remains available through explicit
+`--org`/`--base` builds, but is no longer the nightly workload. The schedule
+is still disabled pending an approved manual end-to-end run.
+
 Built in the order M7, M6, M8: eval only needs a server, and find needs
 the other two.
 

@@ -83,6 +83,14 @@ class CatalogError(Exception):
     pass
 
 
+class CatalogAccessError(CatalogError):
+    """A private/gated repo must not block every other queued model."""
+
+
+class CatalogNotPublished(CatalogError):
+    """Only a 404 may bootstrap CI; other pull failures must keep its state."""
+
+
 def default_path():
     return hw.cache_dir() / FILE
 
@@ -123,41 +131,56 @@ def _headers(extra=None):
     return h
 
 
-def _pace(headers):
+def _header(headers, name):
+    # urllib's header object is case-insensitive; dict(r.headers) is not.
+    return next((v for k, v in headers.items() if k.lower() == name.lower()), "")
+
+
+def _pace(headers, budget=None):
     """HF says how many calls are left in the window; wait it out when
     they run low rather than eat a 429."""
-    m = re.search(r"r=(\d+);\s*t=(\d+)", headers.get("RateLimit", "") or "")
+    m = re.search(r"r=(\d+);\s*t=(\d+)", _header(headers, "RateLimit"))
     if m and int(m.group(1)) < 3:
-        SLEEP(int(m.group(2)) + 1)
+        if budget is None:
+            SLEEP(int(m.group(2)) + 1)
+        else:
+            # Commit the response before waiting for the next request.
+            budget.defer(int(m.group(2)) + 1)
 
 
-def get_json(url, tries=6):
+def get_json(url, tries=6, budget=None):
     """(parsed JSON or None when not there, headers). Retries on 429 and
     5xx with the server's Retry-After, and on network errors."""
     for attempt in range(tries):
+        timeout = budget.before_request() if budget else 60
         req = urllib.request.Request(url, headers=_headers())
         try:
-            with urllib.request.urlopen(req, timeout=60) as r:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
                 body, headers = r.read(), dict(r.headers)
-            _pace(headers)
+            _pace(headers, budget)
             return json.loads(body), headers
         except urllib.error.HTTPError as e:
-            if e.code in (401, 403, 404):
+            if e.code == 404 or (budget is None and e.code in (401, 403)):
                 return None, {}
+            if e.code in (401, 403):
+                raise CatalogAccessError("Hub access denied (HTTP %d)" % e.code
+                                         ) from None
             if e.code == 429 or e.code >= 500:
                 wait = e.headers.get("Retry-After")
                 m = re.search(r"t=(\d+)", e.headers.get("RateLimit", "") or "")
-                SLEEP(min(300, int(wait) if wait and wait.isdigit()
-                          else int(m.group(1)) + 1 if m else 5 * 2 ** attempt))
+                seconds = min(300, int(wait) if wait and wait.isdigit()
+                              else int(m.group(1)) + 1 if m
+                              else 5 * 2 ** attempt)
+                (budget.sleep if budget else SLEEP)(seconds)
                 continue
             raise CatalogError("%s: HTTP %d" % (url, e.code)) from None
         except (urllib.error.URLError, OSError, ValueError):
-            SLEEP(2 ** attempt)
+            (budget.sleep if budget else SLEEP)(2 ** attempt)
     raise CatalogError("gave up on %s after %d tries" % (url, tries))
 
 
 def _next(headers):
-    m = re.search(r'<([^>]+)>;\s*rel="next"', headers.get("Link", "") or "")
+    m = re.search(r'<([^>]+)>;\s*rel="next"', _header(headers, "Link"))
     return m.group(1) if m else None
 
 
@@ -531,7 +554,8 @@ def pull(path=None, repo=None):
         if e.code == 304:
             return "unchanged"
         if e.code in (401, 403, 404):
-            raise CatalogError(
+            error = CatalogNotPublished if e.code == 404 else CatalogError
+            raise error(
                 "no published catalog at %s yet (or it is private); build "
                 "one here with: mdl catalog build" % repo) from None
         raise CatalogError("%s: HTTP %d" % (url, e.code)) from None
@@ -621,22 +645,24 @@ class Catalog:
 USAGE = """\
 usage: mdl catalog pull                 fetch the published snapshot
        mdl catalog build [options]      crawl the hub into a local one
-       mdl catalog tree <org/repo>      every GGUF quant of every
-                                        fine-tune of a model
+       mdl catalog tree <org/repo>      cataloged relationships and GGUF quants
        mdl catalog search <text>        find a model by name
        mdl catalog stats
 
 build options:
-  --org NAME         crawl this org's models (repeatable; default: the
-                     tracked families)
+  --popular N        GGUF repos by downloads (default 800)
+  --recent N         GGUF repos by creation date (default 200)
+  --budget-minutes N  stop and save a resumable partial (default 40)
+                     These apply to the default mixed GGUF seed.
+  --org NAME         use the original lineage crawl for this org (repeatable)
   --base ORG/REPO    crawl the tree under this model only (repeatable)
   --per-org N        models per org (default 60)
   --max-nodes N      stop adding nodes at N (default 5000)
   --depth N          fine-tune generations to follow (default 3)
   --min-downloads N  the noise gate (default 500 in 30 days)
   --min-likes N      ... or this many likes (default 20)
-  --from PATH        an older snapshot: reuse file lists that have not
-                     changed
+  --from PATH        resume a partial snapshot, or refresh a completed one
+                     (lineage mode only reuses unchanged file lists)
   --out PATH         where to write (default: the local cache)
 
 The snapshot lives in %s. $MDL_CATALOG_REPO names the
@@ -677,6 +703,17 @@ def human(n):
     return "%gT" % round(n, 1)
 
 
+def progress(meta):
+    if "complete" not in meta:
+        return ""
+    text = "%s; %d tasks pending; %s" % (
+        "complete" if meta["complete"] else "partial",
+        meta.get("pending", 0), meta.get("stop_reason", "unknown"))
+    if meta.get("unavailable"):
+        text += "; %d unavailable tasks" % meta["unavailable"]
+    return text
+
+
 def main(args, out=None):
     out = out or sys.stdout
     w = out.write
@@ -688,11 +725,19 @@ def main(args, out=None):
         if cmd == "pull":
             state = pull()
             w("catalog  %s (%s)\n" % (state, default_path()))
+            cat = Catalog()
+            try:
+                detail = progress(cat.meta())
+            finally:
+                cat.db.close()
+            if detail:
+                w("crawl    %s\n" % detail)
             return state
         if cmd == "build":
             o, _ = _opts(rest, {"--org", "--base", "--per-org", "--max-nodes",
                                 "--depth", "--min-downloads", "--min-likes",
-                                "--from", "--out"})
+                                "--from", "--out", "--popular", "--recent",
+                                "--budget-minutes"})
             kw = {}
             for key, name in (("per-org", "per_org"),
                               ("max-nodes", "max_nodes"),
@@ -705,12 +750,26 @@ def main(args, out=None):
             if "org" in o or bases:
                 kw["orgs"] = o.get("org", [])
             path = Path(o["out"][-1]) if "out" in o else default_path()
-            meta = build(path, bases=bases, prev=(o.get("from") or [None])[-1],
-                         log=lambda s: (w("  %s\n" % s), out.flush()), **kw)
+            args = {"prev": (o.get("from") or [None])[-1],
+                    "log": lambda s: (w("  %s\n" % s), out.flush())}
+            if "org" in o or bases:
+                if any(k in o for k in ("popular", "recent", "budget-minutes")):
+                    die("mixed-seed options cannot be combined with --org/--base")
+                meta = build(path, bases=bases, **args, **kw)
+            else:
+                from . import catalog_crawl
+                if kw:
+                    die("lineage options require --org or --base")
+                meta = catalog_crawl.build(
+                    path, popular=int(o.get("popular", [800])[-1]),
+                    recent=int(o.get("recent", [200])[-1]),
+                    minutes=float(o.get("budget-minutes", [40])[-1]), **args)
             w("built    %s: %d models, %d GGUF quants, %d eval results, "
               "%d requests, %ds\n" % (path, meta["nodes"], meta["ggufs"],
                                       meta["evals"], meta["requests"],
                                       meta["seconds"]))
+            if progress(meta):
+                w("crawl    %s\n" % progress(meta))
             return meta
         cat = Catalog()
         if cmd == "stats":
@@ -718,6 +777,8 @@ def main(args, out=None):
             w("catalog  %s\nbuilt    %s\nmodels   %d · GGUF quants %d · eval "
               "results %d\n" % (cat.path, m.get("built_at"), m.get("nodes"),
                                 m.get("ggufs"), m.get("evals")))
+            if progress(m):
+                w("crawl    %s\n" % progress(m))
             return m
         if cmd == "search" and rest:
             for r in cat.search(rest[0]):
@@ -726,7 +787,7 @@ def main(args, out=None):
             return None
         if cmd == "tree" and rest:
             return show_tree(cat, rest[0], w)
-    except CatalogError as e:
+    except (CatalogError, ValueError) as e:
         die(str(e))
     die(USAGE % default_path())
     return None

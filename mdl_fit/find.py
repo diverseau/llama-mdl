@@ -531,6 +531,8 @@ def main(args, out=None):
     try:
         cat = catalog.Catalog(o.get("catalog"))
         meta = cat.meta()
+        if meta.get("complete") is False:
+            notes.append("catalog crawl " + catalog.progress(meta))
     except catalog.CatalogError as e:
         notes.append(str(e))
     qm = quality.Model(cat)
