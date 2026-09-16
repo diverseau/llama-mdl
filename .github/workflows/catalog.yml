@@ -1,4 +1,6 @@
 name: catalog
+# Keep the reason visible even when the job is skipped before any steps run.
+run-name: "catalog (${{ github.repository_owner != 'diverseau' && 'disabled on forks' || vars.CATALOG_ENABLED != 'true' && 'disabled - CATALOG_ENABLED is not true' || 'build and publish' }})"
 
 # Nightly crawl of the Hugging Face model tree into the SQLite snapshot
 # `mdl find` reads, published as a dataset. Needs a write token in the

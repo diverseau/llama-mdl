@@ -427,12 +427,20 @@ beat the #1, with the `mdl fit --write` and `mdl eval` commands that
 would rate them.
 
 The catalog is one SQLite file in `~/.config/mdl/cache/`. `mdl catalog
-pull` fetches the nightly snapshot from
+pull` fetches a published snapshot from
 [diversemate/mdl-catalog](https://huggingface.co/datasets/diversemate/mdl-catalog)
-(`$MDL_CATALOG_REPO` points it elsewhere). `mdl catalog build` crawls the
-hub yourself instead (`--org LiquidAI`, `--base Qwen/Qwen3-8B`; a few
-minutes for a few orgs). `mdl catalog tree <org/repo>` lists every quant of every
-fine-tune of a model, and `mdl catalog search` finds one by name.
+(`$MDL_CATALOG_REPO` points it elsewhere).
+
+As of September 17, 2026, nightly publication is deliberately disabled
+(`CATALOG_ENABLED=false` in GitHub Actions), and the public dataset has no
+`catalog.sqlite` yet. Until a snapshot is published, `mdl catalog pull`
+reports that no published catalog is available. Build one locally with
+`mdl catalog build --org LiquidAI` (or `--base Qwen/Qwen3-8B`) instead.
+The nightly job requires `CATALOG_ENABLED=true` and a write-capable
+`HF_TOKEN`; a skipped run does not refresh the catalog.
+
+`mdl catalog tree <org/repo>` lists every quant of every fine-tune of a
+model, and `mdl catalog search` finds one by name.
 
 ## The UI
 
