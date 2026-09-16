@@ -74,7 +74,8 @@ CREATE INDEX IF NOT EXISTS evals_node ON evals(node);
 
 QUANT = re.compile(
     r"(?i)(?:^|[-_.])((?:UD-)?(?:IQ\d_[A-Z0-9]+(?:_[A-Z0-9]+)?"
-    r"|Q\d(?:_[A-Z0-9]+)*|TQ\d_\d|BF16|F16|F32|FP16|FP32|MXFP4(?:_MOE)?))"
+    r"|Q\d(?:_[A-Z0-9]+)*|TQ\d_\d|BF16|F16|F32|FP16|FP32|MXFP4(?:_MOE)?"
+    r"|NVFP4))"
     r"(?=[-_.]|$)")
 SPELLINGS = {"FP16": "F16", "FP32": "F32"}
 
@@ -365,7 +366,7 @@ class Crawler:
                     "INSERT OR REPLACE INTO ggufs VALUES (?,?,?,?,?,?,?,?)",
                     [(r["repo"], node, r["quant"], r["file"], r["size"],
                       r["shards"], m.get("downloads", 0), r["modified"])
-                     for r in old])
+                     for r in old if not remote.auxiliary(r["file"])])
                 return
         try:
             groups = {k: v for k, v in remote.gguf_groups(
@@ -605,8 +606,10 @@ class Catalog:
         return out
 
     def ggufs(self, nid):
-        return self.db.execute("SELECT * FROM ggufs WHERE node = ? ORDER BY "
-                               "downloads DESC, size DESC", (nid,)).fetchall()
+        # a snapshot built before auxiliary() still carries drafts and heads
+        return [r for r in self.db.execute(
+            "SELECT * FROM ggufs WHERE node = ? ORDER BY downloads DESC, "
+            "size DESC", (nid,)) if not remote.auxiliary(r["file"])]
 
     def evals(self, nid):
         return self.db.execute("SELECT * FROM evals WHERE node = ?",
@@ -793,6 +796,25 @@ def main(args, out=None):
     return None
 
 
+def variant_labels(rows):
+    """{file: label} for one repo's GGUFs: the quant, unless two files
+    share it. Then it is the file name less what every file in the repo
+    starts with - "IQ1_S-multilingual-mtp" rather than a fourth "IQ1_S"
+    that reads as a duplicate when it is a different model."""
+    count = {}
+    for r in rows:
+        count[r["quant"]] = count.get(r["quant"], 0) + 1
+    stems = {r["file"]: Path(r["file"]).name[:-5] for r in rows}
+    prefix = os.path.commonprefix(list(stems.values()))
+    prefix = prefix[:max(prefix.rfind("-"), prefix.rfind("."),
+                         prefix.rfind("_")) + 1]
+    out = {}
+    for r in rows:
+        stem = stems[r["file"]][len(prefix):] or stems[r["file"]]
+        out[r["file"]] = r["quant"] if count[r["quant"]] == 1 else stem
+    return out
+
+
 def show_tree(cat, nid, w):
     tree = cat.subtree(nid)
     if not tree:
@@ -808,8 +830,9 @@ def show_tree(cat, nid, w):
         for q in quants:
             by_repo.setdefault(q["repo"], []).append(q)
         for repo, qs in by_repo.items():
+            label = variant_labels(qs)
             w("%s    %s: %s\n" % ("  " * depth, repo, " ".join(
-                "%s %.1fG" % (q["quant"], q["size"] / 1e9)
+                "%s %.1fG" % (label[q["file"]], q["size"] / 1e9)
                 for q in sorted(qs, key=lambda q: q["size"]))))
     w("\n%d models, %d GGUF quants\n" % (len(tree), total))
     return tree

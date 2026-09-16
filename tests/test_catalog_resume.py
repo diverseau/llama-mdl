@@ -229,6 +229,19 @@ check("unchanged repos reuse their file inventories",
       any("/tree/main" in h for h in hits), False)
 check("refresh completes after resuming", meta["complete"], True)
 
+# A snapshot published before drafts and MTP heads were recognised loses
+# them on the next run, even one the budget stops before any repo refreshes.
+db = sqlite3.connect(full)
+with db:
+    db.execute("INSERT INTO ggufs SELECT repo, node, 'Q4_0', "
+               "'MTP/mtp-Model-Q4_0.gguf', 1, shards, downloads, modified "
+               "FROM ggufs LIMIT 1")
+db.close()
+build(full, 1)
+check("an older snapshot's drafts are dropped, its quants kept",
+      rows(full, "ggufs"), before)
+build(full)                             # finish that cycle before going on
+
 # Changed file inventories replace their old rows only on the last page.
 old["lastModified"] = "v2"
 revision[0] = 2

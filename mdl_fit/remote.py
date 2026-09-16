@@ -93,18 +93,45 @@ def list_files(repo, revision="main"):
     return out
 
 
+AUX_WORDS = {"mmproj", "projector", "draft", "dflash", "fastmtp", "lora",
+             "adapter"}
+
+
+def auxiliary(name):
+    """True for a GGUF that ships beside a model rather than being one.
+
+    Vision projectors, LoRA adapters, speculative-decoding drafts and MTP
+    heads all carry a quant in their names, so left in they read as a
+    1.4 GB "Q4_0" of a 27B model: the smallest quant it has, and the one
+    `find` settles on when nothing else fits. Sizes cannot tell them
+    apart - a real Q1_0 is 1.1 bits a weight, the same as a draft - so
+    this goes by name, one word at a time.
+    """
+    parts = [p.lower() for p in re.split(r"[/\\]", name) if p]
+    words = [re.split(r"[-_. ]+", p) for p in parts]
+    flat = {w.rstrip("0123456789") for ws in words for w in ws}  # DFlash2
+    if "lora" in flat and flat & {"merged", "merge"}:
+        flat.discard("lora")                    # a merged LoRA is a model
+    if flat & AUX_WORDS:
+        return True
+    # "mtp-X-Q4_0.gguf" and "MTP/..." are the head alone; "X-Q4_0-mtp.gguf"
+    # is the whole model with its MTP layers kept, and is a quant.
+    return any(ws[0] == "mtp" for ws in words)
+
+
 def gguf_groups(files):
     """{label: [file dicts, in shard order]} for the model GGUFs in a repo.
 
-    Projectors are left out - they are an add-on, not a quant. Split
-    shards group under the name they share.
+    Projectors, adapters, drafts and MTP heads are left out - they are
+    add-ons, not quants (see auxiliary). Split shards group under the name
+    they share.
     """
     groups = {}
     for f in files:
         name = f["path"]
         if not name.lower().endswith(".gguf"):
             continue
-        if Path(name).name.lower().startswith("mmproj"):
+        if auxiliary(name):
             continue
         key = gguf.SPLIT_RE.sub(".gguf", name)
         groups.setdefault(key, []).append(f)

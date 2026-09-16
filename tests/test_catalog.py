@@ -13,7 +13,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import support                                   # noqa: E402
 
-from mdl_fit import catalog, hw                  # noqa: E402
+from mdl_fit import catalog, hw, remote          # noqa: E402
 
 t = support.Tally("test_catalog")
 check = t.check
@@ -170,9 +170,35 @@ check("quant labels come out of file names",
           "Qwen3-8B-UD-Q4_K_XL.gguf", "LFM2.5-8B-A1B-Q8_0.gguf",
           "Qwen3.8-27B-GSQ-RCO-IQ2_XS-mtp.gguf", "model.q4_k_m.gguf",
           "gpt-oss-20b-MXFP4.gguf", "Model-BF16.gguf", "Qwen3-8B.fp16.gguf",
-          "weird.gguf")],
+          "types/NVFP4.gguf", "weird.gguf")],
       ["UD-Q4_K_XL", "Q8_0", "IQ2_XS", "Q4_K_M", "MXFP4", "BF16", "F16",
-       "?"])
+       "NVFP4", "?"])
+# Every name here was in a published snapshot, listed as a quant of a 27B.
+AUX = ["MTP/mtp-Qwen3.8-27B-Q4_0.gguf", "mtp-Qwen3.8-27B-BF16.gguf",
+       "mtp-RVN.gguf", "Qwen3.8-27B-Uncensored-draft-Q8_0.gguf",
+       "Qwen3.8-27B-DFlash2-Q4_K_M.gguf",
+       "dflash-Qwen3.8-27B-ABLITERATED-BF16.gguf",
+       "Qwen3.8-27B-Fable-5-Coding-Distilled.mmproj-Q8_0.gguf",
+       "gemma-4-E2B-it-mmproj.gguf", "vision-projector.gguf",
+       "Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-FastMTP-32K.gguf",
+       "doctors/TAARDIS-27B-Doctors-V3.lora.gguf", "mmproj-F16.gguf"]
+MODELS = ["RVN-Q4_K_M-mtp.gguf", "RVN-IQ1_S-multilingual-mtp.gguf",
+          "Qwen3.8-27B-Uncensored-noMTP-Q4_K_M.gguf",
+          "Huihui-Qwen3.8-27B-abliterated-GSQ-RCO-IQ3_S-mtp.gguf",
+          "RVN-Q3_K_M-vision.gguf", "Bonsai-27B-Q1_0.gguf",
+          "Llama-3-8B-LoRA-merged-Q4_K_M.gguf", "UD-TQ2_0/Kimi-K3-UD-TQ2_0.gguf",
+          "Qwen3.8-27B-Q4_0.gguf"]
+check("drafts, MTP heads, projectors and adapters are not quants",
+      [n for n in AUX + MODELS if remote.auxiliary(n)], AUX)
+check("files sharing a quant are told apart, the rest keep it",
+      catalog.variant_labels([
+          {"quant": q, "file": f} for q, f in (
+              ("Q4_K_M", "RVN-Q4_K_M.gguf"),
+              ("Q4_K_M", "RVN-Q4_K_M-mtp.gguf"),
+              ("Q8_0", "RVN-Q8_0.gguf"),
+              ("IQ3_S", "RVN-IQ3_S-multilingual.gguf"))]),
+      {"RVN-Q4_K_M.gguf": "Q4_K_M", "RVN-Q4_K_M-mtp.gguf": "Q4_K_M-mtp",
+       "RVN-Q8_0.gguf": "Q8_0", "RVN-IQ3_S-multilingual.gguf": "IQ3_S"})
 check("a quant repo is not a model", [
     catalog.is_quant_repo(HUB["Fam/Base-8B-Instruct-GGUF"]),
     catalog.is_quant_repo(HUB["solo/Solo-8B-GGUF"])], [True, False])

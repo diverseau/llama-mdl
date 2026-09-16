@@ -340,6 +340,11 @@ def build(path, prev=None, popular=800, recent=200, minutes=40, log=None,
             # Recompute roots from the direct relationships we actually
             # know. No recursive network calls are needed for this.
             catalog.Crawler(db, orgs=[]).link()
+            # A snapshot from before remote.auxiliary() carries drafts and
+            # MTP heads as quants; removing them is safe in a partial too.
+            db.executemany("DELETE FROM ggufs WHERE repo=? AND file=?", [
+                r for r in db.execute("SELECT repo, file FROM ggufs").fetchall()
+                if remote.auxiliary(r[1])])
             counts = {k: db.execute("SELECT COUNT(*) FROM " + k).fetchone()[0]
                       for k in ("nodes", "ggufs", "evals")}
             now = _now()

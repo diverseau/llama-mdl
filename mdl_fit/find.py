@@ -236,7 +236,8 @@ def catalog_cands(cat, qm, mach, profile, binary, o, notes, since=None):
     budget = mach.vram_usable + mach.ram_usable
     by_node = {}
     for r in cat.db.execute("SELECT * FROM ggufs"):
-        by_node.setdefault(r["node"], []).append(r)
+        if not remote.auxiliary(r["file"]):     # older snapshots carry them
+            by_node.setdefault(r["node"], []).append(r)
     lic = (o.get("license") or "").lower()
     tag = (o.get("tag") or "").lower()
     dropped = {"arch": 0, "size": 0, "filter": 0}

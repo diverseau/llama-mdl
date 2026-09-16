@@ -192,6 +192,12 @@ quantized-children query — both conditions have to go in `filter=`. And
 card fields arrive as lists or dicts, which SQLite will not bind; `_text()`
 coerces them. A crawl died 50 nodes in over exactly that.
 
+GGUF repos also hold files that are not quants: vision projectors, LoRA
+adapters, speculative drafts (`-draft-`, `DFlash`) and MTP heads (`mtp-…`,
+`MTP/`). `remote.auxiliary()` drops them by name, because size cannot - a
+real Q1_0 is as small per weight as a draft. `-mtp` as a *suffix* is a whole
+model with its MTP layers, and stays.
+
 ## Non-goals
 
 Stated in the README and enforced in review: no daemon, no downloading model
