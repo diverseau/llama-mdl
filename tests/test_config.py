@@ -26,7 +26,8 @@ class ConfigTests(unittest.TestCase):
     def test_visual_wins_and_config_is_not_parsed_or_changed(self):
         with patch.dict(os.environ, {"VISUAL": "code --wait", "EDITOR": "nano"}):
             mdl.cmd_config([])
-        self.launch.assert_called_once_with(["code", "--wait", str(self.path)])
+        self.launch.assert_called_once_with(
+            ["code", "--wait", str(self.path.resolve())])
         self.assertEqual(self.path.read_text(), "invalid TOML [")
 
     def test_editor_with_quoted_executable_and_spaces(self):
@@ -34,12 +35,13 @@ class ConfigTests(unittest.TestCase):
                   if os.name == "nt" else "/my editor")
         with patch.dict(os.environ, {"EDITOR": '"%s" --wait' % editor}):
             mdl.cmd_config([])
-        self.launch.assert_called_once_with([editor, "--wait", str(self.path)])
+        self.launch.assert_called_once_with(
+            [editor, "--wait", str(self.path.resolve())])
 
     def test_default_editor(self):
         mdl.cmd_config([])
         self.launch.assert_called_once_with(
-            ["notepad" if os.name == "nt" else "vi", str(self.path)])
+            ["notepad" if os.name == "nt" else "vi", str(self.path.resolve())])
 
     def test_missing_config(self):
         self.path.unlink()
@@ -52,7 +54,7 @@ class ConfigTests(unittest.TestCase):
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             mdl.cmd_config(["--path"])
-        self.assertEqual(out.getvalue().strip(), str(self.path))
+        self.assertEqual(out.getvalue().strip(), str(self.path.resolve()))
         self.launch.assert_not_called()
 
     def test_bad_arguments(self):
@@ -79,7 +81,7 @@ class DispatchTests(unittest.TestCase):
                 capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(result.stdout.strip(),
-                             str(Path(tmp) / "mdl" / "models.toml"))
+                             str((Path(tmp) / "mdl" / "models.toml").resolve()))
 
 
 if __name__ == "__main__":
