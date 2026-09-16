@@ -5,6 +5,7 @@ import ctypes
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import socket
@@ -31,7 +32,7 @@ CONFIG_DIR = _base("XDG_CONFIG_HOME", ".config") / "mdl"
 CONFIG = CONFIG_DIR / "models.toml"
 STATE_DIR = _base("XDG_STATE_HOME", ".local", "state") / "mdl"
 STATE = STATE_DIR / "state.json"
-VERSION = "0.6.2"
+VERSION = "0.6.3"
 DEFAULT_BIN = "llama-server"
 CONFIG_DATA = {}          # last parsed config, for UI-only settings
 DEFAULT_PORT = 8080
@@ -48,7 +49,8 @@ KNOWN = {"model", "mmproj", "ngl", "n_cpu_moe", "ctx", "flash_attn",
 SIMPLE = (("ngl", "-ngl"), ("n_cpu_moe", "--n-cpu-moe"), ("ctx", "-c"),
           ("parallel", "-np"), ("port", "--port"))
 
-USAGE = ("usage: mdl {init|add <model.gguf>|check|list|run <name> [--port N]|"
+USAGE = ("usage: mdl {init|config [--path]|add <model.gguf>|check|list|"
+         "run <name> [--port N]|"
          "stop [<name>|--all]|ps [--json]|logs [-f] [name]|ui [--no-fx]|"
          "fit <gguf|hf:repo|name> [--help]|eval <name> [--help]|"
          "find [--help]|catalog {pull|build|tree|search|stats}} [--version]")
@@ -703,6 +705,32 @@ def human_size(nbytes):
     return f"{nbytes}B"
 
 
+def cmd_config(args):
+    if args == ["--path"]:
+        print(CONFIG.resolve())
+        return
+    if args:
+        die("usage: mdl config [--path]")
+    if not CONFIG.is_file():
+        die("No config found. Run 'mdl init' first.")
+    editor = (os.environ.get("VISUAL") or os.environ.get("EDITOR")
+              or ("notepad" if os.name == "nt" else "vi"))
+    try:
+        # Windows paths need their backslashes preserved. Pass argv directly;
+        # editor settings are commands with arguments, not shell programs.
+        argv = shlex.split(editor, posix=os.name != "nt")
+        if os.name == "nt":
+            argv = [a[1:-1] if a.startswith('"') and a.endswith('"') else a
+                    for a in argv]
+        if not argv:
+            die("VISUAL or EDITOR must name an editor")
+        result = subprocess.run([*argv, str(CONFIG.resolve())])
+    except (OSError, ValueError) as e:
+        die(f"cannot open config editor: {e}")
+    if result.returncode:
+        die(f"config editor exited with status {result.returncode}")
+
+
 def cmd_init(args):
     if args:
         die("usage: mdl init")
@@ -851,7 +879,8 @@ def cmd_ui(args):
     _launch_ui()
 
 
-COMMANDS = {"init": cmd_init, "add": cmd_add, "check": cmd_check, "ui": cmd_ui,
+COMMANDS = {"init": cmd_init, "config": cmd_config,
+            "add": cmd_add, "check": cmd_check, "ui": cmd_ui,
             "run": cmd_run, "stop": cmd_stop, "ps": cmd_ps, "list": cmd_list,
             "logs": cmd_logs, "fit": cmd_fit, "eval": cmd_eval,
             "catalog": cmd_catalog, "find": cmd_find}

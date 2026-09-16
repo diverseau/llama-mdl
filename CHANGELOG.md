@@ -2,6 +2,14 @@
 
 Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
 
+## [0.6.3] - 2026-09-17
+
+### Added
+
+- `mdl config` opens models.toml in `$VISUAL`, then `$EDITOR`, falling
+  back to Notepad on Windows or vi elsewhere. `mdl config --path` prints
+  its location, including when `XDG_CONFIG_HOME` overrides the default.
+
 ## [0.6.2] - 2026-09-12
 
 0.6.0 and 0.6.1 were never released; everything since 0.5.2 is here.

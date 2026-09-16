@@ -64,6 +64,11 @@ mdl init
 That writes `~/.config/mdl/models.toml`, finds `llama-server` on your PATH if
 it is there, and tells you what to edit.
 
+For bulk edits, run `mdl config` to open models.toml in `$VISUAL` or
+`$EDITOR` (Notepad on Windows or vi elsewhere if neither is set).
+Editor arguments work too, for example `EDITOR="code --wait"`.
+`mdl config --path` prints the active config's location.
+
 ## Config
 
 `~/.config/mdl/models.toml`. One table per model; the table name is what you
@@ -162,6 +167,7 @@ mdl add <gguf>   Append an entry for a .gguf to the config, with sane
 mdl check        Validate every model in the config without launching
                  anything. Exits non-zero if it finds a problem.
 mdl init         Write a starter config, if you do not have one.
+mdl config       Open models.toml in your editor; --path prints its location.
 mdl --version    The version, for bug reports.
 mdl ui           The dashboard. Bare `mdl` opens it too.
 mdl logs [-f] [name]
