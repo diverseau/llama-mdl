@@ -6,13 +6,14 @@ check the change is wanted.
 
 ## The scope
 
-mdl runs local llama.cpp servers from a config file. Things it will not grow:
-a daemon, model downloading, hot-swapping, auto-unload, a web UI. Those are
-all reasonable things to want, and all of them are somebody else's tool. The
-narrow scope is the point.
+mdl runs local llama.cpp servers from a config file, and works out what to
+run and how. Things it will not grow: a daemon, downloading model weights,
+hot-swapping, a web UI. Those are all reasonable things to want, and all of
+them are somebody else's tool. The narrow scope is the point - see the
+non-goals in the README for where the edges actually are.
 
 Things that fit: better llama.cpp flag coverage, better failure messages,
-shell completions, more output formats, anything that makes the two files
+shell completions, more output formats, anything that makes the code
 smaller.
 
 ## Getting set up

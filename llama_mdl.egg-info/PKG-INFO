@@ -1,3 +1,50 @@
+Metadata-Version: 2.4
+Name: llama-mdl
+Version: 0.6.2
+Summary: Run local llama.cpp servers from a config file, and work out which model to run and how
+Author: diverse
+License: MIT License
+        
+        Copyright (c) 2026 diverse
+        
+        Permission is hereby granted, free of charge, to any person obtaining a copy
+        of this software and associated documentation files (the "Software"), to deal
+        in the Software without restriction, including without limitation the rights
+        to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+        copies of the Software, and to permit persons to whom the Software is
+        furnished to do so, subject to the following conditions:
+        
+        The above copyright notice and this permission notice shall be included in all
+        copies or substantial portions of the Software.
+        
+        THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+        IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+        FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+        AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+        LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+        OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+        SOFTWARE.
+        
+Project-URL: Homepage, https://github.com/diverseau/llama-mdl
+Project-URL: Repository, https://github.com/diverseau/llama-mdl
+Project-URL: Issues, https://github.com/diverseau/llama-mdl/issues
+Project-URL: Changelog, https://github.com/diverseau/llama-mdl/blob/main/CHANGELOG.md
+Keywords: llama.cpp,llm,gguf,cli,tui,local-ai
+Classifier: Environment :: Console
+Classifier: Intended Audience :: Developers
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Operating System :: OS Independent
+Classifier: Programming Language :: Python :: 3.11
+Classifier: Programming Language :: Python :: 3.12
+Classifier: Programming Language :: Python :: 3.13
+Classifier: Topic :: Utilities
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Provides-Extra: ui
+Requires-Dist: textual<9,>=3; extra == "ui"
+Dynamic: license-file
+
 # mdl
 
 A small CLI for running local [llama.cpp](https://github.com/ggml-org/llama.cpp)
