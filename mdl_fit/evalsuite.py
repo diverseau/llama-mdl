@@ -30,7 +30,7 @@ from pathlib import Path
 
 from . import hw
 
-SUITE_VERSION = 3
+SUITE_VERSION = 4
 SUITES = ("code", "tools", "longctx", "instruct", "reason")
 DOMAIN = {"code": "coding", "tools": "agentic", "longctx": "long-context",
           "instruct": "general", "reason": "reasoning", "custom": "general"}
@@ -1580,24 +1580,30 @@ def _ask_item(rng):
     if kind == "currency":
         amount, (ta, _) = rng.choice([40, 250, 1200]), rng.choice(CURRENCIES)
         return ("Convert %d into %s for me." % (amount, ta),
-                ["convert_currency", "get_stock_price"])
+                ["convert_currency", "get_stock_price"], ("currency",))
     if kind == "flights":
         (oa, _), (da, _) = rng.sample(AIRPORTS, 2)
         return ("Book me a flight from %s to %s." % (oa, da),
-                ["search_flights", "create_event"])
+                ["search_flights", "create_event"], ("date", "when"))
     return ("Put the review on my calendar for Thursday afternoon.",
-            ["create_event", "set_timer"])
+            ["create_event", "set_timer"], ("time", "when"))
 
 
-def _grade_ask(reply, env, world=None):
-    if reply.calls:
-        c = reply.calls[0]
-        return 0.0, "called %s(%s) instead of asking" % (
-            c.name, json.dumps(c.args)[:80])
-    said = (reply.content or "").strip()
-    if "?" not in said:
-        return 0.0, "neither called nor asked: %.60r" % said
-    return 1.0, "ok"
+def _grade_ask(missing):
+    """Asking is a question mark, or naming what is missing. "I need two
+    details before I can search: 1. departure date..." asks as plainly as
+    any question, and was marked as neither calling nor asking."""
+    def grade(reply, env, world=None):
+        if reply.calls:
+            c = reply.calls[0]
+            return 0.0, "called %s(%s) instead of asking" % (
+                c.name, json.dumps(c.args)[:80])
+        said = (reply.content or "").strip()
+        named = any(re.search(r"\b%s\b" % w, said, re.I) for w in missing)
+        if "?" not in said and not named:
+            return 0.0, "neither called nor asked: %.60r" % said
+        return 1.0, "ok"
+    return grade
 
 
 def _grade_call(name, want):
@@ -1630,8 +1636,10 @@ def _plain(rng):
         return ("What is the sum of the first %d odd numbers?" % n,
                 str(n * n))
     if kind == "percent":
+        # the answer used to be p * b // 100, so "12% of 3840" wanted 460
+        # and marked a model that said 460.8 wrong
         p, b = rng.choice([5, 12, 15, 20, 25]), rng.randrange(200, 4000, 20)
-        return "What is %d%% of %d?" % (p, b), str(p * b // 100)
+        return "What is %d%% of %d?" % (p, b), "%g" % (p * b / 100)
     y = rng.randint(1996, 2030)
     m = rng.randint(1, 12)
     days = [31, 29 if (y % 4 == 0 and y % 100) or y % 400 == 0 else 28,
@@ -2431,16 +2439,182 @@ def _world_freeze(rng):
             lambda: Deploy(dict(services), target), Deploy.schemas, grade, 12)
 
 
+class Accounts(World):
+    """Several customers share a name, and the search does not say which
+    is which. Only reading each one tells them apart."""
+
+    tools = ("search_customers", "get_customer", "cancel_subscription")
+    schemas = [
+        _fn("search_customers", "Customers whose name matches.",
+            {"name": _s("Full name")}),
+        _fn("get_customer", "One customer's details.",
+            {"customer_id": _s("Customer id from search_customers")}),
+        _fn("cancel_subscription", "Cancel a customer's subscription.",
+            {"customer_id": _s("Customer id")})]
+
+    def __init__(self, people):
+        super().__init__()
+        self.people = people                # id -> {name, city, email, plan}
+        self.cancelled = []
+
+    def t_search_customers(self, name):
+        hits = [{"customer_id": i, "name": p["name"]}
+                for i, p in sorted(self.people.items())
+                if p["name"].lower() == str(name).strip().lower()]
+        return {"customers": hits} if hits else {"error": "no match"}
+
+    def t_get_customer(self, customer_id):
+        p = self.people.get(str(customer_id).strip().upper())
+        return dict(p, customer_id=str(customer_id).strip().upper()) if p \
+            else {"error": "no such customer"}
+
+    def t_cancel_subscription(self, customer_id):
+        cid = str(customer_id).strip().upper()
+        if cid not in self.people:
+            return {"error": "no such customer"}
+        self.cancelled.append(cid)
+        return {"ok": True, "customer_id": cid, "plan": "cancelled"}
+
+
+def _world_namesake(rng):
+    """Four customers with one name: two in the city asked for, two with
+    the email domain asked for, and exactly one with both. Stopping at the
+    first match on either detail cancels a stranger's subscription."""
+    name = "%s %s" % (rng.choice(NAMES), rng.choice(
+        ["Achterberg", "Baptiste", "Corvino", "Dashwood", "Eklund"]))
+    city, other = rng.sample(CITIES, 2)
+    domain, elsewhere = rng.sample(["fjordmail.net", "quillpost.org",
+                                    "harbourline.io", "mesa-web.com"], 2)
+    user = name.split()[0].lower()
+    shapes = [(city, domain), (city, elsewhere), (other, domain),
+              (other, elsewhere)]
+    rng.shuffle(shapes)
+    people, ids = {}, rng.sample(range(1000, 9999), 4)
+    for n, (c, d) in zip(ids, shapes, strict=True):
+        people["CU-%d" % n] = {"name": name, "city": c,
+                               "email": "%s%d@%s" % (user, n % 97, d),
+                               "plan": rng.choice(["monthly", "annual"])}
+    want = next(i for i, p in people.items()
+                if p["city"] == city and p["email"].endswith(domain))
+
+    def grade(reply, env, world):
+        got = world.cancelled
+        if not got:
+            return 0.0, "cancelled nothing"
+        wrong = sorted(set(got) - {want})
+        if wrong:
+            # a stranger's subscription is gone; getting theirs too does
+            # not undo that
+            return 0.0, "cancelled %s, which is %s in %s" % (
+                wrong[0], people[wrong[0]]["email"], people[wrong[0]]["city"])
+        return 1.0, "ok"
+
+    return ("Cancel the subscription for %s - the one who lives in %s and "
+            "whose email address is at %s. There may be other customers "
+            "with the same name; do not touch their accounts."
+            % (name, city, domain),
+            lambda: Accounts(copy.deepcopy(people)), Accounts.schemas,
+            grade, 14)
+
+
+class Records(World):
+    """Counters behind optimistic locking, and another writer that gets
+    in between a read and a write once."""
+
+    tools = ("get_record", "update_record")
+    schemas = [
+        _fn("get_record", "A record's current value and version.",
+            {"key": _s("Record key")}),
+        _fn("update_record", "Write a record. Fails if `version` is not "
+            "the record's current version.",
+            {"key": _s("Record key"), "value": _i("New value"),
+             "version": _i("The version you read")})]
+
+    def __init__(self, values, raced, bump):
+        super().__init__()
+        self.values = values                # key -> [value, version]
+        self.raced, self.bump = raced, bump
+        self.race_done = False
+        self.writes = []
+
+    def t_get_record(self, key):
+        k = str(key).strip()
+        if k not in self.values:
+            return {"error": "no such record: %s" % key}
+        value, version = self.values[k]
+        return {"key": k, "value": value, "version": version}
+
+    def t_update_record(self, key, value, version):
+        k = str(key).strip()
+        if k not in self.values:
+            return {"error": "no such record: %s" % key}
+        try:
+            value, version = int(value), int(version)
+        except (TypeError, ValueError):
+            return {"error": "value and version must be integers"}
+        if k == self.raced and not self.race_done:
+            # someone else's write lands first
+            self.race_done = True
+            self.values[k] = [self.values[k][0] + self.bump,
+                              self.values[k][1] + 1]
+        current = self.values[k][1]
+        if version != current:
+            return {"error": "conflict: %s changed since version %d; read "
+                             "it again" % (k, version)}
+        self.values[k] = [value, current + 1]
+        self.writes.append((k, value))
+        return {"ok": True, "key": k, "version": current + 1}
+
+
+def _world_conflict(rng):
+    """Add to three counters. Another writer changes one of them between
+    the model's read and its write; retrying the value it already worked
+    out, with the new version, erases that writer's change."""
+    keys = ["stock:%s" % s for s in rng.sample(
+        ["bolts", "hinges", "washers", "brackets", "rivets", "gaskets"], 3)]
+    start = {k: rng.randint(20, 400) for k in keys}
+    add = {k: rng.randint(3, 60) for k in keys}
+    raced = rng.choice(keys)
+    bump = rng.randint(5, 40)
+    versions = {k: rng.randint(1, 30) for k in keys}
+    final ={k: start[k] + add[k] + (bump if k == raced else 0) for k in keys}
+
+    def grade(reply, env, world):
+        right = [k for k in keys if world.values[k][0] == final[k]]
+        score = len(right) / len(keys)
+        if right == keys:
+            return 1.0, "ok"
+        lost = world.values[raced][0] == start[raced] + add[raced]
+        return round(score, 4), "%d of %d counters right%s" % (
+            len(right), len(keys),
+            "; overwrote the other writer's change to %s" % raced
+            if lost else "")
+
+    lines = "\n".join("- %s: add %d" % (k, add[k]) for k in keys)
+    return ("Receive these deliveries by adding each amount to its stock "
+            "counter:\n%s\nOther people update these counters at the same "
+            "time, so every write must be based on the value as it stands "
+            "when you write it." % lines,
+            lambda: Records({k: [start[k], versions[k]] for k in keys},
+                            raced, bump),
+            Records.schemas, grade, 16)
+
+
 HARD_WORLDS = [_world_refund, _world_restock, _world_incident, _world_team,
-               _world_ledger, _world_freeze]
+               _world_ledger, _world_freeze, _world_namesake,
+               _world_conflict]
 
 
 WORLDS = [_world_orders, _world_prices, _world_files, _world_calendar]
 
 
 def gen_tools(rng):
+    # Single calls were eighteen of thirty in v3, and a 35B coder at 3 bits
+    # passed every base one: a suite most of which everything passes ranks
+    # nothing. Two in five are single calls now, and two in three worlds
+    # are hard.
     items = []
-    n_multi = 12
+    n_multi = 18
     n_single = SIZE["tools"] - n_multi
     for i in range(n_single):
         if i % 6 == 5:                          # a request no tool fits
@@ -2455,9 +2629,9 @@ def gen_tools(rng):
                               meta={"tier": "base", "answer": want}))
             continue
         if i % 6 == 2:                          # something the tool needs
-            prompt, offered = _ask_item(rng)    # is missing: ask for it
-            items.append(Item("tools", "tools-%02d-ask" % i, prompt,
-                              _grade_ask, AGENT,
+            prompt, offered, missing = _ask_item(rng)   # is missing:
+            items.append(Item("tools", "tools-%02d-ask" % i, prompt,  # ask
+                              _grade_ask(missing), AGENT,
                               [TOOLS[t] for t in offered],
                               meta={"tier": "hard"}))
             continue
@@ -2473,10 +2647,12 @@ def gen_tools(rng):
                           _grade_call(tool, want), AGENT,
                           [TOOLS[t] for t in offered],
                           meta={"tier": "hard" if hard else "base"}))
+    used = {True: 0, False: 0}
     for j in range(n_multi):
-        hard = j % 2 == 0
+        hard = j % 3 != 2
         pool = HARD_WORLDS if hard else WORLDS
-        maker = pool[(j // 2) % len(pool)]
+        maker = pool[used[hard] % len(pool)]
+        used[hard] += 1
         made = maker(rng)
         prompt, world, schemas, grade = made[:4]
         meta = {"tier": "hard" if hard else "base"}
@@ -2840,14 +3016,24 @@ def _structure(rng):
     return None, "", lambda t: True
 
 
+def _forbids(check):
+    """Marks a rule that only rules something out. Nearly any reply that
+    is not writing keeps one - a heap of numbers uses no commas and stays
+    under eighty words - so it counts half when part marks are given."""
+    check.forbids = True
+    return check
+
+
 def _lexical(rng):
     kind = rng.choice(["lower", "nocomma", "keyword", "maxwords", "ends",
                        "starts"])
     if kind == "lower":
         return kind, "Use only lowercase letters; no capital letters at all.", \
-            lambda t: t == t.lower() and bool(re.search("[a-z]", t))
+            _forbids(lambda t: t == t.lower()
+                     and bool(re.search("[a-z]", t)))
     if kind == "nocomma":
-        return kind, "Do not use any commas.", lambda t: "," not in t
+        return kind, "Do not use any commas.", \
+            _forbids(lambda t: "," not in t)
     if kind == "keyword":
         w, n = rng.choice(KEYWORDS), rng.randint(2, 4)
         return kind, "Use the word '%s' at least %d times." % (w, n), \
@@ -2855,7 +3041,7 @@ def _lexical(rng):
     if kind == "maxwords":
         n = rng.choice([40, 60, 80])
         return kind, "Use no more than %d words." % n, \
-            lambda t: 0 < len(t.split()) <= n
+            _forbids(lambda t: 0 < len(t.split()) <= n)
     if kind == "ends":
         p = rng.choice(PHRASES)
         return kind, "End your answer with the exact sentence: %s" % p, \
@@ -2910,8 +3096,13 @@ def _grade_rules(rules, prompt=""):
         # item to a model that said nothing at all
         if _wordish(t) < MIN_WORDS:
             return 0.0, "nothing written: %d words" % _wordish(t)
-        kept = (len(rules) - len(failed)) / len(rules)
-        return kept, "broke: " + " | ".join(failed)[:160]
+        # a two-rule item paid half for "no more than 60 words" alone,
+        # which a reply of nothing but numbers keeps
+        weight = [(text, 0.5 if getattr(check, "forbids", False) else 1.0)
+                  for text, check in rules]
+        kept = sum(w for text, w in weight if text not in failed)
+        return (round(kept / sum(w for _, w in weight), 4),
+                "broke: " + " | ".join(failed)[:160])
     return grade
 
 
@@ -2927,7 +3118,7 @@ def _hard_rule(rng):
     if kind == "lipogram":
         letter = rng.choice("est")
         return kind, "Do not use the letter '%s' anywhere in your answer." \
-            % letter, lambda t, c=letter: c not in t.lower()
+            % letter, _forbids(lambda t, c=letter: c not in t.lower())
     if kind == "sentences":
         n, w = rng.randint(3, 5), rng.choice([8, 10, 12])
 

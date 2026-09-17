@@ -2,6 +2,28 @@
 
 Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+
+- `mdl eval` suite v4. Tools: eighteen of thirty items are multi-step
+  worlds (was twelve), two in three of them hard, with two new ones - a
+  customer to pick out of four namesakes, and counters behind optimistic
+  locking where another writer gets in between a read and a write.
+  Scores from v3 are not comparable, and `--compare` says so.
+
+### Fixed
+
+- `mdl eval`: "12% of 3840" wanted 460 and marked 460.8 wrong. A reply
+  that asks for missing details as a list rather than a question now
+  counts as asking. In format items, rules that only forbid something
+  ("no commas", "at most 60 words") count half toward part marks, since
+  a reply that is not writing keeps them.
+- `mdl find` no longer ranks files that are not the model: an 11 GB
+  DSpark drafter was shown as DeepSeek-V4-Flash, all on GPU, and
+  `imatrix.gguf` as Qwen3.5-122B. Files whose header holds a parameter
+  count far from their model's are turned away.
+
 ## [0.6.4] - 2026-09-17
 
 ### Fixed

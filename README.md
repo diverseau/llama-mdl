@@ -346,7 +346,12 @@ fails a call the first time. One offers eight tools, four of them
 beside the point, and a transaction list that only arrives a page at a
 time, so an agent that reads page one and stops looks exactly like one
 that finished. One freezes deploys partway through the job, so checking
-the rules once at the start is not enough.
+the rules once at the start is not enough. One has four customers with
+the same name, and only reading each one says which to cancel. One has
+another writer change a counter between the read and the write, so
+retrying the value already worked out erases their change - a 35B coder
+in a 3-bit quant did exactly that. Eighteen of the thirty tools items
+are worlds like these, and two in three of those are the hard ones.
 
 The long-context questions are not all needles. One per document asks
 for every match rather than one - three of six people share a floor,

@@ -288,6 +288,38 @@ class Agent:
                                      minutes=need, attendees=team)
         return R("Booked.")
 
+    def _cancel_subscription(self, task, seen):  # namesakes: read them all
+        name = re.search(r"subscription for (.+?) - the one", task).group(1)
+        city = re.search(r"lives in (.+?) and", task).group(1)
+        domain = re.search(r"is at (\S+)\. There", task).group(1)
+        if not seen:
+            return self.call("search_customers", name=name)
+        ids = [c["customer_id"] for c in seen[0]["customers"]]
+        read = {s["customer_id"]: s for s in seen[1:] if "city" in s}
+        if len(read) < len(ids):
+            return self.call("get_customer", customer_id=ids[len(read)])
+        if not any("plan" in s and s.get("plan") == "cancelled"
+                   for s in seen):
+            match = next(i for i, s in read.items() if s["city"] == city
+                         and s["email"].endswith("@" + domain))
+            return self.call("cancel_subscription", customer_id=match)
+        return R("Cancelled.")
+
+    def _get_record(self, task, seen):      # counters: re-read on conflict
+        adds = dict((k, int(n)) for k, n in
+                    re.findall(r"- (\S+): add (\d+)", task))
+        done = {s["key"] for s in seen if s.get("ok")}
+        left = [k for k in adds if k not in done]
+        if not left:
+            return R("All received.")
+        k = left[0]
+        last = seen[-1] if seen else {}
+        if last.get("key") == k and "value" in last:
+            return self.call("update_record", key=k,
+                             value=last["value"] + adds[k],
+                             version=last["version"])
+        return self.call("get_record", key=k)
+
     def _list_dir(self, task, seen):        # files
         svc = re.search(r"is the (\w+) service", task).group(1)
         if not seen:
@@ -307,8 +339,75 @@ check("a careful agent solves every multi-step item",
       [(r["id"], 1.0) for r in got])
 check("every world is in the suite, the hard ones too",
       sorted({i.id.split("-", 2)[2] for i in multi}),
-      ["calendar", "files", "freeze", "incident", "ledger", "orders",
-       "prices", "refund", "restock", "team"])
+      ["calendar", "conflict", "files", "freeze", "incident", "ledger",
+       "namesake", "orders", "prices", "refund", "restock", "team"])
+check("most of the tools suite is worlds, and most of those are hard",
+      (len(multi), sum(i.meta["tier"] == "hard" for i in multi)), (18, 12))
+
+
+class Hasty(Agent):
+    """Takes the first namesake, and retries a conflicted write with the
+    value it already worked out - the two mistakes those worlds are for."""
+
+    def _cancel_subscription(self, task, seen):
+        name = re.search(r"subscription for (.+?) - the one", task).group(1)
+        if not seen:
+            return self.call("search_customers", name=name)
+        if len(seen) == 1:
+            return self.call("cancel_subscription",
+                             customer_id=seen[0]["customers"][0]["customer_id"])
+        return R("Cancelled.")
+
+    def _get_record(self, task, seen):
+        adds = dict((k, int(n)) for k, n in
+                    re.findall(r"- (\S+): add (\d+)", task))
+        reads = {s["key"]: s for s in seen if "value" in s}
+        done = {s["key"] for s in seen if s.get("ok")}
+        left = [k for k in adds if k not in done]
+        if not left:
+            return R("All received.")
+        k = left[0]
+        if k not in reads:
+            return self.call("get_record", key=k)
+        if seen[-1].get("error"):               # retry, same value, new
+            version = reads[k]["version"] + 1   # version guessed
+            return self.call("update_record", key=k,
+                             value=reads[k]["value"] + adds[k],
+                             version=version)
+        return self.call("update_record", key=k,
+                         value=reads[k]["value"] + adds[k],
+                         version=reads[k]["version"])
+
+
+hasty = {i.id.split("-", 2)[2]: evalrun.run_item(Hasty(), i, env)
+         for i in multi if i.id.endswith(("namesake", "conflict"))}
+# the first search hit is the right customer one time in four, so try the
+# draws where it is not
+unlucky = []
+for s in range(40):
+    prompt, world, schemas, grade, turns = evalsuite._world_namesake(
+        random.Random(s))
+    w = world()
+    name = re.search(r"subscription for (.+?) - the one", prompt).group(1)
+    first = w.t_search_customers(name)["customers"][0]["customer_id"]
+    it = evalsuite.Item("tools", "tools-99-namesake", prompt, grade,
+                        evalsuite.AGENT, schemas, world=world,
+                        meta={"tier": "hard", "turns": turns})
+    careful = evalrun.run_item(Agent(), it, env)
+    if careful["score"] == 1.0 and not w.cancelled:
+        probe = world()
+        probe.t_cancel_subscription(first)
+        if grade(R("done"), env, probe)[0] == 0.0:
+            unlucky.append(it)
+    if len(unlucky) == 3:
+        break
+check("taking the first namesake cancels a stranger, and is paid nothing",
+      [evalrun.run_item(Hasty(), it, env)["score"] for it in unlucky],
+      [0.0, 0.0, 0.0])
+check("and a retry that erases another writer's change loses that counter",
+      (hasty["conflict"]["score"] < 1.0,
+       "overwrote the other writer" in hasty["conflict"]["why"]),
+      (True, True))
 
 
 class Lazy(Agent):
