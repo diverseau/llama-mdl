@@ -2,6 +2,19 @@
 
 Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
 
+## [0.6.4] - 2026-09-17
+
+### Fixed
+
+- `mdl ui`: copying the log (`y`) or the command (`c`) works on Linux.
+  Textual copies only by OSC 52, which GNOME Terminal and other VTE
+  terminals ignore, tmux drops unless `set-clipboard` is on, and many
+  terminals cap below the size of a server log - while the app said
+  "log copied" regardless. The text now also goes to `wl-copy`, `xclip`
+  or `xsel` (`pbcopy` on macOS), and with none of them installed the
+  notice says it went via the terminal instead of claiming the copy.
+- The copied command is quoted for sh on Linux and macOS, not for cmd.
+
 ## [0.6.3] - 2026-09-17
 
 ### Added

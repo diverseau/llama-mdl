@@ -293,7 +293,7 @@ async def main():
         # two cards are one pool, not whichever one nvidia-smi lists first
         two = "1000, 8192" + chr(10) + "2000, 8192" + chr(10)
         mdl_ui._GPU_CACHE["at"] = 0
-        real_run = mdl_ui.subprocess.run
+        real_run, real_which = mdl_ui.subprocess.run, mdl_ui.shutil.which
         mdl_ui.subprocess.run = lambda *a, **k: type(
             "R", (), {"stdout": two})()
         mdl_ui.shutil.which = lambda x: "nvidia-smi"
@@ -301,6 +301,7 @@ async def main():
             check("both cards are counted", mdl_ui.gpu_memory(), (3000, 16384))
         finally:
             mdl_ui.subprocess.run = real_run
+            mdl_ui.shutil.which = real_which
             mdl_ui._GPU_CACHE["at"] = 0
 
         # readiness is /health, and the timeout is the configured one
@@ -486,7 +487,67 @@ async def main():
         check("all of it", len(copied[0].splitlines()), 4)
         check("and it is the text, not the styling",
               "task 3" in copied[0], True)
+
+        # OSC 52 alone is silently ignored by VTE terminals and tmux: the
+        # system tool gets it too, and the notice says which one landed
+        said, tools = [], []
+        app.notify = lambda msg, **kw: said.append(msg)
+        real = mdl_ui.system_clipboard
+        try:
+            mdl_ui.system_clipboard = lambda s: tools.append(s) or "xclip"
+            await pilot.press("y")
+            await pilot.pause()
+            check("the system clipboard gets the log as well",
+                  (len(tools), tools[0] == copied[-1]), (1, True))
+            check("and a tool that took it is reported as copied",
+                  said[-1], "log copied (4 lines)")
+            mdl_ui.system_clipboard = lambda s: None
+            await pilot.press("y")
+            await pilot.pause()
+            check("with no tool it does not claim the copy landed",
+                  said[-1] == "log copied (4 lines)", mdl_ui.os.name == "nt")
+        finally:
+            mdl_ui.system_clipboard = real
     teardown(root)
+
+    # --- the system clipboard tool itself ---------------------------------
+    import os
+    import tempfile
+    if os.name == "nt":
+        check("windows is left to OSC 52", mdl_ui.system_clipboard("x"), None)
+    else:
+        bin_dir = Path(tempfile.mkdtemp(prefix="mdl-clip-"))
+        sink = bin_dir / "got"
+        for tool in ("xclip", "pbcopy", "wl-copy"):
+            fake = bin_dir / tool
+            fake.write_text("#!/bin/sh\nexec /bin/cat > '%s'\n" % sink)
+            fake.chmod(0o755)
+        saved = {k: os.environ.get(k) for k in
+                 ("PATH", "DISPLAY", "WAYLAND_DISPLAY")}
+        try:
+            os.environ["PATH"] = str(bin_dir)
+            os.environ["DISPLAY"] = ":0"
+            os.environ.pop("WAYLAND_DISPLAY", None)
+            text = "llama-server: ünïcode ✓\nline 2"
+            via = mdl_ui.system_clipboard(text)
+            check("a clipboard tool on PATH is used",
+                  via, "pbcopy" if sys.platform == "darwin" else "xclip")
+            check("and handed the text intact",
+                  sink.read_text(encoding="utf-8"), text)
+            if sys.platform != "darwin":
+                os.environ.pop("DISPLAY")
+                check("no display, no tool to try",
+                      mdl_ui.system_clipboard(text), None)
+                (bin_dir / "xclip").write_text("#!/bin/sh\nexit 1\n")
+                os.environ["DISPLAY"] = ":0"
+                check("a tool that fails is not reported as the copy",
+                      mdl_ui.system_clipboard(text), None)
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
     return t.done()
 
 

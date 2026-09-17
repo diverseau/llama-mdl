@@ -11,6 +11,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -338,6 +339,47 @@ class Spark(Static):
         else:
             t.append("  no data yet", style="#565f89")
         self.update(t)
+
+
+def system_clipboard(text):
+    """Put text on the desktop clipboard with the platform's own tool.
+
+    Returns the tool's name, or None when there was none to use. Textual
+    copies by OSC 52 alone - an escape sequence the terminal may or may
+    not act on, with nothing coming back either way. GNOME Terminal and
+    the other VTE terminals ignore it, tmux drops it unless set-clipboard
+    is on, and many cap its length well short of a server log, so on
+    Linux the app said "log copied" and nothing was.
+
+    Windows is left to OSC 52, which Windows Terminal honours: clip.exe
+    reads the console code page and mangles anything outside it.
+    """
+    if os.name == "nt":
+        return None
+    if sys.platform == "darwin":
+        tools = [["pbcopy"]]
+    else:
+        tools = []
+        if os.environ.get("WAYLAND_DISPLAY"):
+            tools.append(["wl-copy"])
+        if os.environ.get("DISPLAY"):
+            tools += [["xclip", "-selection", "clipboard"],
+                      ["xsel", "--clipboard", "--input"]]
+    for argv in tools:
+        exe = shutil.which(argv[0])
+        if not exe:
+            continue
+        # xclip and wl-copy stay behind to serve the selection; with
+        # their output on DEVNULL, only the parent is waited for
+        try:
+            done = subprocess.run([exe, *argv[1:]], input=text.encode("utf-8"),
+                                  stdout=subprocess.DEVNULL,
+                                  stderr=subprocess.DEVNULL, timeout=5)
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if done.returncode == 0:
+            return argv[0]
+    return None
 
 
 class CopyableLog(RichLog):
@@ -1579,22 +1621,35 @@ class MdlApp(App):
         except mdl.MdlError as e:
             self.notify(str(e), severity="error")
             return
-        try:
-            self.copy_to_clipboard(subprocess.list2cmdline(argv))
-            self.notify("command copied")
-        except Exception:                            # noqa: BLE001
-            self.notify("could not reach the clipboard", severity="warning")
+        # pasted into the shell it came from: cmd quoting is not sh quoting
+        line = (subprocess.list2cmdline(argv) if os.name == "nt"
+                else shlex.join(str(a) for a in argv))
+        self._clip(line, "command copied")
 
     def action_copy_log(self):
         text = self.query_one("#log", CopyableLog).as_text().strip()
         if not text:
             self.notify("the log is empty")
             return
+        self._clip(text, "log copied (%d lines)" % len(text.split(NEWLINE)))
+
+    def _clip(self, text, said):
+        """The system clipboard where there is a tool for it, and OSC 52
+        as well - over ssh the escape is the only way to the desk you
+        are sitting at. Without a tool, say that it went to the terminal,
+        not that it was copied: nothing reports whether it arrived."""
         try:
+            via = system_clipboard(text)
             self.copy_to_clipboard(text)
-            self.notify("log copied (%d lines)" % len(text.split(NEWLINE)))
         except Exception:                            # noqa: BLE001
             self.notify("could not reach the clipboard", severity="warning")
+            return
+        if via or os.name == "nt":
+            self.notify(said)
+        else:
+            self.notify("%s via the terminal - if nothing pastes, install "
+                        "wl-clipboard or xclip" % said.split(" (")[0],
+                        timeout=8)
 
     def action_edit(self):
         name = self._selected()
