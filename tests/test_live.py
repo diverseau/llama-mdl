@@ -97,13 +97,26 @@ async def main():
         await pilot.press("p")
         await pilot.pause()
         check("prompt opened", isinstance(app.screen, mdl_ui.PromptScreen), True)
-        app.screen.query_one("#prompt-input", Input).value = "Say hello in five words."
+        prompt = app.screen
+        prompt.query_one("#prompt-input", Input).value = "Say hello in five words."
         await pilot.press("enter")
-        grew = await until(pilot, lambda: len(app.screen.log_text.plain) > 40, 180)
+        # The transcript already contains the prompt and model heading. Require
+        # actual reply text, which _feed appends before _paint displays it.
+        grew = await until(pilot, lambda: (
+            bool("".join(prompt.reply).strip()) and
+            "".join(prompt.reply) in prompt.transcript.plain), 180)
         check("reply streamed into the pane", grew, True)
-        print("      reply: %r" % app.screen.log_text.plain[-90:].replace("\n", " "))
+        print("      reply: %r" % prompt.transcript.plain[-90:].replace("\n", " "))
         await pilot.press("escape")
         await pilot.pause()
+        # Escape interrupts an active stream; a second escape closes the pane.
+        if app.screen is prompt:
+            check("reply interrupted",
+                  await until(pilot, lambda: prompt.phase not in mdl_ui.BUSY,
+                              15), True)
+            await pilot.press("escape")
+            await pilot.pause()
+        check("prompt closed", isinstance(app.screen, mdl_ui.PromptScreen), False)
         check("tok/s series populated",
               await until(pilot, lambda: bool(app.tok_history), 15), True)
 
