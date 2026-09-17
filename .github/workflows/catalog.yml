@@ -15,11 +15,11 @@ on:
     inputs:
       popular:
         description: GGUF repos by downloads
-        default: '800'
+        default: '3000'
         type: string
       recent:
         description: GGUF repos by creation date
-        default: '200'
+        default: '500'
         type: string
       budget_minutes:
         description: Crawl budget before publishing a partial
@@ -40,8 +40,8 @@ jobs:
       MDL_CATALOG_REPO: ${{ vars.CATALOG_REPO || 'diversemate/mdl-catalog' }}
       MDL_FIT_HOME: ${{ github.workspace }}/.mdl
       PYTHONIOENCODING: utf-8
-      CATALOG_POPULAR: ${{ inputs.popular || '800' }}
-      CATALOG_RECENT: ${{ inputs.recent || '200' }}
+      CATALOG_POPULAR: ${{ inputs.popular || '3000' }}
+      CATALOG_RECENT: ${{ inputs.recent || '500' }}
       CATALOG_MINUTES: ${{ inputs.budget_minutes || '40' }}
     steps:
       - uses: actions/checkout@v4

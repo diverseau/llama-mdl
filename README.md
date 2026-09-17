@@ -451,11 +451,11 @@ reports that no published catalog is available. Build one locally with
 The nightly job requires `CATALOG_ENABLED=true` and a write-capable
 `HF_TOKEN`; a skipped run does not refresh the catalog.
 
-The default build takes the top 800 GGUF repositories by downloads and
-the newest 200 by creation date, deduplicates the overlap, and reads their
+The default build takes the top 3,000 GGUF repositories by downloads and
+the newest 500 by creation date, deduplicates the overlap, and reads their
 file lists. It fetches each distinct quantization source's metadata once
 to retain benchmark evidence, without walking descendants. This is at most
-1,000 repositories, not 1,000 distinct models; it deliberately omits much
+3,500 repositories, not 3,500 distinct models; it deliberately omits much
 of the long tail and does not promise complete model family trees.
 
 ```sh

@@ -653,8 +653,8 @@ usage: mdl catalog pull                 fetch the published snapshot
        mdl catalog stats
 
 build options:
-  --popular N        GGUF repos by downloads (default 800)
-  --recent N         GGUF repos by creation date (default 200)
+  --popular N        GGUF repos by downloads (default 3000)
+  --recent N         GGUF repos by creation date (default 500)
   --budget-minutes N  stop and save a resumable partial (default 40)
                      These apply to the default mixed GGUF seed.
   --org NAME         use the original lineage crawl for this org (repeatable)
@@ -764,8 +764,8 @@ def main(args, out=None):
                 if kw:
                     die("lineage options require --org or --base")
                 meta = catalog_crawl.build(
-                    path, popular=int(o.get("popular", [800])[-1]),
-                    recent=int(o.get("recent", [200])[-1]),
+                    path, popular=int(o.get("popular", [3000])[-1]),
+                    recent=int(o.get("recent", [500])[-1]),
                     minutes=float(o.get("budget-minutes", [40])[-1]), **args)
             w("built    %s: %d models, %d GGUF quants, %d eval results, "
               "%d requests, %ds\n" % (path, meta["nodes"], meta["ggufs"],

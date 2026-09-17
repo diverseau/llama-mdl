@@ -3,7 +3,7 @@
 Working notes for coding agents in the `mdl` repo. This is the canonical
 file; `CLAUDE.md` points here and adds only Claude Code specifics.
 
-Written against **0.6.4**. Where a fact is likely to drift, this says how to
+Written against **0.6.5**. Where a fact is likely to drift, this says how to
 re-derive it instead of quoting it.
 
 ## What this is
@@ -41,7 +41,8 @@ Roughly: `gguf` parses headers, `hw`/`usage` measure the machine, `model`
 places tensors, `perf` predicts speed, `search` enumerates configs,
 `calib` holds measured corrections, `explain`/`emit`/`cli` are presentation,
 `remote` reads headers of models you have not downloaded, `catalog` holds
-and queries the hub snapshot and `catalog_crawl` builds it, `quality`/`find` rank models, `evalsuite`/`evalrun` are the eval.
+and queries the hub snapshot and `catalog_crawl` builds it,
+`quality`/`find` rank models, `evalsuite`/`evalrun` are the eval.
 
 ## Commands you will need
 
@@ -111,7 +112,7 @@ workflow via OIDC.
 
 ```sh
 # bump VERSION in mdl.py and add a CHANGELOG.md entry, commit, push main, then
-git tag -a v0.6.4 -m "0.6.4" && git push origin v0.6.4
+git tag -a v0.6.5 -m "0.6.5" && git push origin v0.6.5
 ```
 
 - The tag must equal `mdl.VERSION` or the build job fails on purpose. The
@@ -197,8 +198,8 @@ repo variable `CATALOG_ENABLED == "true"` and does nothing on forks. It is
 change its scope or dispatch it without the maintainer's approval; manual
 dispatch bypasses the enable flag but still requires the owner check.
 
-The default builder (`mdl_fit/catalog_crawl.py`) takes 800 GGUF repos by
-downloads plus 200 by creation date, deduplicates them, and fetches only
+The default builder (`mdl_fit/catalog_crawl.py`) takes 3,000 GGUF repos by
+downloads plus 500 by creation date, deduplicates them, and fetches only
 file lists and direct source-model metadata. Its 40-minute budget saves a
 partial with the work queue in SQLite; the workflow publishes that file.
 Data and cursors commit per HTTP page. Do not prune a partial refresh or

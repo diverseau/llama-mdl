@@ -2,7 +2,7 @@
 
 Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
 
-## [Unreleased]
+## [0.6.5] - 2026-09-17
 
 ### Changed
 
@@ -11,6 +11,13 @@ Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
   customer to pick out of four namesakes, and counters behind optimistic
   locking where another writer gets in between a read and a write.
   Scores from v3 are not comparable, and `--compare` says so.
+- The nightly catalog covers the 3,000 most-downloaded GGUF repos plus
+  the 500 newest (was 800 and 200). The first full crawl used 289
+  requests of its 40-minute budget and left three in four GGUF models
+  with no benchmark results to rank on.
+- CI and release workflows use the Node 24 majors of the GitHub actions
+  (checkout and setup-python v7, upload-artifact v7, download-artifact
+  v8); Node 20 is deprecated on the runners.
 
 ### Fixed
 
@@ -23,6 +30,8 @@ Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
   DSpark drafter was shown as DeepSeek-V4-Flash, all on GPU, and
   `imatrix.gguf` as Qwen3.5-122B. Files whose header holds a parameter
   count far from their model's are turned away.
+- `tests/test_live.py` read `PromptScreen.log_text`, which no longer
+  exists; it now waits for the reply in the transcript.
 
 ## [0.6.4] - 2026-09-17
 

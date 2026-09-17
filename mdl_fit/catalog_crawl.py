@@ -266,7 +266,7 @@ class Crawl:
                                ).fetchone()[0]
 
 
-def build(path, prev=None, popular=800, recent=200, minutes=40, log=None,
+def build(path, prev=None, popular=3000, recent=500, minutes=40, log=None,
           budget=None):
     if popular < 0 or recent < 0 or popular + recent < 1:
         raise catalog.CatalogError("seed counts must be non-negative, "
