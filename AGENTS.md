@@ -3,7 +3,7 @@
 Working notes for coding agents in the `mdl` repo. This is the canonical
 file; `CLAUDE.md` points here and adds only Claude Code specifics.
 
-Written against **0.6.2**. Where a fact is likely to drift, this says how to
+Written against **0.6.4**. Where a fact is likely to drift, this says how to
 re-derive it instead of quoting it.
 
 ## What this is
@@ -12,7 +12,7 @@ re-derive it instead of quoting it.
 from a config file, and works out what to run and how. Two halves:
 
 - **Running servers** — `run`, `stop`, `ps`, `list`, `add`, `check`, `init`,
-  `logs`, `ui`. All of this is `mdl.py` alone.
+  `config`, `logs`, `ui`. All of this is `mdl.py` alone.
 - **Deciding what to run** — `fit` (what a GGUF will do on this machine and
   with which flags), `eval` (score it on a private graded suite), `catalog`
   and `find` (what is worth running at all). All of this is `mdl_fit/`.
@@ -40,8 +40,8 @@ import ast,sys; print(sys.argv[1], '-', (ast.get_docstring(
 Roughly: `gguf` parses headers, `hw`/`usage` measure the machine, `model`
 places tensors, `perf` predicts speed, `search` enumerates configs,
 `calib` holds measured corrections, `explain`/`emit`/`cli` are presentation,
-`remote` reads headers of models you have not downloaded, `catalog` crawls
-the hub, `quality`/`find` rank models, `evalsuite`/`evalrun` are the eval.
+`remote` reads headers of models you have not downloaded, `catalog` holds
+and queries the hub snapshot and `catalog_crawl` builds it, `quality`/`find` rank models, `evalsuite`/`evalrun` are the eval.
 
 ## Commands you will need
 
@@ -110,10 +110,12 @@ Pushing a `v*` tag publishes to PyPI. There is no token: PyPI trusts the
 workflow via OIDC.
 
 ```sh
-git tag -a v0.6.2 -m "0.6.2" && git push origin v0.6.2
+# bump VERSION in mdl.py and add a CHANGELOG.md entry, commit, push main, then
+git tag -a v0.6.4 -m "0.6.4" && git push origin v0.6.4
 ```
 
-- The tag must equal `mdl.VERSION` or the build job fails on purpose.
+- The tag must equal `mdl.VERSION` or the build job fails on purpose. The
+  version lives only in `mdl.py`; `pyproject` reads it from there.
 - **This is irreversible.** PyPI will not accept a re-upload of a version, so
   a mistake ships as the next patch. Do not push a `v*` tag without the
   maintainer saying so explicitly.
@@ -132,12 +134,27 @@ suite, the 3.10 rejection, and a wheel+sdist install check.
 ~/.config/mdl/eval-seed       the eval seed (see below)
 ~/.config/mdl/evals.jsonl     eval results
 ~/.local/state/mdl/           pids, ports, logs
+~/.cache/mdl/catalog.sqlite   the pulled catalog snapshot
 ```
 
-`$XDG_CONFIG_HOME` / `$XDG_STATE_HOME` are honoured; on Windows the same
+`$XDG_CONFIG_HOME` / `$XDG_STATE_HOME` / `$XDG_CACHE_HOME` are honoured, and
+`$MDL_FIT_HOME` moves everything `mdl_fit` keeps (cache included) under one
+directory - the tests and the catalog workflow both use it; on Windows the same
 layout sits under `%USERPROFILE%`. The fast tests run against a temp config
 and a fake `llama-server`, so they never touch a real one — keep it that way
 when adding tests.
+
+## The UI, if you touch it
+
+- **Copying goes through `_clip()`, never `copy_to_clipboard()` alone.**
+  Textual's copy is an OSC 52 escape that nothing acknowledges; VTE
+  terminals and tmux drop it silently. `_clip()` also runs `wl-copy`,
+  `xclip`/`xsel` or `pbcopy`, and only claims "copied" when one of them
+  took it.
+- **Tests that patch `mdl_ui` globals must put them back.** `mdl_ui.shutil`
+  and `mdl_ui.subprocess` are the real modules, so replacing `which` or
+  `run` leaks into every later check in the run. One such leak hid on
+  Windows and only failed on Linux.
 
 ## The eval, if you touch it
 
@@ -174,10 +191,11 @@ machines share a suite. Consequences worth holding on to:
 ## Catalog
 
 The nightly hub crawl (`.github/workflows/catalog.yml`) is gated behind the
-repo variable `CATALOG_ENABLED == "true"` and does nothing on forks. Leave
-it off unless the maintainer asks. Manual dispatch bypasses the schedule's
-enable flag, but still requires the owner check; do not dispatch without
-the maintainer's approval.
+repo variable `CATALOG_ENABLED == "true"` and does nothing on forks. It is
+**on** (since 2026-09-17), running daily at 03:17 UTC and publishing to the
+`CATALOG_REPO` dataset (`diversemate/mdl-catalog`). Do not turn it off,
+change its scope or dispatch it without the maintainer's approval; manual
+dispatch bypasses the enable flag but still requires the owner check.
 
 The default builder (`mdl_fit/catalog_crawl.py`) takes 800 GGUF repos by
 downloads plus 200 by creation date, deduplicates them, and fetches only
