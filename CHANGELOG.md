@@ -10,6 +10,25 @@ Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
   back to Notepad on Windows or vi elsewhere. `mdl config --path` prints
   its location, including when `XDG_CONFIG_HOME` overrides the default.
 
+### Changed
+
+- The published catalog is built from the 800 most-downloaded GGUF repos
+  plus the 200 newest, with only their files and direct source models
+  fetched. A crawl has a 40-minute budget; when it runs out, the snapshot
+  is published as a partial with its work queue inside, and the next run
+  resumes from it. `mdl catalog stats`, `pull` and `find` say when a
+  snapshot is partial.
+
+### Fixed
+
+- Vision projectors, LoRA adapters, speculative drafts and MTP heads are
+  no longer listed as quants. A 1.4 GB MTP head read as the smallest
+  "Q4_0" of a 27B model, which `find` could pick when nothing else fit.
+  Snapshots already published are filtered when read.
+- `mdl catalog tree` names files that share a quant by what sets them
+  apart (`noMTP-Q4_K_M`, `IQ1_S-multilingual`) instead of repeating it.
+  NVFP4 is recognised as a quant.
+
 ## [0.6.2] - 2026-09-12
 
 0.6.0 and 0.6.1 were never released; everything since 0.5.2 is here.
