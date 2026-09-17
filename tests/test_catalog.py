@@ -181,13 +181,15 @@ AUX = ["MTP/mtp-Qwen3.8-27B-Q4_0.gguf", "mtp-Qwen3.8-27B-BF16.gguf",
        "Qwen3.8-27B-Fable-5-Coding-Distilled.mmproj-Q8_0.gguf",
        "gemma-4-E2B-it-mmproj.gguf", "vision-projector.gguf",
        "Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-FastMTP-32K.gguf",
-       "doctors/TAARDIS-27B-Doctors-V3.lora.gguf", "mmproj-F16.gguf"]
+       "doctors/TAARDIS-27B-Doctors-V3.lora.gguf", "mmproj-F16.gguf",
+       "imatrix.gguf", "imatrix_unsloth.gguf",
+       "dspark/dspark-DeepSeek-V4-Flash-0731-BF16.gguf"]
 MODELS = ["RVN-Q4_K_M-mtp.gguf", "RVN-IQ1_S-multilingual-mtp.gguf",
           "Qwen3.8-27B-Uncensored-noMTP-Q4_K_M.gguf",
           "Huihui-Qwen3.8-27B-abliterated-GSQ-RCO-IQ3_S-mtp.gguf",
           "RVN-Q3_K_M-vision.gguf", "Bonsai-27B-Q1_0.gguf",
           "Llama-3-8B-LoRA-merged-Q4_K_M.gguf", "UD-TQ2_0/Kimi-K3-UD-TQ2_0.gguf",
-          "Qwen3.8-27B-Q4_0.gguf"]
+          "Qwen3.8-27B-Q4_0.gguf", "Model-imatrix-Q4_K_M.gguf"]
 check("drafts, MTP heads, projectors and adapters are not quants",
       [n for n in AUX + MODELS if remote.auxiliary(n)], AUX)
 check("files sharing a quant are told apart, the rest keep it",

@@ -101,6 +101,38 @@ def fetch(c, cache_only=False):
     return remote.inventory(c.repo, c.key, c.shards)
 
 
+SAME_MODEL = 3.0       # header params may differ from the card's by this factor
+
+
+def same_model(inv, qm, nid):
+    """Whether a header can be the model the catalog filed it under.
+
+    Repos hold files that are not the model - speculative drafters under
+    new names every month, calibration data - and names cannot keep up.
+    An 11 GB DSpark drafter in a DeepSeek-V4-Flash repo was ranked as that
+    304B model, on the GPU, at 8 s a turn. The header's own parameter count
+    cannot be fooled that way. The bound is loose because a card counts a
+    vision tower the GGUF leaves in its projector.
+    """
+    want, have = card_params(qm, nid), inv.n_params
+    if not want or not have:
+        return True
+    return 1 / SAME_MODEL <= have / want <= SAME_MODEL
+
+
+def card_params(qm, nid):
+    node = qm.nodes.get(nid)
+    try:
+        return node["params"] if node else None
+    except (KeyError, IndexError):          # a local node carries none
+        return None
+
+
+def impostor(inv, qm, nid):
+    return "its header holds %.1fB parameters, not %s's %.1fB" % (
+        inv.n_params / 1e9, nid, card_params(qm, nid) / 1e9)
+
+
 def rescale(inv, size, source):
     """Another quant of the same model, from one header: the same tensors,
     each scaled to the file. Close enough to rank on."""
@@ -192,6 +224,9 @@ def best_fit(inv, mach, opts, profile):
 
 
 def evaluate(c, qm, mach, opts, profile, binary):
+    if c.repo and not same_model(c.inv, qm, c.node):
+        c.why = impostor(c.inv, qm, c.node)
+        return
     if hw.arch_supported(binary, c.inv.arch) is False:
         c.why = "llama.cpp here does not load %s" % c.inv.arch
         return
@@ -335,7 +370,10 @@ def fit_all(cands, qm, mach, opts, profile, binary, cache_only, notes):
                 c.why = str(e)
                 failed += 1
     for c in cands:
-        if c.inv is None and c.node in first and first[c.node].inv:
+        base = first.get(c.node)
+        # a sibling sized from an impostor's header would inherit its lie
+        if (c.inv is None and base and base.inv
+                and same_model(base.inv, qm, c.node)):
             base = first[c.node]
             c.inv = rescale(base.inv, c.size, "hf:%s/%s" % (c.repo, c.key))
     if failed:

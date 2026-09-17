@@ -270,6 +270,31 @@ check("else by being the same arch and size as a tracked model",
       (None, "Fam/Base", "fingerprint"))
 check("else by name", find.link_local(inv_of("my-Coder-q8.gguf", layers=2),
                                       nodes)[1:], ("ft/Coder", "name"))
+# A drafter or calibration file filed under a giant must not be ranked as
+# it: an 11 GB DSpark drafter was shown as DeepSeek-V4-Flash, all on GPU.
+fq = type("Q", (), {"nodes": {
+    "big/Giant": {"params": 304_000_000_000},
+    "Fam/Base-Instruct": nodes["Fam/Base-Instruct"],
+    "local:abc": {"id": "local:abc", "parent": None}}})()
+small = inv_of("draft.gguf")
+check("a header far smaller than its model's card is not that model",
+      [find.same_model(small, fq, n) for n in (
+          "big/Giant", "Fam/Base-Instruct", "local:abc", None)],
+      [False, True, True, True])
+real_fetch, fetched_now = find.fetch, []
+find.fetch = lambda c, cache_only=False: fetched_now.append(c.key) or small
+try:
+    drafts = [find.Cand("big/Giant", "big/Giant", q, size, "q/Giant-GGUF",
+                        "Giant-%s.gguf" % q, [])
+              for q, size in (("BF16", 11 * GiB), ("Q8_0", 10 * GiB))]
+    find.fit_all(drafts, fq, mach, opts, "agent", binary, False, [])
+finally:
+    find.fetch = real_fetch
+check("it is turned away with the reason in its header",
+      "not big/Giant's 304.0B" in (drafts[0].why or ""), True)
+check("and its sibling is not sized from the impostor's header",
+      (fetched_now, drafts[1].inv), (["Giant-BF16.gguf"], None))
+
 rescaled = find.rescale(inv_of("a"), 16_000_000, "b")
 check("a sized sibling keeps the shapes and takes the file size",
       (len(rescaled.tensors), rescaled.file_size <= 16_000_000,

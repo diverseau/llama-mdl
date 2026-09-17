@@ -93,8 +93,9 @@ def list_files(repo, revision="main"):
     return out
 
 
-AUX_WORDS = {"mmproj", "projector", "draft", "dflash", "fastmtp", "lora",
-             "adapter"}
+AUX_WORDS = {"mmproj", "projector", "draft", "dflash", "dspark", "fastmtp",
+             "lora", "adapter"}
+QUANT_WORD = re.compile(r"^(?:i?q\d|tq\d|bf16|f16|f32|fp16|mxfp4|nvfp4)")
 
 
 def auxiliary(name):
@@ -113,6 +114,11 @@ def auxiliary(name):
     if "lora" in flat and flat & {"merged", "merge"}:
         flat.discard("lora")                    # a merged LoRA is a model
     if flat & AUX_WORDS:
+        return True
+    # imatrix.gguf is calibration data; "X-imatrix-Q4_K_M.gguf" is a quant
+    # made with one, and names its quant
+    if "imatrix" in flat and not any(QUANT_WORD.match(w)
+                                     for ws in words for w in ws):
         return True
     # "mtp-X-Q4_0.gguf" and "MTP/..." are the head alone; "X-Q4_0-mtp.gguf"
     # is the whole model with its MTP layers kept, and is a quant.
