@@ -32,7 +32,7 @@ CONFIG_DIR = _base("XDG_CONFIG_HOME", ".config") / "mdl"
 CONFIG = CONFIG_DIR / "models.toml"
 STATE_DIR = _base("XDG_STATE_HOME", ".local", "state") / "mdl"
 STATE = STATE_DIR / "state.json"
-VERSION = "0.6.10"
+VERSION = "0.6.11"
 DEFAULT_BIN = "llama-server"
 CONFIG_DATA = {}          # last parsed config, for UI-only settings
 DEFAULT_PORT = 8080
@@ -1121,7 +1121,7 @@ def cmd_add(args):
         die(f"no such file: {path}")
     # absolute: a relative path only works from the directory it was
     # added in, and `mdl run` is run from anywhere
-    path = path.resolve()
+    path = Path(os.path.abspath(path))   # not resolve(): keep their links
     if len(args) > 1:
         name = check_name(args[1])
     else:                       # Foo-Bar-Q4_K_M.gguf -> foo-bar

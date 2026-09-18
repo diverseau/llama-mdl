@@ -2,6 +2,14 @@
 
 Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
 
+## [0.6.11] - 2026-09-18
+
+### Fixed
+
+- `mdl add` makes a relative path absolute without resolving it, so a
+  path through a symlink or a Windows short name is stored as written
+  rather than rewritten to its target (0.6.9 resolved it).
+
 ## [0.6.10] - 2026-09-18
 
 ### Fixed
