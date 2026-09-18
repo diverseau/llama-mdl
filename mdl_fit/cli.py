@@ -513,13 +513,14 @@ def as_json(ctx_obj, opts, result, target, current):
 
 def write_new(name, keys, comment):
     import mdl
+    mdl.check_name(name)
     models, _ = mdl.load_config()
     if name in models:
         die("%s is already in %s; pick another name, or use --apply "
             "on it" % (name, mdl.CONFIG))
     text = mdl.CONFIG.read_text(encoding="utf-8")
-    mdl.write_atomic(mdl.CONFIG, text.rstrip("\n") + "\n\n" +
-                     emit.block(name, keys, comment), keep_backup=True)
+    mdl.append_table(text.rstrip("\n") + "\n\n",
+                     emit.block(name, keys, comment), name)
     print("added [%s] to %s" % (name, mdl.CONFIG))
 
 
@@ -1115,8 +1116,12 @@ def main(args, out=None):
         return cmd_calibrate(args[1:], out)
     o = parse(args)
     if o["target"].startswith("hf:"):
-        if o.get("explain") or o.get("verify") or o.get("apply"):
-            die("--explain, --verify and --apply need a model on disk")
+        if (o.get("explain") or o.get("verify") or o.get("apply")
+                or o.get("write")):
+            # nothing is downloaded, so there is no file for a preset to
+            # point at: saying "added" would leave eval nothing to run
+            die("--explain, --verify, --apply and --write need a model on "
+                "disk; download the quant, then mdl fit <file> --write NAME")
         return cmd_hf(o["target"], o, out)
     target = resolve(o["target"])
     if o.get("explain"):

@@ -29,8 +29,9 @@ check("full flag mapping", " ".join(argv[1:]),
       "-m %s -ngl 99 -c 4096 -np 1 --port %d -fa on "
       "--cache-type-k q8_0 --cache-type-v q8_0 --metrics"
       % (str(support.FAKE).replace("\\", "/"), port))
-check("flash_attn=false omits -fa",
-      mdl.build_argv("x", {"model": "m", "flash_attn": False}, "LS"), ["LS", "-m", "m"])
+check("flash_attn=false is -fa off, not the build's default (B09)",
+      mdl.build_argv("x", {"model": "m", "flash_attn": False}, "LS"),
+      ["LS", "-m", "m", "-fa", "off"])
 check("port defaults to 8080",
       mdl.build_argv("x", {"model": "m"}, "LS"), ["LS", "-m", "m"])
 
@@ -43,6 +44,38 @@ check("missing model key", (err.strip(), code),
 _, err, code = run(mdl.build_argv, "x", {"model": "m", "args": "-f"}, "LS")
 check("args must be a list", (err.strip(), code),
       ("mdl: model 'x': 'args' must be a list of strings", 1))
+
+# B12: every key is checked at the boundary, one line each, before any
+# socket code or subprocess sees it
+for cfg, words in (
+        ({"port": "8080"}, "'port' must be a number"),
+        ({"port": 70000}, "'port' must be a number"),
+        ({"port": 0}, "'port' must be a number"),
+        ({"port": True}, "'port' must be a number"),
+        ({"ctx": -1}, "'ctx' must be"),
+        ({"ctx": "8k"}, "'ctx' must be"),
+        ({"parallel": 0}, "'parallel' must be"),
+        ({"ngl": "most"}, "'ngl' must be"),
+        ({"flash_attn": "yes"}, "'flash_attn' must be true or false"),
+        ({"kv_type": "q8 0"}, "'kv_type' must be"),
+        ({"args": ["-t", 4]}, "'args' must be a list of strings"),
+        ({"model": ""}, "'model' must be"),
+        ({"args": ["--port", "9000"]}, "'--port' in args would override"),
+        ({"args": ["--port=9000"]}, "'--port' in args would override"),
+        ({"args": ["-m", "other.gguf"]}, "'-m' in args would override")):
+    _, err, code = run(mdl.build_argv, "x", dict({"model": "m"}, **cfg), "LS")
+    check("config %r is one line" % (cfg,),
+          (words in err, err.count("\n"), code), (True, 1, 1))
+check("ngl takes what llama.cpp takes",
+      [mdl.build_argv("x", {"model": "m", "ngl": v}, "LS")[4]
+       for v in (0, 99, -1, "all")], ["0", "99", "-1", "all"])
+for bad in ("bad name", "a/b", "../up", ".hidden", "", "x" * 65):
+    _, err, code = run(mdl.check_name, bad)
+    check("the name %r is refused (B07)" % bad,
+          ("bad model name" in err, code), (True, 1))
+check("names with dots are quoted as TOML keys",
+      [mdl.toml_key(n) for n in ("qwen3", "qwen3.5-9b")],
+      ["qwen3", '"qwen3.5-9b"'])
 
 os.environ["MDL_LLAMA_SERVER"] = "/opt/llama-server"
 check("env var beats config", mdl.load_config()[1], "/opt/llama-server")

@@ -911,6 +911,7 @@ def main(args, out=None):
            "sampling": sampling_of(mdl.build_argv(name, models[name],
                                                   binary)),
            "suite_version": evalsuite.SUITE_VERSION,
+           "grader_version": evalsuite.GRADER_VERSION,
            "seed_id": evalsuite.seed_id(seed),
            "items_hash": evalsuite.fingerprint(items),
            "suites": summarize(done, "suite"),

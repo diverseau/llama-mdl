@@ -17,7 +17,8 @@ VALUE_FLAGS = {"-c", "--ctx-size", "-ngl", "--n-gpu-layers", "--gpu-layers",
                "--batch-size", "-ub", "--ubatch-size", "-np", "--parallel",
                "-t", "--threads", "-lm", "--load-mode", "-fit", "--fit"}
 BOOL_FLAGS = {"--no-mmap", "--mmap", "-cmoe", "--cpu-moe", "--swa-full",
-              "-kvu", "--kv-unified"}
+              "-kvu", "--kv-unified", "--no-kv-unified", "--no-mmproj-offload",
+              "--mmproj-offload"}
 
 
 def ngl_value(flags, n_layer):
@@ -40,6 +41,8 @@ def extra_args(flags, features):
         out += ["-t", str(flags.threads)]
     if flags.swa_full:
         out.append("--swa-full")
+    if flags.kvu:
+        out.append("--kv-unified")
     if features.get("fit_flag"):
         # What runs must be exactly what was predicted; llama.cpp's own
         # --fit would otherwise nudge whatever we left unset.
@@ -66,6 +69,9 @@ def strip_owned(args):
     out, i = [], 0
     while i < len(args):
         a = str(args[i])
+        if a.split("=", 1)[0] in VALUE_FLAGS | BOOL_FLAGS and "=" in a:
+            i += 1                       # --ctx-size=8192: one token
+            continue
         if a in VALUE_FLAGS:
             i += 2
             continue
@@ -117,7 +123,7 @@ def stamp(profile, gpu_bytes, usable_bytes, tps, build):
 def block(name, keys, comment=None):
     """A [name] table as TOML text, in the order mdl add writes them."""
     import mdl                      # toml_value lives with the config code
-    lines = ["[%s]" % name]
+    lines = ["[%s]" % mdl.toml_key(name)]
     for key, value in keys.items():
         lines.append("%s = %s" % (key, mdl.toml_value(value)))
     if comment:

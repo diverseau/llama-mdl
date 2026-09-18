@@ -31,6 +31,10 @@ from pathlib import Path
 from . import hw
 
 SUITE_VERSION = 4
+# Bump when a grader changes what it pays for, without the questions
+# changing: scores either side of it are not the same measurement.
+# 2: the code grader stopped reading the harness's stdout and exit code.
+GRADER_VERSION = 2
 SUITES = ("code", "tools", "longctx", "instruct", "reason")
 DOMAIN = {"code": "coding", "tools": "agentic", "longctx": "long-context",
           "instruct": "general", "reason": "reasoning", "custom": "general"}
@@ -102,22 +106,28 @@ def fingerprint(items):
     bump it. This is computed from what was actually asked, so two runs
     that claim to be comparable can be checked rather than trusted.
     """
-    h = hashlib.sha256()
-    for it in items:
-        h.update(it.id.encode())
-        h.update(b"\0")
-        # a long document is named by its size, not its megabyte of filler
-        body = ("doc:%s:%s" % (it.meta.get("doc"), it.meta.get("tokens"))
-                if it.meta.get("doc") else it.text(4.0))
-        h.update(body.encode("utf-8", "replace"))
-        h.update(b"\0")
-        h.update(repr(sorted((k, v) for k, v in it.meta.items()
-                             if k != "reference")).encode())
-        h.update(b"\0")
-        h.update(repr([t.get("function", {}).get("name")
-                       for t in (it.tools or [])]).encode())
-        h.update(b"\n")
-    return h.hexdigest()[:12]
+    return hashlib.sha256(json.dumps(
+        [spec(it) for it in items], default=repr).encode()).hexdigest()[:12]
+
+
+def spec(it):
+    """One item as a task: everything the model is shown and everything
+    it is graded on, canonically. Tool names alone missed a changed
+    parameter schema; a document's name and size missed its content.
+
+    A long document is taken at a fixed 4 characters a token, so it names
+    the logical document, not how many tokens this model's tokenizer made
+    of it - the same task compares across models, as it is meant to.
+    """
+    body = it.text(4.0)
+    return {"id": it.id, "suite": it.suite, "system": it.system or "",
+            "prompt": hashlib.sha256(body.encode("utf-8", "replace"))
+            .hexdigest(),
+            "tools": it.tools or [], "max_tokens": it.max_tokens,
+            "multi_step": it.world is not None,
+            "meta": {k: v for k, v in sorted(it.meta.items())
+                     if k != "reference"},
+            "grader": GRADER_VERSION, "suite_version": SUITE_VERSION}
 
 
 def rng_for(seed, suite):

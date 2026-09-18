@@ -41,6 +41,34 @@ out, _, _ = run(mdl.cmd_add, [str(GGUF), "ported", "9001"])
 check("add honours an explicit port",
       tomllib.loads(mdl.CONFIG.read_text(encoding="utf-8"))["ported"]["port"], 9001)
 
+# B07: a relative path only worked from where it was added, and a name
+# with a space wrote a table the next load could not parse
+before = mdl.CONFIG.read_text(encoding="utf-8")
+for bad in ("bad name", "a/b", "../x"):
+    _, err, code = run(mdl.cmd_add, [str(GGUF), bad])
+    check("add refuses the name %r" % bad, ("bad model name" in err, code),
+          (True, 1))
+check("and writes nothing", mdl.CONFIG.read_text(encoding="utf-8"), before)
+for p in ("70000", "0"):
+    _, err, code = run(mdl.cmd_add, [str(GGUF), "p" + p, p])
+    check("add refuses port %s" % p, ("from 1 to 65535" in err, code),
+          (True, 1))
+here = os.getcwd()
+os.chdir(GGUF.parent)
+try:
+    out, _, code = run(mdl.cmd_add, [GGUF.name, "relative"])
+finally:
+    os.chdir(here)
+saved = tomllib.loads(mdl.CONFIG.read_text(encoding="utf-8"))
+check("a relative path is stored absolute",
+      (code, Path(saved["relative"]["model"]).is_absolute(),
+       Path(saved["relative"]["model"]).resolve() == GGUF.resolve()),
+      (0, True, True))
+out, _, code = run(mdl.cmd_add, [str(GGUF), "qwen3.5-9b"])
+check("a name with a dot is written quoted and reads back",
+      (code, "qwen3.5-9b" in tomllib.loads(
+          mdl.CONFIG.read_text(encoding="utf-8"))), (0, True))
+
 check("gguf_layers returns None for a non-gguf", mdl.gguf_layers(GGUF), None)
 check("human_size",
       [mdl.human_size(n) for n in (900, 4096, 5 << 20, 3 << 30, 2 << 40)],

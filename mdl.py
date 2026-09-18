@@ -32,7 +32,7 @@ CONFIG_DIR = _base("XDG_CONFIG_HOME", ".config") / "mdl"
 CONFIG = CONFIG_DIR / "models.toml"
 STATE_DIR = _base("XDG_STATE_HOME", ".local", "state") / "mdl"
 STATE = STATE_DIR / "state.json"
-VERSION = "0.6.8"
+VERSION = "0.6.9"
 DEFAULT_BIN = "llama-server"
 CONFIG_DATA = {}          # last parsed config, for UI-only settings
 DEFAULT_PORT = 8080
@@ -101,6 +101,25 @@ def load_config():
     binary = (os.environ.get("MDL_LLAMA_SERVER")
               or data.get("llama_server") or DEFAULT_BIN)
     return models, str(binary)
+
+
+# A model's name is a TOML table name and a file name (its state and its
+# log), so it is held to what is safe as both: letters, digits, - _ and
+# ., starting with a letter or digit. A dot needs quoting in TOML, which
+# toml_key does; a slash or a space is never allowed.
+NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+
+
+def check_name(name):
+    if not isinstance(name, str) or not NAME.match(name):
+        die(f"bad model name {name!r}: use letters, digits, - _ and ., "
+            f"starting with a letter or digit")
+    return name
+
+
+def toml_key(name):
+    """A table name as TOML text: bare when it can be, quoted otherwise."""
+    return name if re.fullmatch(r"[A-Za-z0-9_-]+", name) else toml_value(name)
 
 
 def toml_path(path):
@@ -238,6 +257,20 @@ def write_params(name, cfg, path=None, drop=()):
     write_atomic(path, out, keep_backup=True)
 
 
+def append_table(current, block, name, path=None):
+    """Add a new [name] table, refusing if the result would not parse or
+    would not hold exactly one table of that name."""
+    path = path or CONFIG
+    out = current + block
+    try:
+        got = tomllib.loads(out)
+    except tomllib.TOMLDecodeError as e:
+        die(f"not writing {path}: the new [{name}] would not parse ({e})")
+    if not isinstance(got.get(name), dict):
+        die(f"not writing {path}: [{name}] would not read back as a table")
+    write_atomic(path, out, keep_backup=True)
+
+
 def patch_params(name, changes, path=None, drop=()):
     """Set `changes` in [name] and remove `drop`, keeping every other key.
 
@@ -258,34 +291,93 @@ def patch_params(name, changes, path=None, drop=()):
     write_params(name, merged, path=path)
 
 
-def build_argv(name, cfg, binary):
+def check_port(value, where=""):
+    """A port as an int in 1..65535, or one line saying why not. A string
+    port used to reach socket code as a TypeError, 70000 an OverflowError."""
+    if isinstance(value, str) and value.strip().isdigit():
+        value = int(value)
+    if isinstance(value, bool) or not isinstance(value, int) \
+            or not 1 <= value <= 65535:
+        die(f"{where}port must be a number from 1 to 65535, not {value!r}")
+    return value
+
+
+# What each key may hold. ngl takes -1/"all"/"auto" the way llama.cpp does.
+def _is_count(v, lo=0):
+    return isinstance(v, int) and not isinstance(v, bool) and v >= lo
+
+
+CHECKS = {
+    "model": (lambda v: isinstance(v, str) and v.strip() != "",
+              "a path to a .gguf"),
+    "mmproj": (lambda v: isinstance(v, str) and v.strip() != "",
+               "a path to a .gguf"),
+    "llama_server": (lambda v: isinstance(v, str) and v.strip() != "",
+                     "a non-empty string"),
+    "ngl": (lambda v: _is_count(v, -1) or v in ("all", "auto"),
+            "a layer count, or \"all\""),
+    "n_cpu_moe": (lambda v: _is_count(v), "a count, 0 or more"),
+    "ctx": (lambda v: _is_count(v), "a token count, 0 or more"),
+    "parallel": (lambda v: _is_count(v, 1), "a count, 1 or more"),
+    "flash_attn": (lambda v: isinstance(v, bool), "true or false"),
+    "kv_type": (lambda v: isinstance(v, str) and re.fullmatch(
+        r"[A-Za-z0-9_]+", v) is not None, "a cache type such as q8_0"),
+    "group": (lambda v: isinstance(v, str), "a string"),
+    "args": (lambda v: isinstance(v, list)
+             and all(isinstance(a, str) for a in v), "a list of strings"),
+}
+
+# Flags that decide where the server is and what it serves. mdl reads
+# model and port from their keys for its state, its pre-flight and its
+# health check; the same flag in args would win at llama-server and send
+# all three looking in the wrong place.
+OWNED = {"-m": "model", "--model": "model", "--port": "port",
+         "-mu": "model", "--model-url": "model",
+         "-hf": "model", "-hfr": "model", "--hf-repo": "model"}
+
+
+def check_cfg(name, cfg):
     unknown = sorted(set(cfg) - KNOWN)
     if unknown:
         die(f"model '{name}': unknown key(s): {', '.join(unknown)}")
     if "model" not in cfg:
         die(f"model '{name}': missing required key 'model'")
+    for key, (ok, what) in CHECKS.items():
+        if key in cfg and not ok(cfg[key]):
+            die(f"model '{name}': '{key}' must be {what}")
+    if "port" in cfg:
+        # the config's own port must already be a number: a string would
+        # reach the socket code from spawn() however it was checked here
+        port = cfg["port"]
+        if not _is_count(port, 1) or port > 65535:
+            die(f"model '{name}': 'port' must be a number from 1 to 65535")
+    for a in cfg.get("args", []):
+        flag = a.split("=", 1)[0]
+        if flag in OWNED:
+            die(f"model '{name}': '{flag}' in args would override its "
+                f"'{OWNED[flag]}' key, which mdl reads; set the key instead")
+
+
+def build_argv(name, cfg, binary):
+    check_name(name)
+    check_cfg(name, cfg)
     # A model that needs its own build - a fork with a quant type upstream
     # does not load yet - names it, and that beats MDL_LLAMA_SERVER: the
     # environment says what to use by default, the model says what it needs.
     if "llama_server" in cfg:
         binary = cfg["llama_server"]
-        if not isinstance(binary, str) or not binary.strip():
-            die(f"model '{name}': 'llama_server' must be a non-empty string")
     argv = [binary, "-m", str(cfg["model"])]
     if "mmproj" in cfg:          # the vision half of a multimodal model
         argv += ["--mmproj", str(cfg["mmproj"])]
     for key, flag in SIMPLE:
         if key in cfg:
             argv += [flag, str(cfg[key])]
-    if cfg.get("flash_attn"):
-        argv += ["-fa", "on"]
+    if "flash_attn" in cfg:     # false is "off", not "whatever the default is"
+        argv += ["-fa", "on" if cfg["flash_attn"] else "off"]
     if "kv_type" in cfg:
         kv = str(cfg["kv_type"])
         argv += ["--cache-type-k", kv, "--cache-type-v", kv]
-    extra = cfg.get("args", [])
-    if not isinstance(extra, list):
-        die(f"model '{name}': 'args' must be a list of strings")
-    return argv + [str(a) for a in extra]
+    return argv + list(cfg.get("args", []))
 
 
 def ready_timeout():
@@ -389,7 +481,7 @@ def run_dir():
 
 
 def state_path(name):
-    return run_dir() / f"{name}.json"
+    return run_dir() / f"{check_name(name)}.json"
 
 
 def migrate_state():
@@ -694,7 +786,7 @@ def spawn(name, models, binary, port=None):
         die(f"port {port} is already in use")
     try:
         run_dir().mkdir(parents=True, exist_ok=True)
-        log = STATE_DIR / f"{name}.log"
+        log = STATE_DIR / f"{check_name(name)}.log"
         rotate(log)
         handle = open(log, "wb")
     except OSError as e:
@@ -718,10 +810,7 @@ def spawn(name, models, binary, port=None):
 def cmd_run(args):
     port = None
     if len(args) == 3 and args[1] == "--port":
-        try:
-            port = int(args[2])
-        except ValueError:
-            die(f"port must be a number, not {args[2]!r}")
+        port = check_port(args[2])
         args = args[:1]
     if len(args) != 1:
         die("usage: mdl run <name> [--port N]")
@@ -966,23 +1055,24 @@ def cmd_add(args):
     path = Path(args[0]).expanduser()
     if not path.is_file():
         die(f"no such file: {path}")
+    # absolute: a relative path only works from the directory it was
+    # added in, and `mdl run` is run from anywhere
+    path = path.resolve()
     if len(args) > 1:
-        name = args[1]
+        name = check_name(args[1])
     else:                       # Foo-Bar-Q4_K_M.gguf -> foo-bar
         stem = re.sub(r"[-_.]?(q\d+[_0-9a-z]*|f16|f32|bf16)$", "", path.stem,
                       flags=re.I)
         name = re.sub(r"[^A-Za-z0-9_-]+", "-", stem).strip("-").lower()
-    try:
-        port = int(args[2]) if len(args) > 2 else DEFAULT_PORT
-    except ValueError:
-        die(f"port must be a number, not {args[2]!r}")
+        name = name[:64].strip("-") or "model"
+    port = check_port(args[2]) if len(args) > 2 else DEFAULT_PORT
     models, _ = load_config()
     if name in models:
         die(f"{name} is already in {CONFIG}; pick another name")
     layers = gguf_layers(path)
     mmproj = find_mmproj(path)
     block = (
-        f"{chr(10)}[{name}]{chr(10)}"
+        f"{chr(10)}[{toml_key(name)}]{chr(10)}"
         f'model = "{toml_path(path)}"{chr(10)}'
         + (f'mmproj = "{toml_path(mmproj)}"{chr(10)}' if mmproj else "")
         + f"ngl = 99{chr(10)}ctx = 8192{chr(10)}flash_attn = true{chr(10)}"
@@ -990,7 +1080,7 @@ def cmd_add(args):
         f'args = ["--metrics"]{chr(10)}')
     try:
         current = CONFIG.read_text(encoding="utf-8")
-        write_atomic(CONFIG, current + block, keep_backup=True)
+        append_table(current, block, name)
     except OSError as e:
         die(f"cannot write {CONFIG}: {e}")
     print(f"added [{name}] to {CONFIG}")
@@ -1056,7 +1146,7 @@ def cmd_logs(args):
     if len(rest) > 1:
         die("usage: mdl logs [-f] [name]")
     if rest:
-        log = STATE_DIR / (rest[0] + ".log")
+        log = STATE_DIR / (check_name(rest[0]) + ".log")
     else:
         state = read_state()          # errors if several are running
         if not state:

@@ -46,6 +46,31 @@ check("the seed is made once and kept", evalsuite.secret(),
       evalsuite.secret())
 check("results name the item set, not the seed",
       len(evalsuite.seed_id(seed)), 8)
+# B10: the fingerprint names the task, not just its id and prompt
+base = evalsuite.Item("x", "x-1", "Q?", None, system="Be brief.",
+                      tools=[{"type": "function", "function": {
+                          "name": "f", "parameters": {"type": "object",
+                                                      "properties": {}}}}])
+
+
+def variant(**kw):
+    d = dict(suite="x", iid="x-1", prompt="Q?", grade=None,
+             system="Be brief.", tools=base.tools)
+    d.update(kw)
+    return evalsuite.fingerprint([evalsuite.Item(**d)])
+
+
+check("the same task, the same fingerprint",
+      variant(), evalsuite.fingerprint([base]))
+check("another system prompt is another task",
+      variant(system="Be thorough.") != variant(), True)
+check("so is another parameter schema under the same tool name",
+      variant(tools=[{"type": "function", "function": {
+          "name": "f", "parameters": {"type": "object", "properties": {
+              "x": {"type": "string"}}}}}]) != variant(), True)
+check("and another document behind the same name and size",
+      variant(prompt=lambda cpt: "doc A") != variant(prompt=lambda cpt: "doc B"),
+      True)
 check("limit takes the first N of each suite",
       len(evalsuite.build(["code", "reason"], seed, limit=3)), 6)
 

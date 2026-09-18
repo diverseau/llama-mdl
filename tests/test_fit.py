@@ -445,6 +445,36 @@ check("a matched pair is kv_type", same.get("kv_type"), "q8_0")
 check("the block parses as TOML",
       tomllib.loads(emit.block("x", keys, "# stamp"))["x"]["n_cpu_moe"], 15)
 
+# B09: Flags -> models.toml -> the command mdl runs -> Flags, for every
+# flag the fit models. ngl is compared as written (99 for "all"), and
+# mmproj/mtp are not models.toml's to carry.
+MODELLED = ("ctx", "ncmoe", "fa", "ctk", "ctv", "b", "ub", "np", "mmap",
+            "swa_full", "kvu", "threads", "mmproj_offload")
+for label, flags in (
+        ("the defaults", model.Flags(ngl=20)),
+        ("flash attention off", model.Flags(ngl=20, fa=False)),
+        ("asymmetric KV", model.Flags(ngl=20, ctk="q8_0", ctv="q4_0")),
+        ("unified KV", model.Flags(ngl=20, kvu=True)),
+        ("no mmap", model.Flags(ngl=20, mmap=False)),
+        ("SWA full, threads, MoE on CPU",
+         model.Flags(ngl=20, swa_full=True, threads=6, ncmoe=4)),
+        ("projector on the CPU", model.Flags(ngl=20, mmproj_offload=False))):
+    for features in ({}, feats):
+        k, _ = emit.table(flags, "m.gguf", 40, features, mmproj="p.gguf",
+                          keep_args=["--kv-unified", "--no-mmproj-offload",
+                                     "--ctx-size=512", "--jinja"])
+        cmd = mdl.build_argv("x", tomllib.loads(emit.block("x", k))["x"], "LS")
+        back = model.parse_argv(cmd)[0]
+        check("%s round-trips%s" % (label, " (newer build)" if features
+                                    else ""),
+              {f: getattr(back, f) for f in MODELLED},
+              {f: getattr(flags, f) for f in MODELLED})
+check("--flag=value is read, not skipped",
+      model.parse_argv(["LS", "--ctx-size=8192", "--flash-attn=off"])[0]
+      .as_dict()["ctx"], 8192)
+check("and stripped when a fit takes that flag over",
+      emit.strip_owned(["--ctx-size=512", "--jinja", "-c", "9"]), ["--jinja"])
+
 # ================================================================ CLI ===
 
 hw.probe = lambda *a, **k: machine(vram=int(0.02 * GiB), ram=GiB)
@@ -631,6 +661,11 @@ out, err, code = run(mdl.cmd_fit, ["hf:" + REPO, "--profile", "chat",
 check("mdl fit hf:repo tables every quant without downloading",
       (code, "Some-Model-Q8_0" in out, "nothing downloaded" in out),
       (0, True, True))
+before = mdl.CONFIG.read_text(encoding="utf-8")
+_, err, code = run(mdl.cmd_fit, ["hf:" + REPO, "--write", "remote"])
+check("hf: --write is refused rather than writing nothing (B08)",
+      ("need a model on disk" in err, code,
+       mdl.CONFIG.read_text(encoding="utf-8") == before), (True, 1, True))
 teardown(root)
 server.shutdown()
 

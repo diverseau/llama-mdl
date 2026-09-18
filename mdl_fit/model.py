@@ -105,6 +105,9 @@ def parse_argv(argv):
         flag = argv[i]
         val = argv[i + 1] if i + 1 < len(argv) else ""
         took = 2
+        if flag.startswith("--") and "=" in flag:     # --ctx-size=8192
+            flag, val = flag.split("=", 1)
+            argv = argv[:i] + [flag, val] + argv[i + 1:]
         try:
             if flag in ("-m", "--model"):
                 model = val
@@ -143,10 +146,14 @@ def parse_argv(argv):
                 f.swa_full, took = True, 1
             elif flag in ("-kvu", "--kv-unified"):
                 f.kvu, took = True, 1
+            elif flag == "--no-kv-unified":
+                f.kvu, took = False, 1
             elif flag in ("-mm", "--mmproj"):
                 mmproj_path = val
             elif flag == "--no-mmproj-offload":
                 f.mmproj_offload, took = False, 1
+            elif flag == "--mmproj-offload":
+                f.mmproj_offload, took = True, 1
             elif flag == "--spec-type":
                 f.mtp = "mtp" in val
                 if not f.mtp:

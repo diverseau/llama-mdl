@@ -324,4 +324,10 @@ check("nothing without a fit is ranked, whatever else it carries",
 check("a row is tried once, so refinement settles",
       find.refine([guess], qm, mach, opts, "agent", binary, False), False)
 
+remote_row = next(c for c in cands if c.repo)
+check("find's next step for a remote quant names the file to fetch, and "
+      "never an hf: --write that writes nothing (B08)",
+      (remote_row.key in find.next_step(remote_row),
+       "hf:" in find.next_step(remote_row)), (True, False))
+
 sys.exit(t.done())

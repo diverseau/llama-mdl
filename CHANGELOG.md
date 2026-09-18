@@ -2,6 +2,38 @@
 
 Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
 
+## [0.6.9] - 2026-09-18
+
+### Changed
+
+- Every model's settings are checked before anything runs, each fault
+  one line: `port` a number from 1 to 65535, counts not negative,
+  `parallel` at least 1, `flash_attn` a real true/false, `args` a list
+  of strings. A string port used to reach the socket code as a
+  traceback. A `--port` or `-m` in `args` is refused: it would override
+  the key mdl reads for its state, its pre-flight and its health check.
+- Model names are letters, digits, `-`, `_` and `.`, starting with a
+  letter or digit - they name a TOML table and the state and log files.
+  A name with a dot is written quoted.
+- `mdl eval` results carry a new fingerprint that covers each item's
+  system prompt, full tool schemas, reply cap and document content, and
+  the grader version. Runs from before this release are not comparable
+  with later ones, and `--compare` says so rather than subtracting them.
+
+### Fixed
+
+- `mdl add` stored a relative path as given, so the model only ran from
+  the directory it was added in; it stores the absolute path now. A name
+  like `bad name` wrote a table the next load could not parse; it is
+  refused, and so is the whole write if the result would not parse.
+- `mdl fit hf:... --write NAME` said nothing and wrote nothing; it is
+  refused with the step that works (download, then fit the file), and
+  `mdl find` suggests that step instead.
+- `flash_attn = false` now runs `-fa off` rather than whatever the build
+  defaults to. Unified KV (`--kv-unified`) survives a fit, a projector's
+  placement changes cleanly both ways, and `--flag=value` forms are read
+  and replaced like the spaced ones.
+
 ## [0.6.8] - 2026-09-18
 
 ### Fixed

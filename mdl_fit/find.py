@@ -453,8 +453,9 @@ def next_step(c):
     if c.local:
         return "mdl eval %s" % c.local
     name = re.sub(r"[^a-z0-9-]+", "-", c.node.split("/")[-1].lower()).strip("-")
-    return "mdl fit hf:%s:%s --write %s && mdl eval %s" % (
-        c.repo, c.quant, name, name)
+    # mdl does not download: the step is to fetch the file, then fit it
+    return "download %s/%s, then mdl fit <file> --write %s && mdl eval %s" % (
+        c.repo, c.key, name, name)
 
 
 def clip(s, n):
