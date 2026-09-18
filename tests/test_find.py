@@ -438,6 +438,9 @@ check("unrated models explain worth testing and inherited evidence",
       [s in fresh_text for s in ("worth testing · rank #1", "unrated",
                                  "inherited from Fam/Base-Instruct",
                                  "humaneval = 70")], [True] * 4)
+check("a model with evidence of its own does not claim to inherit it",
+      ("blended in as a prior" in ranked_text,
+       "estimate inherited" in ranked_text), (True, False))
 check("case-insensitive unique substring matches the same model",
       why_run("--why", "base-INSTRUCT"), ranked_text)
 for query, expected in (("Fam/", ("ambiguous", "Fam/Base",

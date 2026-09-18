@@ -744,8 +744,13 @@ def show_why(data, w):
       "%s · %s scale · %s\n" % (q["mean"], q["lo"], q["hi"],
                                 "rated" if q["rated"] else "unrated",
                                 data["scale"], ", ".join(q["kinds"])))
-    w("parent   %s\n" % ("inherited from " + " → ".join(q["parents"])
-                           if q["inherited"] else "no inherited estimate"))
+    # a parent's estimate is always blended in as a prior; it is only
+    # "inherited" when the model has no evidence of its own to outweigh it
+    own = set(q["kinds"]) & {"verified", "reported", "local"}
+    chain = " → ".join(q["parents"])
+    w("parent   %s\n" % ("none" if not q["parents"] else
+                           chain + " blended in as a prior" if own else
+                           "estimate inherited from " + chain))
     for b in q["benchmarks"]:
         w("  %s · %s = %g · %s\n" % (b["node"], b["benchmark"], b["value"],
                                       "verified" if b["verified"] else

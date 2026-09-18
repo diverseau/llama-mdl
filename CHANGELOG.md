@@ -2,6 +2,21 @@
 
 Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
 
+## [0.6.15] - 2026-09-19
+
+### Added
+
+- `mdl find --why MODEL` explains one model instead of printing the
+  table: where it ranks, or why it is not shown; every quant considered,
+  each with its fit or the reason it was turned away (too big, an
+  architecture this build does not load, a header that is not the model
+  it claims to be, the floor it misses, a header that could not be had,
+  a quant not kept); the public benchmarks its estimate rests on, the
+  parent it borrows from, the quant and KV penalty, and what beat it.
+  MODEL is a catalog id, a models.toml name or a unique part of either;
+  `--json` for scripts. The estimate is labelled for what it is: a
+  heuristic for a shortlist.
+
 ## [0.6.14] - 2026-09-19
 
 ### Added
