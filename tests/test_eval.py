@@ -695,6 +695,15 @@ check("a finished run replaces its own partial records, and nothing else",
       [(r["name"], r.get("n")) for r in evalrun.load()],
       [("other", None), ("m", 3)])
 os.environ["MDL_FIT_HOME"] = str(TMP / "home")
+held = TMP / "held.lock"
+held.write_text(str(os.getpid()))           # a live eval holds it
+import mdl  # noqa: E402
+
+_, err, code = support.run(mdl.file_lock(held, "another mdl eval is "
+                                         "running these items").__enter__)
+check("a second eval of the same items on the same server is refused "
+      "(peer review)", ("another mdl eval" in err, code), (True, 1))
+held.unlink()
 check("a container runtime that is not there is not usable",
       evalrun.usable_runtime(str(TMP / "no-such-docker")), False)
 

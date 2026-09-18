@@ -538,16 +538,26 @@ check("a profile is its exact configuration: model, build, binary, flags",
           base, ("h2",) + base[1:], ("h", 10425) + base[2:],
           ("h", 10424, "/bin/other", base[3]),
           base[:3] + (model.Flags(ctx=16384),))}), 5)
+check("the whole command is in the key: -ot changes the speed, the port "
+      "and the model path do not (peer review)",
+      [calib.profile_key(*base, argv=a) for a in (
+          ["srv", "-m", "a.gguf", "--port", "1", "-ot", "exps=CPU"],
+          ["srv2", "-m", "b.gguf", "--port", "2", "-ot", "exps=CPU"])]
+      == [calib.profile_key(*base, argv=["x", "-ot", "exps=CPU"])] * 2
+      and calib.profile_key(*base, argv=["x", "-ot", "exps=CPU"])
+      != calib.profile_key(*base, argv=["x"]), True)
 target = cli.resolve("demo")
 tctx = search.Context(target.inv, hw.probe())
 calib.record_profile("eval", target.model_path, cli._model_hash(target),
                      tctx.build, cli._binary_path(target.binary),
                      target.flags, {"tg": {0: 12.5, 4096: 11.0},
-                                    "pp": 300.0, "n": {0: 3, 4096: 2}})
+                                    "pp": 300.0, "n": {0: 3, 4096: 2}},
+                     argv=cli._preset_argv(target))
 calib.record_profile("bench", target.model_path, cli._model_hash(target),
                      tctx.build, cli._binary_path(target.binary),
                      target.flags.replace(ub=2048),
-                     {"tg": {0: 14.0}, "pp": 500.0, "n": {}})
+                     {"tg": {0: 14.0}, "pp": 500.0, "n": {}},
+                     argv=cli._preset_argv(target))
 out, err, code = run(mdl.cmd_fit, ["demo", "--no-oracle", "--min-ctx", "2k",
                                    "--profile", "chat"])
 check("fit shows what the current config measured, beside the prediction",

@@ -596,6 +596,18 @@ def _model_hash(target):
         return None
 
 
+def _preset_argv(target):
+    """The preset's whole command, for the profile key; None for a file,
+    which has flags but no command of its own."""
+    import mdl
+    if target.kind != "name" or not target.cfg:
+        return None
+    try:
+        return mdl.build_argv(target.name, target.cfg, target.binary)
+    except mdl.MdlError:
+        return None
+
+
 def _predicted(ctx_obj, mach, flags, depths):
     p = perf.params(mach)
     pl = perf.Placement(ctx_obj.shape, flags)
@@ -623,7 +635,7 @@ def measured_lines(ctx_obj, target, mach):
         return []
     have = calib.profiles(mh)
     key = calib.profile_key(mh, ctx_obj.build, _binary_path(target.binary),
-                            target.flags)
+                            target.flags, _preset_argv(target))
     mine = next((e for e in have if e.get("key") == key), None)
     out = []
     if mine:
@@ -662,7 +674,8 @@ def cmd_profiles(target, o, out):
     mach = machine_for(target, o)
     ctx_obj = search.Context(target.inv, mach)
     current = (calib.profile_key(mh, ctx_obj.build,
-                                 _binary_path(target.binary), target.flags)
+                                 _binary_path(target.binary), target.flags,
+                                 _preset_argv(target))
                if target.flags else None)
     w("%d measured profile%s of %s on this machine - speeds only; they say "
       "nothing about quality\n\n" % (len(have), "" if len(have) == 1 else "s",
@@ -833,7 +846,10 @@ def cmd_verify(target, o, out):
         "bench", target.model_path, _model_hash(target), ctx_obj.build,
         _binary_path(target.binary), flags,
         {"tg": meas_tg, "pp": entry["pp"], "n": {}} if meas_tg or entry["pp"]
-        else None)
+        else None,
+        # the preset's command only when it is the preset's config that
+        # was benchmarked, not a pick
+        argv=_preset_argv(target) if flags is target.flags else None)
     for d in depths:
         if d in meas_tg:
             w("decode @%-5s predicted %5.1f  measured %5.1f t/s  (%+.0f%%)\n"

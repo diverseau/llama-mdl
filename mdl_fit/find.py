@@ -707,7 +707,13 @@ def explain(node, cands, decisions, main, explore, qm, profile, cat=None):
 
 
 def show_why(data, w):
-    w("%s · %s\n" % (data["node"], data["lineage"]))
+    # a model with no catalog identity is a hash; the name it goes by in
+    # models.toml is what anyone asking about it typed
+    names = sorted({r["local"] for r in data["quants"] if r.get("local")})
+    label = data["node"]
+    if names and label.startswith("local:"):
+        label = "%s (%s)" % (", ".join(names), label)
+    w("%s · %s\n" % (label, data["lineage"]))
     w("%s%s\n" % (data["status"], " · rank #%d" % data["rank"]
                    if data["rank"] is not None else ""))
     if not data["quants"]:

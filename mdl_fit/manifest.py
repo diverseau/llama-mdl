@@ -14,7 +14,6 @@ measurement: the command minus its port, the build, the model's bytes.
 
 import hashlib
 import json
-import os
 import re
 import urllib.error
 import urllib.request
@@ -156,16 +155,20 @@ def identity(man):
 def redact(man):
     """A copy fit for a bug report: secrets blanked, paths cut to their
     file names, the home directory out of anything left."""
-    home = str(Path.home())
+    # compared with / and case folded: Windows writes the home directory
+    # with either slash, and a config usually has forward ones
+    home = str(Path.home()).replace("\\", "/").rstrip("/")
     out = json.loads(json.dumps(man, default=str))
 
     def scrub(s):
         if not isinstance(s, str):
             return s
-        if os.sep in s or "/" in s:
-            if Path(s).suffix or s.startswith(home):
-                return Path(s).name or s
-        return s.replace(home, "~")
+        flat = s.replace("\\", "/")
+        if "/" in flat and (Path(flat).suffix
+                            or home.lower() in flat.lower()):
+            return Path(flat).name or "<path>"
+        at = flat.lower().find(home.lower())
+        return flat[:at] + "~" + flat[at + len(home):] if at >= 0 else s
 
     argv, skip = [], False
     for i, a in enumerate(out.get("argv", [])):
@@ -178,7 +181,12 @@ def redact(man):
             argv.append(flag + "=<redacted>" if "=" in a else a)
             skip = "=" not in a
             continue
-        argv.append(Path(a).name if i == 0 else scrub(a))
+        if i == 0:
+            argv.append(Path(a).name)
+        elif a.startswith("-") and "=" in a:     # --slot-save-path=C:/...
+            argv.append(flag + "=" + scrub(a.split("=", 1)[1]))
+        else:
+            argv.append(scrub(a))
     out["argv"] = argv
     for key in ("model", "mmproj"):
         for f in out.get(key, []):

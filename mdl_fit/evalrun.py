@@ -617,6 +617,15 @@ def save(rec):
     import mdl
     path = results_path()
     path.parent.mkdir(parents=True, exist_ok=True)
+    # the rewrite below reads, filters and replaces the file: an append
+    # from another eval in between would be lost without this
+    with mdl.file_lock(path.with_name(path.name + ".lock"),
+                       "another mdl eval is saving results; try again"):
+        _save(path, rec)
+
+
+def _save(path, rec):
+    import mdl
     run = rec.get("run")
     try:
         old = path.read_text(encoding="utf-8").splitlines()
@@ -1088,12 +1097,17 @@ def main(args, out=None):
         if not prior:
             ckpt.unlink(missing_ok=True)
         done.extend(prior.values())
-        keep = checkpoint(ckpt)
-        try:
-            run_items(client, items, env, cpt, n_ctx, done, progress,
-                      keep=keep, done_ids=set(prior))
-        finally:
-            keep.close()
+        # two evals of these items on this server would write one
+        # checkpoint between them; the second is refused, not interleaved
+        with mdl.file_lock(ckpt.with_suffix(".lock"),
+                           "another mdl eval is running these items on %s "
+                           "now; wait for it, or stop it" % name, tries=1):
+            keep = checkpoint(ckpt)
+            try:
+                run_items(client, items, env, cpt, n_ctx, done, progress,
+                          keep=keep, done_ids=set(prior))
+            finally:
+                keep.close()
         progress.close()
         if not any("failed" in r for r in done):
             ckpt.unlink(missing_ok=True)       # complete: nothing to resume
@@ -1140,7 +1154,8 @@ def main(args, out=None):
         calib.record_profile(
             "eval", target.model_path, rec["hash"], build,
             (served_as.get("binary") or {}).get("path"),
-            model.parse_argv(ran or argv)[0], calib.from_samples(samples))
+            model.parse_argv(ran or argv)[0], calib.from_samples(samples),
+            argv=ran or argv)
     if o.get("json"):
         w(json.dumps(rec, indent=1) + "\n")
         return rec

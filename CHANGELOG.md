@@ -2,6 +2,26 @@
 
 Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
 
+## [0.6.18] - 2026-09-19
+
+### Fixed
+
+- Piped or redirected output on Windows (`mdl find | more`, `> out.txt`)
+  crashed with a UnicodeEncodeError on the tables' → · ✓ ⚑; what the
+  pipe cannot encode now prints as `?`.
+- A measured profile was keyed by the modelled flags only, so two configs
+  differing in `-ot`, a split mode or a draft model shared one profile.
+  The whole command (bar the port and model paths) is in the key now.
+- Two `mdl eval` runs of the same items on the same server would write
+  one checkpoint between them; the second is refused. Saving a result
+  is locked, so a finished run tidying its partial records cannot lose
+  another eval's append.
+- `mdl manifest --redact` let the user name through in a path with no
+  file extension, or written with the other slash or case; and cut a
+  `--flag=value` down to the value's file name.
+- `mdl find --why` names a local model by its models.toml name, not only
+  its hash.
+
 ## [0.6.17] - 2026-09-19
 
 ### Added

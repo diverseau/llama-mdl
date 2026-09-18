@@ -352,11 +352,30 @@ def _build_no(build):
     return build.get("build") if isinstance(build, dict) else build
 
 
-def profile_key(model_hash, build, binary, flags):
-    """What must match for a measurement to describe a configuration."""
+def speed_argv(argv):
+    """A command as far as speed goes: without the binary, the port, and
+    the model paths (the model is named by its bytes instead)."""
+    out, skip = [], False
+    for a in list(argv or [])[1:]:
+        if skip:
+            skip = False
+        elif a in ("--port", "-m", "--model", "-mm", "--mmproj"):
+            skip = True
+        elif a.split("=", 1)[0] not in ("--port", "--model", "--mmproj"):
+            out.append(a)
+    return out
+
+
+def profile_key(model_hash, build, binary, flags, argv=None):
+    """What must match for a measurement to describe a configuration.
+
+    The modelled flags are not enough: -ot, a split mode or a draft model
+    change the speed and are not among them. So the whole command goes
+    in when there is one - a preset's, or the running server's."""
     body = {"model": model_hash, "build": _build_no(build),
             "binary": str(binary or ""), "flags": flags.as_dict()
-            if hasattr(flags, "as_dict") else dict(flags)}
+            if hasattr(flags, "as_dict") else dict(flags),
+            "argv": speed_argv(argv) if argv else None}
     return hashlib.sha256(json.dumps(body, sort_keys=True).encode()
                           ).hexdigest()[:16]
 
@@ -386,7 +405,7 @@ def from_samples(samples):
 
 
 def record_profile(source, model_path, model_hash, build, binary, flags,
-                   measured):
+                   measured, argv=None):
     """Book a measurement against its exact configuration."""
     if not measured:
         return None
@@ -395,7 +414,8 @@ def record_profile(source, model_path, model_hash, build, binary, flags,
              "binary": str(binary or ""),
              "flags": flags.as_dict() if hasattr(flags, "as_dict")
              else dict(flags),
-             "key": profile_key(model_hash, build, binary, flags),
+             "key": profile_key(model_hash, build, binary, flags, argv),
+             "argv": speed_argv(argv) if argv else None,
              "tg": {str(d): round(v, 2) for d, v in measured["tg"].items()},
              "n": {str(d): v for d, v in (measured.get("n") or {}).items()},
              "pp": round(measured["pp"], 1) if measured.get("pp") else None}

@@ -558,4 +558,18 @@ shortlist = json.loads(why_run("--why", "ft/Coder", "--top", "1", "--json"))
 check("shortlist omissions are distinct from fit rejections",
       shortlist["quants"][0]["selection"], ["outside the --top shortlist"])
 
+shown = []
+find.show_why({"node": "local:abc", "lineage": "FT", "status": "not shown",
+               "rank": None, "profile": "agent", "scale": "public",
+               "quants": [{"local": "mine", "quant": "Q4", "size": None,
+                           "repo": None, "file": None, "header": "exact",
+                           "reject": None, "fit": None, "selection": [],
+                           "header_error": None, "quality": None,
+                           "beaten_by": []}],
+               "quality": {"mean": 1, "lo": 0, "hi": 2, "rated": False,
+                           "kinds": [], "parents": [], "benchmarks": [],
+                           "flags": []}}, shown.append)
+check("a local model is named by its preset, not only its hash",
+      shown[0].startswith("mine (local:abc)"), True)
+
 sys.exit(t.done())

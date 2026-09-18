@@ -33,7 +33,7 @@ CONFIG_DIR = _base("XDG_CONFIG_HOME", ".config") / "mdl"
 CONFIG = CONFIG_DIR / "models.toml"
 STATE_DIR = _base("XDG_STATE_HOME", ".local", "state") / "mdl"
 STATE = STATE_DIR / "state.json"
-VERSION = "0.6.17"
+VERSION = "0.6.18"
 DEFAULT_BIN = "llama-server"
 CONFIG_DATA = {}          # last parsed config, for UI-only settings
 DEFAULT_PORT = 8080
@@ -812,21 +812,17 @@ def rotate(log, keep=KEEP_LOGS):
     print(f"mdl: cannot rotate {log}; overwriting it", file=sys.stderr)
 
 
-class launch_lock:
-    """One launch of <name> at a time, across processes.
+class file_lock:
+    """One holder at a time, across processes: a file made with O_EXCL
+    holding the holder's pid. One left by a process that died is taken
+    over once its pid is gone. `tries` tenths of a second, then `busy`."""
 
-    Two `mdl run demo` at the same moment both saw nothing running, both
-    started a server, and the second state file hid the first server for
-    good. The lock is a file made with O_EXCL; one left by a launcher that
-    died is taken over once its pid is gone.
-    """
-
-    def __init__(self, name):
-        self.path = run_dir() / f"{check_name(name)}.lock"
+    def __init__(self, path, busy, tries=50):
+        self.path, self.busy, self.tries = Path(path), busy, tries
 
     def __enter__(self):
-        run_dir().mkdir(parents=True, exist_ok=True)
-        for _ in range(50):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        for _ in range(self.tries):
             try:
                 fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
             except FileExistsError:
@@ -842,12 +838,22 @@ class launch_lock:
             with os.fdopen(fd, "w") as fh:
                 fh.write(str(os.getpid()))
             return self
-        die(f"'{self.path.stem}' is being started by another mdl; "
-            f"try again in a moment")
+        die(self.busy)
 
     def __exit__(self, *exc):
         self.path.unlink(missing_ok=True)
         return False
+
+
+class launch_lock(file_lock):
+    """One launch of <name> at a time. Two `mdl run demo` at the same
+    moment both saw nothing running, both started a server, and the
+    second state file hid the first server for good."""
+
+    def __init__(self, name):
+        super().__init__(run_dir() / f"{check_name(name)}.lock",
+                         f"'{name}' is being started by another mdl; "
+                         f"try again in a moment")
 
 
 def spawn(name, models, binary, port=None):
@@ -1598,8 +1604,26 @@ def _dispatch():
     command(sys.argv[2:])
 
 
+def safe_streams():
+    """Never die on a character the output cannot encode.
+
+    Piped or redirected on Windows, stdout is cp1252, and the tables use
+    → · ✓ ⚑: `mdl find | more` ended in a UnicodeEncodeError traceback. A
+    console gets UTF-8 either way; a pipe now gets '?' for what its
+    encoding lacks, instead of nothing at all.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        enc = (getattr(stream, "encoding", "") or "").lower().replace("-", "")
+        if enc != "utf8" and hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(errors="replace")
+            except (ValueError, OSError):
+                pass
+
+
 def main():
     """Entry point. Owns error reporting so console_scripts behaves too."""
+    safe_streams()
     try:
         _dispatch()
     except MdlError as e:

@@ -66,6 +66,16 @@ check("redact blanks a secret flag's value",
 check("and cuts paths to file names",
       (str(Path.home()) in text, red["argv"][0], "path" in red["model"][0]),
       (False, Path(live["argv"][0]).name, False))
+home = str(Path.home()).replace("\\", "/")
+leaky = manifest.redact(dict(live, argv=[
+    "ls", "--slot-save-path", home + "/slots",
+    "--slot-save-path=" + home.upper() + "/slots",
+    "--alias", "x at " + home + "/y"]))
+check("a home path with no extension, either slash or case, does not "
+      "leak the user name (peer review)",
+      Path.home().name.lower() in json.dumps(leaky["argv"]).lower(), False)
+check("and a --flag=value keeps its flag",
+      leaky["argv"][3].startswith("--slot-save-path="), True)
 check("--api-key=value is blanked too",
       manifest.redact(dict(live, argv=["ls", "--api-key=abc"]))["argv"],
       ["ls", "--api-key=<redacted>"])

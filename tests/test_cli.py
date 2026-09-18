@@ -259,4 +259,19 @@ for name in ("XDG_CONFIG_HOME", "XDG_STATE_HOME"):
 import shutil as _sh  # noqa: E402
 _sh.rmtree(home, ignore_errors=True)
 
+# a pipe on Windows is cp1252; the tables print → · ✓ and must not crash it
+import io  # noqa: E402
+
+piped = io.TextIOWrapper(io.BytesIO(), encoding="cp1252")
+real_out, sys.stdout = sys.stdout, piped
+try:
+    mdl.safe_streams()
+    print("Base → post-train · ✓")
+    piped.flush()
+    got = piped.buffer.getvalue().decode("cp1252")
+finally:
+    sys.stdout = real_out
+check("a cp1252 pipe gets '?' for what it cannot encode, not a traceback",
+      got.strip(), "Base ? post-train · ?")
+
 sys.exit(t.done())
