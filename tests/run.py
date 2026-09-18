@@ -25,7 +25,8 @@ FAST = ["test_cli.py", "test_commands.py", "test_config.py",
         "test_eval.py",
         "test_catalog.py",
         "test_catalog_resume.py",
-        "test_find.py"]
+        "test_find.py",
+        "test_manifest.py"]
 LIVE = ["test_live.py"]
 
 

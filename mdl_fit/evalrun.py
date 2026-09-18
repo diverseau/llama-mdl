@@ -23,7 +23,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-from . import calib, evalsuite, hw, model, perf
+from . import calib, evalsuite, hw, manifest, model, perf
 
 MAX_TURNS = 8
 TIMEOUT = 1800
@@ -882,7 +882,7 @@ def main(args, out=None):
     if o.get("sandbox") and not env.runtime:
         die("--sandbox needs podman or docker on PATH")
     state = mdl.read_state(name)
-    started, ran = False, argv
+    started, ran, runtime = False, argv, None
     if state:
         port = state["port"]
         # B15: a server started before the config changed is not the
@@ -916,6 +916,13 @@ def main(args, out=None):
         if served and Path(served).name != target.model_path.name:
             die("the server on port %d is serving %s, not %s" % (
                 port, Path(served).name, target.model_path.name))
+        # what answered, recorded before the first item so a result
+        # always names its runtime (and a resumed run can check it)
+        runtime = manifest.build(name, models, binary, probe=False)
+        runtime["machine"] = {"gpu": mach.gpu_name, "backend": mach.backend,
+                              "driver": mach.driver,
+                              "vram_total": mach.vram_total,
+                              "ram_total": mach.ram_total}
         n_ctx = (props.get("default_generation_settings") or {}).get(
             "n_ctx") or flags.ctx
         run_items(client, items, env, cpt, n_ctx, done, progress)
@@ -940,6 +947,7 @@ def main(args, out=None):
            "kv": flags.kv_label, "ctx": flags.ctx, "build": build,
            "sampling": sampling_of(ran or argv),
            "argv": ran, "runtime_checked": ran is not None,
+           "manifest": runtime,
            "suite_version": evalsuite.SUITE_VERSION,
            "grader_version": evalsuite.GRADER_VERSION,
            "seed_id": evalsuite.seed_id(seed),

@@ -32,7 +32,7 @@ CONFIG_DIR = _base("XDG_CONFIG_HOME", ".config") / "mdl"
 CONFIG = CONFIG_DIR / "models.toml"
 STATE_DIR = _base("XDG_STATE_HOME", ".local", "state") / "mdl"
 STATE = STATE_DIR / "state.json"
-VERSION = "0.6.11"
+VERSION = "0.6.12"
 DEFAULT_BIN = "llama-server"
 CONFIG_DATA = {}          # last parsed config, for UI-only settings
 DEFAULT_PORT = 8080
@@ -53,7 +53,8 @@ USAGE = ("usage: mdl {init|config [--path]|add <model.gguf>|check|list|"
          "run <name> [--port N]|"
          "stop [<name>|--all]|ps [--json]|logs [-f] [name]|ui [--no-fx]|"
          "fit <gguf|hf:repo|name> [--help]|eval <name> [--help]|"
-         "find [--help]|catalog {pull|build|tree|search|stats}} [--version]")
+         "find [--help]|manifest <name>|"
+         "catalog {pull|build|tree|search|stats}} [--version]")
 
 # The model path mdl init leaves behind. check knows to treat it as a
 # to-do rather than a fault; tests keep the two in step.
@@ -857,7 +858,10 @@ def _spawn(name, models, binary, port):
              "pgid": proc.pid if os.name != "nt" else None,
              # what actually ran, for eval to record and check against
              # the config it reads later
-             "argv": argv}
+             "argv": argv,
+             # which build: a rebuilt llama-server at the same path is a
+             # different runtime, and stat is all a launch can afford
+             "binary": file_id(shutil.which(binary) or binary)}
     try:
         write_atomic(state_path(name), json.dumps(state))
     except OSError as e:
@@ -923,6 +927,21 @@ def cmd_catalog(args):
 def cmd_find(args):
     from mdl_fit import find
     find.main(args)
+
+
+def cmd_manifest(args):
+    from mdl_fit import manifest
+    manifest.main(args)
+
+
+def file_id(path):
+    """{path, size, mtime} for a file, or {path, missing}."""
+    try:
+        st = os.stat(path)
+    except (OSError, TypeError, ValueError):
+        return {"path": str(path), "missing": True}
+    return {"path": str(Path(path).resolve()), "size": st.st_size,
+            "mtime": int(st.st_mtime)}
 
 
 def stop_one(name, state):
@@ -1251,7 +1270,8 @@ COMMANDS = {"init": cmd_init, "config": cmd_config,
             "add": cmd_add, "check": cmd_check, "ui": cmd_ui,
             "run": cmd_run, "stop": cmd_stop, "ps": cmd_ps, "list": cmd_list,
             "logs": cmd_logs, "fit": cmd_fit, "eval": cmd_eval,
-            "catalog": cmd_catalog, "find": cmd_find}
+            "catalog": cmd_catalog, "find": cmd_find,
+            "manifest": cmd_manifest}
 
 
 def _dispatch():

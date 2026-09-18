@@ -185,6 +185,10 @@ mdl fit ...      What a GGUF will do on this machine, and the flags for it.
 mdl eval <name>  Score a model on a private, auto-graded suite.
 mdl catalog ...  The hub's models, fine-tunes and GGUF quants, offline.
 mdl find         The best model this machine can run, and how to run it.
+mdl manifest <name>
+                 What <name> is running as: its command line, llama.cpp
+                 build, model files (size and hash per shard) and machine,
+                 as JSON. --redact cuts paths and secrets for a bug report.
 ```
 
 Without textual installed, `mdl ui` fails with one line and bare `mdl` prints
@@ -226,6 +230,12 @@ mdl: 1 problem(s) found
 
 `add` only appends, and `check` never launches anything, so both are safe
 to run against a config you care about.
+
+`mdl manifest` describes the server that is running, not the config: the
+command spawn launched is kept in its state file, so editing models.toml
+after a start does not change what the manifest - or an `mdl eval` result,
+which carries one - says ran. A model that is not running is described
+from its preset, and the manifest says so.
 
 ## Fitting a model: `mdl fit`
 

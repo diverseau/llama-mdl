@@ -2,6 +2,19 @@
 
 Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
 
+## [0.6.12] - 2026-09-19
+
+### Added
+
+- `mdl manifest <name>`: what a model is running as - the command line
+  it was launched with, the llama.cpp build, each model shard's size and
+  hash, and the machine - read from the running server and its state,
+  or from the preset (and saying so) when it is not running.
+  `--redact` blanks secret flags and cuts paths to file names for a bug
+  report. The state file now records the binary each server was
+  launched from, and every `mdl eval` result carries the manifest of the
+  server that answered.
+
 ## [0.6.11] - 2026-09-18
 
 ### Fixed
