@@ -46,6 +46,14 @@ check("args must be a list", (err.strip(), code),
 
 os.environ["MDL_LLAMA_SERVER"] = "/opt/llama-server"
 check("env var beats config", mdl.load_config()[1], "/opt/llama-server")
+check("a model's own llama_server beats the environment",
+      mdl.build_argv("x", {"model": "m", "llama_server": "prism"},
+                     mdl.load_config()[1])[0], "prism")
+for invalid in ("", "  ", 42, False, []):
+    _, err, code = run(mdl.build_argv, "x",
+                       {"model": "m", "llama_server": invalid}, "LS")
+    check("a llama_server of %r is refused" % (invalid,), (err.strip(), code),
+          ("mdl: model 'x': 'llama_server' must be a non-empty string", 1))
 del os.environ["MDL_LLAMA_SERVER"]
 
 # ------------------------------------------------------------ config file ---
@@ -90,6 +98,23 @@ check("missing model file is caught before launch",
 _, err, code = run(mdl.spawn, "demo", models, "/no/such/llama-server")
 check("missing binary is caught before launch",
       (err.strip(), code), ("mdl: llama-server not found: /no/such/llama-server", 1))
+
+# a model with its own build runs on it even when the default is missing,
+# and a missing one of its own is caught before launch
+from unittest.mock import patch  # noqa: E402
+with patch.object(mdl.subprocess, "Popen") as popen:
+    popen.return_value.pid = 999999
+    mdl.spawn("demo", {"demo": dict(models["demo"],
+                                    llama_server=sys.executable)},
+              "/no/such/global-server")
+    check("spawn uses the model's llama_server, not the default",
+          popen.call_args.args[0][0], sys.executable)
+mdl.state_path("demo").unlink()
+_, err, code = run(mdl.spawn, "demo",
+                   {"demo": dict(models["demo"], llama_server="/no/such/prism")},
+                   sys.executable)
+check("a missing model llama_server is caught before launch",
+      (err.strip(), code), ("mdl: llama-server not found: /no/such/prism", 1))
 
 import socket  # noqa: E402
 blocker = socket.socket()

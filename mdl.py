@@ -32,7 +32,7 @@ CONFIG_DIR = _base("XDG_CONFIG_HOME", ".config") / "mdl"
 CONFIG = CONFIG_DIR / "models.toml"
 STATE_DIR = _base("XDG_STATE_HOME", ".local", "state") / "mdl"
 STATE = STATE_DIR / "state.json"
-VERSION = "0.6.6"
+VERSION = "0.6.7"
 DEFAULT_BIN = "llama-server"
 CONFIG_DATA = {}          # last parsed config, for UI-only settings
 DEFAULT_PORT = 8080
@@ -45,7 +45,7 @@ READY_TIMEOUT = 300      # seconds; ready_timeout in the config overrides
 
 KEEP_LOGS = 3            # <name>.log plus .1 .. .N-1
 KNOWN = {"model", "mmproj", "ngl", "n_cpu_moe", "ctx", "flash_attn",
-         "kv_type", "parallel", "port", "args", "group"}
+         "kv_type", "parallel", "port", "args", "group", "llama_server"}
 SIMPLE = (("ngl", "-ngl"), ("n_cpu_moe", "--n-cpu-moe"), ("ctx", "-c"),
           ("parallel", "-np"), ("port", "--port"))
 
@@ -170,6 +170,13 @@ def build_argv(name, cfg, binary):
         die(f"model '{name}': unknown key(s): {', '.join(unknown)}")
     if "model" not in cfg:
         die(f"model '{name}': missing required key 'model'")
+    # A model that needs its own build - a fork with a quant type upstream
+    # does not load yet - names it, and that beats MDL_LLAMA_SERVER: the
+    # environment says what to use by default, the model says what it needs.
+    if "llama_server" in cfg:
+        binary = cfg["llama_server"]
+        if not isinstance(binary, str) or not binary.strip():
+            die(f"model '{name}': 'llama_server' must be a non-empty string")
     argv = [binary, "-m", str(cfg["model"])]
     if "mmproj" in cfg:          # the vision half of a multimodal model
         argv += ["--mmproj", str(cfg["mmproj"])]
@@ -490,6 +497,7 @@ def spawn(name, models, binary, port=None):
     if port is not None:
         cfg["port"] = port
     argv = build_argv(name, cfg, binary)
+    binary = argv[0]                    # the model's own, if it names one
     port = cfg.get("port", DEFAULT_PORT)
     if not shutil.which(binary) and not Path(binary).is_file():
         die(f"llama-server not found: {binary}")
@@ -808,7 +816,10 @@ def cmd_check(args):
         notes = []
         cfg = models[name]
         try:
-            build_argv(name, cfg, binary)
+            argv = build_argv(name, cfg, binary)
+            if "llama_server" in cfg and not (shutil.which(argv[0])
+                                                or Path(argv[0]).is_file()):
+                notes.append(f"llama_server: not found: {argv[0]}")
         except MdlError as e:
             notes.append(str(e).split(': ', 1)[-1])
         raw = str(cfg.get("model", ""))

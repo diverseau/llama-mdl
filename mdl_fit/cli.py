@@ -122,6 +122,7 @@ def resolve(spec):
         import mdl
         t.kind, t.name, t.cfg = "name", spec, models[spec]
         argv = mdl.build_argv(spec, t.cfg, t.binary)
+        t.binary = argv[0]              # the build this model runs on
         t.flags, t.notes, model_path, mmproj = model.parse_argv(argv)
         t.model_path = Path(model_path)
         if not t.model_path.is_file():

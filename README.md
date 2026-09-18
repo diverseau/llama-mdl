@@ -128,6 +128,7 @@ share one.
 | `parallel` | `-np` | |
 | `port` | `--port` | Defaults to 8080. |
 | `group` | none | Folds models together in the dashboard list. |
+| `llama_server` | none | This model's own llama-server, for one that needs a different build (a fork with a quant type upstream cannot load yet). Beats `$MDL_LLAMA_SERVER` and the top-level setting. |
 | `args` | passed through verbatim | Array of strings, appended last. |
 
 Two top-level keys sit outside the model tables: `llama_server` (above) and

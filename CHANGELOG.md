@@ -2,6 +2,16 @@
 
 Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
 
+## [0.6.7] - 2026-09-18
+
+### Added
+
+- A model may name its own `llama_server`, for one that needs a
+  different build - a fork that loads a quant type upstream does not,
+  like PrismML's for Bonsai's PQ2_0. It beats `$MDL_LLAMA_SERVER` and the
+  top-level setting for that model only, in `run`, the dashboard, `fit`
+  and `eval`; `mdl check` says when it is missing.
+
 ## [0.6.6] - 2026-09-18
 
 ### Fixed

@@ -759,7 +759,9 @@ def main(args, out=None):
         die(str(e))
     if not items:
         die("nothing to run")
-    thinking = thinking_flag(mdl.build_argv(name, models[name], binary))
+    argv = mdl.build_argv(name, models[name], binary)
+    binary = argv[0]                    # the build this model runs on
+    thinking = thinking_flag(argv)
     mach = hw.probe(binary, quick=True, now=True)
     shape = model.Shape(target.inv)
     eff = calib.efficiency(target.inv.arch)
