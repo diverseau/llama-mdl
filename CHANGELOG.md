@@ -2,6 +2,18 @@
 
 Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
 
+## [0.6.6] - 2026-09-18
+
+### Fixed
+
+- `mdl ui` chat: the view no longer snaps to the bottom on every token,
+  so a reply can be read back while it streams. It follows while you are
+  at the bottom, lets go when you scroll up, and takes hold again when
+  you scroll back down.
+- `mdl ui` chat: replies are no longer cut off at 1024 tokens, which a
+  model that thinks could spend before it began answering. Esc stops a
+  reply that runs on; `-n` in a model's `args` still caps it server-side.
+
 ## [0.6.5] - 2026-09-17
 
 ### Changed

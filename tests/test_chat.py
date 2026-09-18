@@ -5,6 +5,7 @@ llama.cpp hands reasoning back: its own delta field, and inline <think>
 tags that can straddle a chunk boundary.
 """
 import asyncio
+import json
 import os
 import sys
 from pathlib import Path
@@ -121,6 +122,37 @@ async def main():
             check("%s: ctrl+l clears both views" % label,
                   (screen.history, plain(app.screen.query_one("#prompt-out", Static))),
                   ([], ""))
+
+            check("%s: no cap on the reply; esc is the limit" % label,
+                  "max_tokens" in json.loads(screen._body()), False)
+
+            # reading back while it streams: every token used to yank the
+            # view to the bottom
+            pane = app.screen.query_one("#prompt-scroll")
+            for i in range(80):
+                screen._feed("text", "line %d\n" % i)
+            await pilot.pause()
+            await pilot.pause()
+            check("%s: a streaming reply is followed" % label,
+                  (screen.follow, pane.scroll_y >= pane.max_scroll_y - 1),
+                  (True, True))
+            pane.scroll_to(y=0, animate=False)
+            await pilot.pause()
+            for i in range(20):
+                screen._feed("text", "more %d\n" % i)
+            await pilot.pause()
+            await pilot.pause()
+            check("%s: scrolled up, new text leaves the view alone" % label,
+                  (screen.follow, pane.scroll_y), (False, 0))
+            pane.scroll_end(animate=False)
+            await pilot.pause()
+            screen._feed("text", "last\n")
+            await pilot.pause()
+            await pilot.pause()
+            check("%s: back at the bottom, it follows again" % label,
+                  (screen.follow, pane.scroll_y >= pane.max_scroll_y - 1),
+                  (True, True))
+            screen.phase = "done"
 
             await pilot.press("escape")
             await pilot.pause()

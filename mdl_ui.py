@@ -899,6 +899,9 @@ class PromptScreen(ModalScreen):
         self.frame = 0
         self.cancel = False
         self.stream = None
+        # Whether new text pulls the view down with it. Scrolling up to
+        # read lets go; scrolling back to the bottom takes hold again.
+        self.follow = True
         self._reset()
 
     def _reset(self):
@@ -922,7 +925,27 @@ class PromptScreen(ModalScreen):
     def on_mount(self):
         self._paint()
         self.set_interval(0.08, self._tick)
+        self.watch(self.query_one("#prompt-scroll"), "scroll_y", self._scrolled,
+                   init=False)
         self.query_one("#prompt-input", Input).focus()
+
+    def _scrolled(self, old, new):
+        """Every token used to scroll to the end, so reading back while a
+        reply streamed was impossible. Going by direction rather than by
+        "is it at the bottom" matters: tokens land faster than the layout
+        grows, so a view that is following is often a line short of a
+        bottom that has already moved, and would let go on its own."""
+        pane = self.query_one("#prompt-scroll")
+        # at the bottom first: clearing the pane drops scroll_y too, and a
+        # view clamped to a shorter transcript has not been scrolled away
+        if new >= pane.max_scroll_y - 1:
+            self.follow = True
+        elif new < old - 0.5:
+            self.follow = False
+
+    def _pull(self):
+        if self.follow:
+            self.query_one("#prompt-scroll").scroll_end(animate=False)
 
     def _tick(self):
         self.frame += 1
@@ -1016,7 +1039,7 @@ class PromptScreen(ModalScreen):
             self.transcript.append(text, "#c0caf5")
         self.tokens += 1
         self._paint()
-        self.query_one("#prompt-scroll").scroll_end(animate=False)
+        self._pull()
 
     def _finish(self, phase, note=""):
         self.phase = phase
@@ -1031,7 +1054,7 @@ class PromptScreen(ModalScreen):
         box.placeholder = "ask something, enter to send"
         box.focus()
         self._paint()
-        self.query_one("#prompt-scroll").scroll_end(animate=False)
+        self._pull()
 
     def on_input_submitted(self, event):
         text = event.value.strip()
@@ -1051,15 +1074,24 @@ class PromptScreen(ModalScreen):
         self.began = time.time()
         self.cancel = False
         self.phase = "waiting"
+        self.follow = True                  # a new question is worth seeing
         self._paint()
+        self._pull()
         self._send()
+
+    def _body(self):
+        """No max_tokens. It was 1024, and a model that thinks can spend
+        that before it starts answering; the reply then stops mid-sentence
+        for no reason on screen. Esc stops a reply that runs on, and the
+        server's own -n, set through args, still applies."""
+        return json.dumps({"messages": self.history, "temperature": 0.7,
+                           "stream": True,
+                           "timings_per_token": True}).encode()
 
     @work(thread=True)
     def _send(self):
         """Stream the reply. Runs off the UI thread so the spinner keeps up."""
-        body = json.dumps({"messages": self.history, "max_tokens": 1024,
-                           "temperature": 0.7, "stream": True,
-                           "timings_per_token": True}).encode()
+        body = self._body()
         req = urllib.request.Request(
             "http://127.0.0.1:%d/v1/chat/completions" % self.port, data=body,
             headers={"Content-Type": "application/json"}, method="POST")
@@ -1116,6 +1148,7 @@ class PromptScreen(ModalScreen):
         self.history.clear()
         self.transcript = Text()
         self.phase = "idle"
+        self.follow = True
         self._reset()
         self._paint()
 
