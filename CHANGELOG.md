@@ -2,6 +2,14 @@
 
 Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
 
+## [0.6.19] - 2026-09-19
+
+### Fixed
+
+- The test suite expected `mdl doctor` to spot a recycled pid on macOS,
+  where process start times cannot be read and mdl does not try; CI
+  failed there. No change to mdl itself.
+
 ## [0.6.18] - 2026-09-19
 
 ### Fixed

@@ -158,8 +158,11 @@ try:
         mdl.state_path("demo").write_text(json.dumps(
             {"name": "demo", "pid": os.getpid(), "port": port2, "born": 1}))
         report, _, _ = diagnose()
+        # only where a process's start time can be read: macOS has no
+        # /proc, so mdl cannot tell a recycled pid there and does not try
         check("a recycled pid reads as a stale state",
-              has(report, "warn", "stale state"), True)
+              has(report, "warn", "stale state"),
+              mdl.proc_started(os.getpid()) is not None)
     finally:
         teardown(root2)
 finally:
