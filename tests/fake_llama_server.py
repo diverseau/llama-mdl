@@ -93,6 +93,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 
 def main():
+    if "--version" in sys.argv:
+        print("version: 1234 (fake)")
+        return
+    if "--help" in sys.argv:
+        print("-m --mmproj -ngl --n-cpu-moe -c -np --port -fa "
+              "--cache-type-k --cache-type-v --metrics")
+        return
     print("args: " + " ".join(sys.argv[1:]), flush=True)
     if MODE == "fail":
         print("error loading model: missing tensor 'blk.0.attn_q.weight'", flush=True)

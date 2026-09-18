@@ -11,6 +11,7 @@ import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 try:
     import tomllib
@@ -50,7 +51,7 @@ SIMPLE = (("ngl", "-ngl"), ("n_cpu_moe", "--n-cpu-moe"), ("ctx", "-c"),
           ("parallel", "-np"), ("port", "--port"))
 
 USAGE = ("usage: mdl {init|config [--path]|add <model.gguf>|check|list|"
-         "run <name> [--port N]|"
+         "doctor [--json] [name]|run <name> [--port N]|"
          "stop [<name>|--all]|ps [--json]|logs [-f] [name]|ui [--no-fx]|"
          "fit <gguf|hf:repo|name> [--help]|eval <name> [--help]|"
          "find [--help]|catalog {pull|build|tree|search|stats}} [--version]")
@@ -601,23 +602,41 @@ def _descendants_nt(pid, born):
     return out
 
 
-def read_states():
+def read_states(read_only=False):
     """Every server we started that is still alive, keyed by name.
 
     One file per server rather than one file listing them: two `mdl run`
     calls at the same moment would otherwise read, modify and write the
     same file, and one of them would lose.
+
+    read_only includes stale and legacy records for diagnosis, without
+    migrating or removing files. Its caller must check liveness itself.
     """
-    migrate_state()
+    if not read_only:
+        migrate_state()
     out = {}
     try:
         paths = sorted(run_dir().glob("*.json"))
     except OSError:
         return out
+    if read_only and STATE.is_file():
+        paths.append(STATE)
     for path in paths:
-        state = live_state(path)
+        if read_only:
+            # Diagnosis must leave stale files and legacy state in place.
+            try:
+                state = json.loads(path.read_text())
+                if not isinstance(state, dict) or not isinstance(
+                        state.get("name", path.stem), str):
+                    continue
+            except (OSError, ValueError):
+                continue
+        else:
+            state = live_state(path)
         if state:
-            out[state.get("name", path.stem)] = state
+            name = state.get("name", path.stem)
+            if not read_only or name not in out:
+                out[name] = state
     return out
 
 
@@ -1204,6 +1223,193 @@ def cmd_check(args):
         die(f"{problems} problem(s) found")
 
 
+def _doctor_note(notes, level, check, message):
+    notes.append({"level": level, "check": check,
+                  "message": " ".join(str(message).split())})
+
+
+def _doctor_probe(binary, flag):
+    try:
+        result = subprocess.run(
+            [binary, flag], stdin=subprocess.DEVNULL, capture_output=True,
+            text=True, errors="replace", timeout=10,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        if result.returncode:
+            return None, "exit status %d" % result.returncode
+        return result.stdout + "\n" + result.stderr, None
+    except (OSError, ValueError, subprocess.TimeoutExpired) as e:
+        return None, str(e)
+
+
+def _doctor_model(name, cfg, binary, states, help_cache):
+    notes = []
+
+    def note(level, check, message):
+        _doctor_note(notes, level, check, message)
+
+    argv = None
+    try:
+        argv = build_argv(name, cfg, binary)
+        note("ok", "config", "config valid")
+    except MdlError as e:
+        note("fail", "config", e)
+    if argv is not None:
+        binary = argv[0]
+        try:
+            found = shutil.which(binary) or Path(binary).is_file()
+        except (OSError, ValueError):
+            found = False
+        if not found:
+            note("fail", "binary", "llama-server not found: %s" % binary)
+        else:
+            note("ok", "binary", "llama-server found: %s" % binary)
+            text, error = _doctor_probe(binary, "--version")
+            if error:
+                note("warn", "binary", "cannot run --version: %s" % error)
+            else:
+                build = re.search(r"version: [^\r\n]+", text)
+                note("ok" if build else "warn", "binary",
+                     build.group() if build else "no build line in --version")
+            if binary not in help_cache:
+                help_cache[binary] = _doctor_probe(binary, "--help")
+            text, error = help_cache[binary]
+            if error:
+                note("warn", "flags", "flags skipped; cannot run --help: %s"
+                     % error)
+            else:
+                flags = dict.fromkeys(a.split("=", 1)[0] for a in argv[1:]
+                                      if a.startswith("-"))
+                missing = [f for f in flags if not re.search(
+                    r"(?<![\w-])%s(?![\w-])" % re.escape(f), text)]
+                for flag in missing:
+                    note("warn", "flags", "flag not listed in --help: %s" % flag)
+                if not missing:
+                    note("ok", "flags", "all flags listed in --help")
+    for key in ("model", "mmproj"):
+        if key not in cfg or not isinstance(cfg[key], str):
+            continue                    # check_cfg explains missing keys and types
+        raw = cfg[key]
+        if raw == PLACEHOLDER:
+            note("warn", key, "%s not filled in yet; edit it or delete it" % key)
+            continue
+        try:
+            path = Path(raw)
+            if not path.is_file():
+                note("fail", key, "%s file not found: %s" % (key, raw))
+                continue
+            with path.open("rb") as fh:
+                valid = fh.read(4) == b"GGUF"
+            note("ok" if valid else "fail", key,
+                 "%s %s: %s" % (key, "GGUF header valid" if valid
+                                 else "file is not GGUF", raw))
+        except (OSError, ValueError) as e:
+            note("fail", key, "cannot read %s: %s" % (key, e))
+    try:
+        state = states.get(name)
+        port = check_port(state.get("port") if state else
+                          cfg.get("port", DEFAULT_PORT))
+        if state:
+            pid = state.get("pid")
+            if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+                note("warn", "runtime", "state has an invalid launcher pid")
+            else:
+                if not alive(pid):
+                    note("warn", "runtime", "launcher pid is gone; %s" % (
+                        "process group/tree survives" if survivors(state)
+                        else "stale state remains"))
+                ready = server_ready(port)
+                note("ok" if ready else "warn", "runtime",
+                     "port %d: %s" % (port, "/health answers" if ready
+                                       else "/health does not answer"))
+        elif port_busy(port):
+            note("warn", "runtime", "something else is listening on port %d"
+                 % port)
+        else:
+            note("ok", "runtime", "not running; port %d is free" % port)
+    except (MdlError, OSError, ValueError, TypeError, OverflowError) as e:
+        note("warn", "runtime", "cannot check runtime: %s" % e)
+    return notes
+
+
+def _doctor_print(report, as_json):
+    findings = report["global"] + [f for notes in report["models"].values()
+                                   for f in notes]
+    fails = sum(f["level"] == "fail" for f in findings)
+    warns = sum(f["level"] == "warn" for f in findings)
+    summary = "%d fail, %d warn" % (fails, warns)
+    if as_json:
+        print(json.dumps(report, indent=1))
+    else:
+        for name, notes in [("environment", report["global"]),
+                            *report["models"].items()]:
+            print(" ".join(name.split()) + ":")
+            for f in notes:
+                message = f["message"]
+                if len(message) > 90:
+                    message = message[:87] + "..."
+                print("  %-4s  %s" % (f["level"], message))
+        print(summary)
+    if fails:
+        die(summary)
+
+
+def cmd_doctor(args):
+    """Diagnose presets without launching servers or cleaning up their state."""
+    as_json = "--json" in args
+    rest = [a for a in args if a != "--json"]
+    if args.count("--json") > 1 or len(rest) > 1 or any(
+            a.startswith("-") for a in rest):
+        die("usage: mdl doctor [--json] [name]")
+    report = {"global": [], "models": {}}
+    notes = report["global"]
+    try:
+        models, binary = load_config()
+    except (MdlError, UnicodeError) as e:
+        _doctor_note(notes, "fail", "config", e)
+        _doctor_print(report, as_json)
+        return
+    if rest and rest[0] not in models:
+        die("no model named %r in %s" % (rest[0], CONFIG))
+    _doctor_note(notes, "ok", "config", "config parses: %s" % CONFIG)
+    for directory in (STATE_DIR, run_dir()):
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryFile(dir=directory):
+                pass
+            _doctor_note(notes, "ok", "writable", "writable: %s" % directory)
+        except OSError as e:
+            _doctor_note(notes, "fail", "writable", e)
+    ports = {}
+    for name, cfg in models.items():
+        port = cfg.get("port", DEFAULT_PORT)
+        if _is_count(port, 1) and port <= 65535:
+            ports.setdefault(port, []).append(name)
+    for port, sharing in sorted(ports.items()):
+        if len(sharing) > 1:
+            _doctor_note(notes, "warn", "ports",
+                         "%s share port %d; only one at a time"
+                         % (", ".join(sorted(sharing)), port))
+    try:
+        for path in sorted(run_dir().glob("*.lock")):
+            try:
+                pid = int(path.read_text())
+                if pid <= 0 or not alive(pid):
+                    _doctor_note(notes, "warn", "locks",
+                                 "leftover lock; pid is not alive: %s" % path.name)
+            except (OSError, ValueError, OverflowError) as e:
+                _doctor_note(notes, "warn", "locks",
+                             "cannot check lock %s: %s" % (path.name, e))
+        states = read_states(read_only=True)
+    except (OSError, ValueError) as e:
+        _doctor_note(notes, "warn", "runtime", "cannot read state: %s" % e)
+        states = {}
+    help_cache = {}
+    for name in rest or sorted(models):
+        report["models"][name] = _doctor_model(
+            name, models[name], binary, states, help_cache)
+    _doctor_print(report, as_json)
+
+
 def cmd_logs(args):
     follow = "-f" in args
     rest = [a for a in args if a != "-f"]
@@ -1248,7 +1454,7 @@ def cmd_ui(args):
 
 
 COMMANDS = {"init": cmd_init, "config": cmd_config,
-            "add": cmd_add, "check": cmd_check, "ui": cmd_ui,
+            "add": cmd_add, "check": cmd_check, "doctor": cmd_doctor, "ui": cmd_ui,
             "run": cmd_run, "stop": cmd_stop, "ps": cmd_ps, "list": cmd_list,
             "logs": cmd_logs, "fit": cmd_fit, "eval": cmd_eval,
             "catalog": cmd_catalog, "find": cmd_find}

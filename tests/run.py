@@ -16,7 +16,7 @@ import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-FAST = ["test_cli.py", "test_commands.py", "test_config.py",
+FAST = ["test_cli.py", "test_commands.py", "test_doctor.py", "test_config.py",
         "test_atomic.py", "test_multi.py",
         "test_ui.py",
         "test_chat.py",
