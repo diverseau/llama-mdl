@@ -32,7 +32,8 @@ IMAGE = "python:3.12-slim"
 
 USAGE = """\
 usage: mdl eval <name> [--suite code,tools,longctx,instruct,reason,custom]
-                       [--limit N] [--sandbox] [--estimate] [--json]
+                       [--limit N] [--resume] [--no-sandbox] [--estimate]
+                       [--json]
        mdl eval --results [name]
 
 Runs a private, auto-graded suite against <name> the way models.toml
@@ -51,11 +52,21 @@ Three of every five items are the harder tier, scored separately, and
 code and format items are marked in parts rather than all or nothing.
 
 The items are generated from a seed kept in ~/.config/mdl/eval-seed, so
-they exist on this machine only. Model-written code runs in a
-subprocess in a temp dir with a timeout; --sandbox runs it in a
-throwaway podman or docker container with no network instead.
+they exist on this machine only. Model-written code runs in a throwaway
+podman or docker container with no network when one is available; with
+neither, or with --no-sandbox, it runs as you in a temp dir with a
+timeout - which is not a sandbox, and the run says so.
+
+Every finished item is kept as it finishes. An interrupted run - Ctrl-C,
+a crash, a closed laptop - continues with --resume, as long as the items
+and the server are the same ones; an item the server failed on (a
+dropped connection, an HTTP error) is retried, not scored as wrong.
 
   --limit N     only the first N items of each suite
+  --resume      continue the interrupted run of these items on this server
+  --no-sandbox  run model-written code directly, even if a container
+                runtime is available
+  --sandbox     require the container; fail if there is none
   --estimate    say how long it would take, and stop
   --results     past runs
   --compare A B  two models on the same items, scored item by item
@@ -173,6 +184,23 @@ class Client:
 
 def find_runtime():
     return shutil.which("podman") or shutil.which("docker")
+
+
+def usable_runtime(runtime):
+    """True if the container runtime answers - docker on PATH with its
+    daemon stopped is the usual case on a desktop - and has, or can get,
+    the image. Pulling is the only step here that needs the network."""
+    def ok(*argv, timeout=15):
+        try:
+            return subprocess.run([runtime, *argv], stdin=subprocess.DEVNULL,
+                                  stdout=subprocess.DEVNULL,
+                                  stderr=subprocess.DEVNULL, timeout=timeout,
+                                  creationflags=NO_WINDOW).returncode == 0
+        except (OSError, subprocess.SubprocessError):
+            return False
+    if not ok("info"):
+        return False
+    return ok("image", "inspect", IMAGE) or ok("pull", IMAGE, timeout=600)
 
 
 class Env:
@@ -328,13 +356,24 @@ def run_item(client, item, env, cpt=4.0):
             "seconds": round(time.time() - t0, 2)}
 
 
+RETRIES = (2, 5)          # seconds before each retry of a server error
+
+
 def run_items(client, items, env, cpt=4.0, n_ctx=None, sink=None,
-              progress=None):
+              progress=None, keep=None, done_ids=()):
     """Every item in order, into `sink` as they finish (so an interrupt
-    keeps what was done). A long document that does not fit n_ctx is
-    skipped, not failed."""
+    keeps what was done), and to `keep` - the checkpoint - if given. A
+    long document that does not fit n_ctx is skipped, not failed; an
+    item in `done_ids` was finished by an earlier, interrupted run.
+
+    A server error is not a wrong answer: the item is tried again, and
+    one that still fails is recorded as failed with no score, so a
+    dropped connection does not read as the model getting it wrong.
+    """
     sink = [] if sink is None else sink
     for it in items:
+        if it.id in done_ids:
+            continue
         need = it.meta.get("tokens")
         if need and n_ctx and need + evalsuite.ROOM > n_ctx:
             res = {"id": it.id, "suite": it.suite, "domain": it.domain,
@@ -343,7 +382,17 @@ def run_items(client, items, env, cpt=4.0, n_ctx=None, sink=None,
                        (need + evalsuite.ROOM) // 1000, n_ctx // 1024)}
         else:
             res = run_item(client, it, env, cpt)
+            for wait in RETRIES:
+                if not res.get("error"):
+                    break
+                time.sleep(wait)
+                res = run_item(client, it, env, cpt)
+            if res.get("error"):
+                res["failed"] = res.pop("why", "server error")
+                res.pop("score", None)
         sink.append(res)
+        if keep:
+            keep(res)
         if progress:
             progress(it, res)
     return sink
@@ -491,6 +540,48 @@ def results_path():
     return hw.config_dir() / "evals.jsonl"
 
 
+def runs_dir():
+    return hw.config_dir() / "eval-runs"
+
+
+def run_id(name, items_hash, identity, seed_id):
+    """Names one run of one item set against one runtime: what must all
+    match before finished items from an interrupted run can be kept."""
+    return "%s-%s" % (name, hashlib.sha256(("%s:%s:%s" % (
+        items_hash, identity, seed_id)).encode()).hexdigest()[:12])
+
+
+def load_checkpoint(path):
+    """Finished items from an interrupted run, keyed by id. An item that
+    failed at the server is left out, so a resume tries it again."""
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return {}
+    out = {}
+    for line in lines:
+        try:
+            res = json.loads(line)
+        except ValueError:
+            continue                    # a line cut off by the interrupt
+        if isinstance(res, dict) and "id" in res and "failed" not in res:
+            out[res["id"]] = res
+    return out
+
+
+def checkpoint(path):
+    """An append-only writer: one line per finished item, flushed, so a
+    crash loses at most the item in flight."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fh = open(path, "a", encoding="utf-8")
+
+    def keep(res):
+        fh.write(json.dumps(res) + "\n")
+        fh.flush()
+    keep.close = fh.close
+    return keep
+
+
 def custom_dir():
     return hw.config_dir() / "evals"
 
@@ -510,8 +601,29 @@ def file_hash(path, window=8 << 20):
 
 
 def save(rec):
+    """Append a result. A finished run replaces the partial records its
+    own interruptions left, so one run is one line in the history."""
+    import mdl
     path = results_path()
     path.parent.mkdir(parents=True, exist_ok=True)
+    run = rec.get("run")
+    try:
+        old = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        old = []
+    if run and any('"run": "%s"' % run in line for line in old):
+        kept = []
+        for line in old:
+            try:
+                prev = json.loads(line)
+            except ValueError:
+                kept.append(line)
+                continue
+            if not (prev.get("run") == run and prev.get("partial")):
+                kept.append(line)
+        mdl.write_atomic(path, "".join(x + "\n" for x in kept)
+                         + json.dumps(rec) + "\n")
+        return
     with open(path, "a", encoding="utf-8") as f:
         f.write(json.dumps(rec) + "\n")
 
@@ -600,7 +712,11 @@ def report(rec, w):
         w("note     %d long-context items skipped: %s\n" % (
             len(skipped), skipped[0]["skipped"]))
     errs = [r for r in items if r.get("error")]
-    whys = [r.get("why", "").lower() for r in errs]
+    whys = [(r.get("why") or r.get("failed") or "").lower() for r in errs]
+    failed = [r for r in items if "failed" in r]
+    if failed:
+        w("note     %d items failed at the server and are not scored; "
+          "--resume retries them\n" % len(failed))
     if any("jinja" in y or "tools" in y for y in whys):
         w("note     tool calls need --jinja in the config's args\n")
     elif errs:
@@ -746,7 +862,7 @@ def parse(args):
             o[a[2:]] = args[i + 1]
             i += 2
         elif a in ("--sandbox", "--estimate", "--json", "--results",
-                   "--compare"):
+                   "--compare", "--resume", "--no-sandbox"):
             o[a[2:]] = True
             i += 1
         elif a.startswith("-"):
@@ -878,11 +994,26 @@ def main(args, out=None):
                            else " (speeds uncalibrated: mdl fit hw)"))
     if o.get("estimate"):
         return None
-    env = Env(find_runtime() if o.get("sandbox") else None)
-    if o.get("sandbox") and not env.runtime:
+    if o.get("sandbox") and o.get("no-sandbox"):
+        die("--sandbox and --no-sandbox contradict each other")
+    runtime = None if o.get("no-sandbox") else find_runtime()
+    if runtime and not usable_runtime(runtime):
+        if o.get("sandbox"):
+            die("--sandbox: %s is on PATH but is not answering, or cannot "
+                "get %s" % (Path(runtime).name, IMAGE))
+        w("sandbox  %s is not answering; model code runs unsandboxed\n"
+          % Path(runtime).name)
+        runtime = None
+    if o.get("sandbox") and not runtime:
         die("--sandbox needs podman or docker on PATH")
+    env = Env(runtime)
+    if not runtime and not o.get("no-sandbox"):
+        # said once, plainly: a temp dir and a timeout do not stop code
+        # from reading your files or reaching the network
+        w("sandbox  none: model-written code runs as you, with your files "
+          "and network (--no-sandbox to say you mean it)\n")
     state = mdl.read_state(name)
-    started, ran, runtime = False, argv, None
+    started, ran, served_as = False, argv, None
     if state:
         port = state["port"]
         # B15: a server started before the config changed is not the
@@ -896,7 +1027,7 @@ def main(args, out=None):
             name, port, "" if ran else
             " (started by an older mdl: its settings are not checked)"))
     t0, done, partial = time.time(), [], False
-    progress = None
+    progress, run = None, None
     try:
         if not state:
             proc, log, port = mdl.spawn(
@@ -918,20 +1049,50 @@ def main(args, out=None):
                 port, Path(served).name, target.model_path.name))
         # what answered, recorded before the first item so a result
         # always names its runtime (and a resumed run can check it)
-        runtime = manifest.build(name, models, binary, probe=False)
-        runtime["machine"] = {"gpu": mach.gpu_name, "backend": mach.backend,
+        served_as = manifest.build(name, models, binary, probe=False)
+        served_as["machine"] = {"gpu": mach.gpu_name, "backend": mach.backend,
                               "driver": mach.driver,
                               "vram_total": mach.vram_total,
                               "ram_total": mach.ram_total}
         n_ctx = (props.get("default_generation_settings") or {}).get(
             "n_ctx") or flags.ctx
-        run_items(client, items, env, cpt, n_ctx, done, progress)
+        run = run_id(name, evalsuite.fingerprint(items),
+                     served_as["identity"], evalsuite.seed_id(seed))
+        ckpt = runs_dir() / (run + ".jsonl")
+        prior = load_checkpoint(ckpt) if ckpt.exists() else {}
+        if o.get("resume"):
+            if prior:
+                w("resume   %d of %d items already done; continuing\n"
+                  % (len(prior), len(items)))
+            else:
+                others = sorted(runs_dir().glob(name + "-*.jsonl"))
+                w("resume   nothing to resume%s; starting over\n" % (
+                    " for these items on this server (an interrupted run "
+                    "exists, but its items or its server differ)"
+                    if others else ""))
+        elif prior:
+            w("note     an interrupted run of these items has %d done; "
+              "--resume continues it. Starting over\n" % len(prior))
+            prior = {}
+        if not prior:
+            ckpt.unlink(missing_ok=True)
+        done.extend(prior.values())
+        keep = checkpoint(ckpt)
+        try:
+            run_items(client, items, env, cpt, n_ctx, done, progress,
+                      keep=keep, done_ids=set(prior))
+        finally:
+            keep.close()
         progress.close()
+        if not any("failed" in r for r in done):
+            ckpt.unlink(missing_ok=True)       # complete: nothing to resume
     except KeyboardInterrupt:
         if progress:
             progress.close()
         partial = True
-        w("\ninterrupted; keeping the %d items done\n" % len(done))
+        w("\ninterrupted; keeping the %d items done%s\n" % (
+            len(done), "; mdl eval %s --resume continues" % name
+            if run else ""))
     finally:
         if started:
             state = mdl.read_state(name)
@@ -947,7 +1108,7 @@ def main(args, out=None):
            "kv": flags.kv_label, "ctx": flags.ctx, "build": build,
            "sampling": sampling_of(ran or argv),
            "argv": ran, "runtime_checked": ran is not None,
-           "manifest": runtime,
+           "manifest": served_as, "run": run,
            "suite_version": evalsuite.SUITE_VERSION,
            "grader_version": evalsuite.GRADER_VERSION,
            "seed_id": evalsuite.seed_id(seed),
@@ -957,7 +1118,8 @@ def main(args, out=None):
            "domains": summarize(done, "domain"),
            "thinking": any(r.get("thinking") for r in done),
            "minutes": round((time.time() - t0) / 60, 1),
-           "partial": partial, "items": done}
+           "partial": partial or any("failed" in r for r in done),
+           "items": done}
     save(rec)
     if o.get("json"):
         w(json.dumps(rec, indent=1) + "\n")

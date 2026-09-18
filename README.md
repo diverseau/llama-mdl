@@ -396,12 +396,20 @@ these exact questions exist on this machine and nowhere else, and a model
 cannot have memorised them. That is narrower than "never seen anything
 like them": the templates, the problem families and the algorithms behind
 the reference solutions are public, and familiar to any model trained on
-code. Model-written code runs in a subprocess in a temp directory with a
-timeout - that is not a sandbox: it runs as you, and can read your files
-and reach the network. `--sandbox` runs it in a throwaway podman or
-docker container with no network, 512 MB and 128 processes instead. The
-expected answers never enter either: the code writes its results, and
-mdl compares them outside. Results go to
+code. Model-written code runs in a throwaway podman or docker container
+with no network, 512 MB and 128 processes whenever one is available and
+answering. Without one - or with `--no-sandbox` - it runs in a subprocess
+in a temp directory with a timeout, which is not a sandbox: it runs as
+you, and can read your files and reach the network, and the run says so.
+`--sandbox` insists on the container. The expected answers never enter
+either: the code writes its results, and mdl compares them outside.
+
+Every item is written to a checkpoint as it finishes. An interrupted run
+continues with `mdl eval <name> --resume`, but only onto the same items
+and the same server - the same command bar its port, the same build, the
+same model bytes (see `mdl manifest`); otherwise it starts over and says
+why. An item the server failed on, rather than the model, is retried
+twice and then left unscored, and `--resume` tries it again. Results go to
 `~/.config/mdl/evals.jsonl`, keyed by the file, quant, KV type and
 context they were run at.
 

@@ -2,6 +2,26 @@
 
 Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
 
+## [0.6.13] - 2026-09-19
+
+### Added
+
+- `mdl eval --resume`: every finished item is kept in a checkpoint as it
+  finishes, and an interrupted run continues where it stopped - only onto
+  the same items and the same server (same command bar the port, build
+  and model bytes, per `mdl manifest`); otherwise it starts over and says
+  why. A finished run replaces the partial records its interruptions left.
+
+### Changed
+
+- Model-written code now runs in the podman or docker sandbox by default
+  whenever one is available and answering; `--no-sandbox` opts out, and
+  a run without one says plainly that the code runs as you.
+- An item the server failed on - a dropped connection, an HTTP error - is
+  retried twice, and one that still fails is left unscored and reported,
+  rather than counted as a wrong answer. A run with such items is marked
+  partial.
+
 ## [0.6.12] - 2026-09-19
 
 ### Added

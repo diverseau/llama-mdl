@@ -3,7 +3,7 @@
 Working notes for coding agents in the `mdl` repo. This is the canonical
 file; `CLAUDE.md` points here and adds only Claude Code specifics.
 
-Written against **0.6.12**. Where a fact is likely to drift, this says how to
+Written against **0.6.13**. Where a fact is likely to drift, this says how to
 re-derive it instead of quoting it.
 
 ## What this is
@@ -112,7 +112,7 @@ workflow via OIDC.
 
 ```sh
 # bump VERSION in mdl.py and add a CHANGELOG.md entry, commit, push main, then
-git tag -a v0.6.12 -m "0.6.12" && git push origin v0.6.12
+git tag -a v0.6.13 -m "0.6.13" && git push origin v0.6.13
 ```
 
 - The tag must equal `mdl.VERSION` or the build job fails on purpose. The
@@ -186,9 +186,10 @@ more) and no two machines share a suite. Consequences worth holding on to:
   is that recognising an item must not help — a model has read a thousand
   solutions to "longest increasing subsequence". If you add a hard item,
   prefer one whose constants, rules and names come from the seed.
-- **Model-written code executes.** A subprocess in a temp dir with a timeout
-  by default; `--sandbox` uses a throwaway podman/docker container with no
-  network. Do not loosen this.
+- **Model-written code executes.** In a throwaway podman/docker container
+  with no network whenever one answers; otherwise, or with `--no-sandbox`, a
+  subprocess in a temp dir with a timeout - not a sandbox, and the run says
+  so. The expected answers stay in the grading process. Do not loosen this.
 
 ## Catalog
 

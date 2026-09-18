@@ -637,6 +637,67 @@ check("documents longer than the context are skipped, not failed",
       [("skipped" in r) for r in done],
       [i.meta["tokens"] + evalsuite.ROOM > 65536 for i in by["longctx"]])
 
+# ------------------------------------------------ resume and retries ---
+evalrun.RETRIES = (0, 0)            # no real waiting in tests
+reason = by["reason"][:4]
+
+
+class Flaky:
+    """Fails the first `bad` calls with a transport error, then answers."""
+
+    def __init__(self, bad):
+        self.bad, self.calls = bad, 0
+
+    def chat(self, messages, tools=None, max_tokens=0, seed=None):
+        self.calls += 1
+        if self.calls <= self.bad:
+            return R(error="connection reset")
+        return R("Answer: 0")
+
+
+flaky = Flaky(2)
+got = evalrun.run_items(flaky, reason[:1], env)
+check("a server error is retried, then graded as an answer",
+      ("score" in got[0], "failed" in got[0], flaky.calls), (True, False, 3))
+dead = evalrun.run_items(Flaky(99), reason[:1], env)
+check("one that keeps failing is recorded as failed, with no score",
+      ("score" in dead[0], dead[0].get("failed"), dead[0]["error"]),
+      (False, "error: connection reset", True))
+check("and summaries leave it out rather than count it wrong",
+      evalrun.summarize(dead, "suite"), {})
+
+ck = TMP / "runs" / "x.jsonl"
+keep = evalrun.checkpoint(ck)
+first = evalrun.run_items(Echo(), reason[:2], env, keep=keep)
+keep.close()
+with open(ck, "a", encoding="utf-8") as fh:
+    fh.write('{"id": "cut off mid-wri')          # the interrupt's last line
+    fh.write("\n" + json.dumps(dead[0]) + "\n")
+prior = evalrun.load_checkpoint(ck)
+check("a checkpoint keeps finished items, drops a torn line and failures",
+      sorted(prior), sorted(r["id"] for r in first))
+counted = Flaky(0)
+rest = evalrun.run_items(counted, reason, env, done_ids=set(prior))
+check("a resumed run asks only what is left",
+      ([r["id"] for r in rest], counted.calls),
+      ([i.id for i in reason[2:]], 2))
+check("the run id changes with the items, the runtime or the seed",
+      len({evalrun.run_id("m", *k) for k in (
+          ("items", "rt", "s"), ("items2", "rt", "s"),
+          ("items", "rt2", "s"), ("items", "rt", "s2"))}), 4)
+
+os.environ["MDL_FIT_HOME"] = str(TMP / "home-save")
+evalrun.save({"name": "m", "run": "m-1", "partial": True, "n": 1})
+evalrun.save({"name": "other", "partial": True})
+evalrun.save({"name": "m", "run": "m-1", "partial": True, "n": 2})
+evalrun.save({"name": "m", "run": "m-1", "partial": False, "n": 3})
+check("a finished run replaces its own partial records, and nothing else",
+      [(r["name"], r.get("n")) for r in evalrun.load()],
+      [("other", None), ("m", 3)])
+os.environ["MDL_FIT_HOME"] = str(TMP / "home")
+check("a container runtime that is not there is not usable",
+      evalrun.usable_runtime(str(TMP / "no-such-docker")), False)
+
 # =========================================================== instruct ===
 
 rules = {}
