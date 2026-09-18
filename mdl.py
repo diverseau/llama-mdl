@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""mdl - run one local llama.cpp server from a config file."""
+"""mdl - run local llama.cpp servers from a config file, one or several."""
 
 import ctypes
 import json
@@ -32,7 +32,7 @@ CONFIG_DIR = _base("XDG_CONFIG_HOME", ".config") / "mdl"
 CONFIG = CONFIG_DIR / "models.toml"
 STATE_DIR = _base("XDG_STATE_HOME", ".local", "state") / "mdl"
 STATE = STATE_DIR / "state.json"
-VERSION = "0.6.9"
+VERSION = "0.6.10"
 DEFAULT_BIN = "llama-server"
 CONFIG_DATA = {}          # last parsed config, for UI-only settings
 DEFAULT_PORT = 8080
@@ -759,6 +759,44 @@ def rotate(log, keep=KEEP_LOGS):
     print(f"mdl: cannot rotate {log}; overwriting it", file=sys.stderr)
 
 
+class launch_lock:
+    """One launch of <name> at a time, across processes.
+
+    Two `mdl run demo` at the same moment both saw nothing running, both
+    started a server, and the second state file hid the first server for
+    good. The lock is a file made with O_EXCL; one left by a launcher that
+    died is taken over once its pid is gone.
+    """
+
+    def __init__(self, name):
+        self.path = run_dir() / f"{check_name(name)}.lock"
+
+    def __enter__(self):
+        run_dir().mkdir(parents=True, exist_ok=True)
+        for _ in range(50):
+            try:
+                fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            except FileExistsError:
+                try:
+                    holder = int(self.path.read_text() or 0)
+                except (OSError, ValueError):
+                    holder = 0
+                if holder and not alive(holder):
+                    self.path.unlink(missing_ok=True)   # its launcher died
+                    continue
+                time.sleep(0.1)
+                continue
+            with os.fdopen(fd, "w") as fh:
+                fh.write(str(os.getpid()))
+            return self
+        die(f"'{self.path.stem}' is being started by another mdl; "
+            f"try again in a moment")
+
+    def __exit__(self, *exc):
+        self.path.unlink(missing_ok=True)
+        return False
+
+
 def spawn(name, models, binary, port=None):
     """Launch <name> detached, write its state file, return (proc, log, port).
 
@@ -766,7 +804,20 @@ def spawn(name, models, binary, port=None):
     A port here overrides the config, for `mdl run <name> --port N`; the
     value that reaches the state file is the one we actually launched
     with, so ps, the readiness probe and the next pre-flight agree.
+
+    Under a per-name lock, with the running check made again inside it,
+    and a server whose state cannot be written is stopped rather than
+    left running where nothing can find it.
     """
+    with launch_lock(name):
+        running = read_state(name)
+        if running:
+            die(f"'{name}' is already running (pid {running['pid']}, "
+                f"port {running['port']}); run 'mdl stop {name}' first")
+        return _spawn(name, models, binary, port)
+
+
+def _spawn(name, models, binary, port):
     cfg = dict(models[name])
     if port is not None:
         cfg["port"] = port
@@ -798,12 +849,25 @@ def spawn(name, models, binary, port=None):
         die(f"cannot start {binary}: {e}")
     finally:
         handle.close()
-    write_atomic(state_path(name), json.dumps(
-        {"name": name, "pid": proc.pid, "port": port, "started": time.time(),
-         "log": str(log), "born": proc_started(proc.pid),
-         # start_new_session: the pid is the group id, and the group
-         # outlives a wrapper that exits and leaves the server behind
-         "pgid": proc.pid if os.name != "nt" else None}))
+    state = {"name": name, "pid": proc.pid, "port": port,
+             "started": time.time(), "log": str(log),
+             "born": proc_started(proc.pid),
+             # start_new_session: the pid is the group id, and the group
+             # outlives a wrapper that exits and leaves the server behind
+             "pgid": proc.pid if os.name != "nt" else None,
+             # what actually ran, for eval to record and check against
+             # the config it reads later
+             "argv": argv}
+    try:
+        write_atomic(state_path(name), json.dumps(state))
+    except OSError as e:
+        terminate(proc.pid, getattr(signal, "SIGKILL", signal.SIGTERM), state)
+        try:
+            proc.wait(5)
+        except subprocess.TimeoutExpired:
+            pass
+        die(f"cannot record {name}'s state in {run_dir()} ({e}); "
+            f"stopped it rather than leave it untracked")
     return proc, log, port
 
 

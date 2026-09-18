@@ -1,8 +1,10 @@
 """mdl eval - the suites.
 
 Every item is generated from a template, with parameters drawn from a
-seed that is secret to this install (~/.config/mdl/eval-seed), so the
-questions exist on this machine only and cannot have been trained on.
+seed that is secret to this install (~/.config/mdl/eval-seed), so these
+exact questions exist on this machine only and cannot have been
+memorised. The templates and problem families are public; that is the
+limit of the claim.
 The same seed and suite version give the same items: two models, or two
 runs of one, answer the same questions. Bump SUITE_VERSION when a
 template changes, so old results stop being compared with new ones.

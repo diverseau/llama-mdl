@@ -417,6 +417,27 @@ check("a load log gives away its buffers",
       found["buffers"]["Vulkan0"], {"model": 8784 * MiB, "KV": 1502 * MiB})
 check("and which allocation failed", found["failed"],
       ("Vulkan0", 1073741824))
+check("llama-bench runs at the config's threads unless told otherwise (B17)",
+      [calib.bench_argv("b", "m", model.Flags(threads=6), threads=t)[-1]
+       for t in (None, 4)], ["6", "4"])
+real_run = calib.subprocess.run
+for said, why in (("ggml_cuda: CUDA error: out of memory", "oom"),
+                  ("error: unknown argument: -ncmoe", "unsupported"),
+                  ("Segmentation fault", "error")):
+    calib.subprocess.run = (lambda s: lambda *a, **k: calib.subprocess
+                            .CompletedProcess(a, 1, "", s))(said)
+    check("a bench that fails with %r is %s, and only oom is memory (B18)"
+          % (said[:24], why), calib.bench("b", "m", model.Flags())[1], why)
+
+
+def slow_bench(*a, **k):
+    raise calib.subprocess.TimeoutExpired("b", 1)
+
+
+calib.subprocess.run = slow_bench
+check("a bench that times out says so",
+      calib.bench("b", "m", model.Flags())[1], "timeout")
+calib.subprocess.run = real_run
 check("oracle argv pins every flag and turns --fit off",
       calib.oracle_argv("fp", "m.gguf", model.Flags(ctx=8192))[-4:],
       ["-fitp", "on", "-fit", "off"])

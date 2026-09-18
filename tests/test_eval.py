@@ -71,6 +71,9 @@ check("so is another parameter schema under the same tool name",
 check("and another document behind the same name and size",
       variant(prompt=lambda cpt: "doc A") != variant(prompt=lambda cpt: "doc B"),
       True)
+check("a server moved with --port is the same server (B15)",
+      evalrun.sans_port(["ls", "-m", "a", "--port", "9", "-c", "4"]),
+      ["ls", "-m", "a", "-c", "4"])
 check("limit takes the first N of each suite",
       len(evalsuite.build(["code", "reason"], seed, limit=3)), 6)
 

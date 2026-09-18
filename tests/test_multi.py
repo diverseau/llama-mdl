@@ -5,7 +5,11 @@ only one is up - that is the whole compatibility story - and only ask
 which one when there is a genuine choice.
 """
 import json
+import os
+import socket
+import subprocess
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -152,10 +156,6 @@ teardown(root)
 # The wrapper exits at once; the server it started ignores SIGTERM and
 # holds the port. Stop used to watch only the wrapper's pid, see it gone,
 # and say "stopped" with the server still up and ps showing nothing.
-import os          # noqa: E402
-import socket      # noqa: E402
-import subprocess  # noqa: E402
-import time        # noqa: E402
 
 root, port = sandbox()
 kid_py = root / "server.py"
@@ -198,6 +198,54 @@ check("the port can be bound again", not mdl.port_busy(port), True)
 with socket.socket() as again:
     again.bind(("127.0.0.1", port))
 check("and nothing is left listed", mdl.read_states(), {})
+teardown(root)
+
+# ------------------------------------------- launch transaction (B13) ----
+root, port = sandbox()
+real_write = mdl.write_atomic
+
+
+def refuse(path, *a, **k):
+    if str(path).endswith(".json"):
+        raise OSError("disk full")
+    return real_write(path, *a, **k)
+
+
+mdl.write_atomic = refuse
+try:
+    _, err, code = run(mdl.cmd_run, ["demo"])
+finally:
+    mdl.write_atomic = real_write
+check("a state that cannot be written stops the server, in one line",
+      ("stopped it rather than leave it untracked" in err, code), (True, 1))
+for _ in range(50):
+    if not mdl.port_busy(port):
+        break
+    time.sleep(0.1)
+check("and nothing is left on the port", mdl.port_busy(port), False)
+check("nor a lock behind it", list(mdl.run_dir().glob("*.lock")), [])
+
+lock = mdl.run_dir() / "demo.lock"
+lock.write_text(str(os.getpid()))            # a live launcher holds it
+t0 = time.time()
+_, err, code = run(mdl.spawn, "demo", *mdl.load_config())
+check("a launch already under way is waited for, then refused",
+      ("being started by another mdl" in err, code, time.time() - t0 > 3),
+      (True, 1, True))
+dead = subprocess.Popen([sys.executable, "-c", "pass"])
+dead.wait()
+lock.write_text(str(dead.pid))               # its launcher died
+proc, _, _ = mdl.spawn("demo", *mdl.load_config())
+check("a lock left by a dead launcher is taken over",
+      (mdl.read_state("demo")["pid"], lock.exists()), (proc.pid, False))
+_, err, code = run(mdl.spawn, "demo", *mdl.load_config())
+check("and the running check is made again inside the lock",
+      ("already running" in err, code), (True, 1))
+check("the state records what ran",
+      mdl.read_state("demo")["argv"][:2],
+      mdl.build_argv("demo", mdl.load_config()[0]["demo"],
+                     mdl.load_config()[1])[:2])
+run(mdl.cmd_stop, ["--all"])
 teardown(root)
 
 sys.exit(t.done())

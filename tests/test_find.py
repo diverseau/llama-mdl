@@ -330,4 +330,19 @@ check("find's next step for a remote quant names the file to fetch, and "
       (remote_row.key in find.next_step(remote_row),
        "hf:" in find.next_step(remote_row)), (True, False))
 
+# B16: a preset with its own llama_server is judged by that build
+fork = TMP / "fork"
+fork.mkdir()
+(fork / "llama.dll").write_bytes(b"\x00llama\x00alienarch\x00")
+(fork / "llama-server").write_bytes(b"")
+alien = find.Cand(None, "alien", "Q8_0", 1, local="alien", path=Path("a"))
+alien.inv, alien.exact = inv_of("a", arch="alienarch"), True
+find.evaluate(alien, qm, mach, opts, "agent", binary)
+check("the default build refuses an arch it does not know",
+      alien.why, "llama.cpp here does not load alienarch")
+alien.binary = str(fork / "llama-server")
+find.evaluate(alien, qm, mach, opts, "agent", binary)
+check("but a preset's own fork that loads it is not turned away",
+      alien.why != "llama.cpp here does not load alienarch", True)
+
 sys.exit(t.done())

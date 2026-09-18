@@ -2,6 +2,40 @@
 
 Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
 
+## [0.6.10] - 2026-09-18
+
+### Fixed
+
+- Two launches of one model at the same moment could both start a
+  server, and the second state file hid the first for good. A launch now
+  holds a per-model lock and checks again inside it; a server whose
+  state cannot be written is stopped instead of left untracked.
+- `mdl eval`: Ctrl-C while the model was still loading left the server
+  it had started running. It is the eval's to stop from the moment it
+  exists.
+- `mdl eval` on a server that was already running recorded settings from
+  `models.toml` as it is now, which need not be what the server was
+  started with. The state file keeps the command that actually ran; eval
+  records that, refuses a server whose settings have since changed, and
+  checks the server is serving the file it is about to credit.
+- `mdl find` judged every model by the default llama-server, so a model
+  that names its own fork for an architecture upstream lacks was turned
+  away. Each is judged by the build it runs on.
+- `mdl fit --verify` benchmarked at llama-bench's default thread count
+  rather than the config's, and took any failed benchmark - a timeout, a
+  flag the build does not take - as out of memory and widened the
+  memory margin for the architecture. Only an out-of-memory failure
+  moves the margin now; anything else says what happened.
+
+### Documentation
+
+- The catalog's publishing status is no longer written into the README,
+  where it went stale; SECURITY names the per-server state files; and
+  the eval's claim is the narrower true one - these exact questions
+  cannot have been memorised, the templates are public. The README says
+  plainly that the default code runner is not a sandbox, and that
+  `find`'s ranking is a heuristic for a shortlist.
+
 ## [0.6.9] - 2026-09-18
 
 ### Changed

@@ -3,7 +3,7 @@
 Working notes for coding agents in the `mdl` repo. This is the canonical
 file; `CLAUDE.md` points here and adds only Claude Code specifics.
 
-Written against **0.6.9**. Where a fact is likely to drift, this says how to
+Written against **0.6.10**. Where a fact is likely to drift, this says how to
 re-derive it instead of quoting it.
 
 ## What this is
@@ -112,7 +112,7 @@ workflow via OIDC.
 
 ```sh
 # bump VERSION in mdl.py and add a CHANGELOG.md entry, commit, push main, then
-git tag -a v0.6.9 -m "0.6.9" && git push origin v0.6.9
+git tag -a v0.6.10 -m "0.6.10" && git push origin v0.6.10
 ```
 
 - The tag must equal `mdl.VERSION` or the build job fails on purpose. The
@@ -160,8 +160,9 @@ when adding tests.
 ## The eval, if you touch it
 
 `mdl eval` generates its items from a seed secret to each install
-(`~/.config/mdl/eval-seed`), so no model can have trained on them and no two
-machines share a suite. Consequences worth holding on to:
+(`~/.config/mdl/eval-seed`), so no model can have memorised these exact
+questions (the templates and problem families are public - do not claim
+more) and no two machines share a suite. Consequences worth holding on to:
 
 - **Scores are not comparable across machines.** They are comparable across
   *models on one machine*, which is the point: the item set depends only on

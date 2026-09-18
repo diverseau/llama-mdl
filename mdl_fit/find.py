@@ -80,6 +80,7 @@ class Cand:
         self.node, self.label, self.quant, self.size = node, label, quant, size
         self.repo, self.key, self.shards = repo, key, shards or []
         self.local, self.path = local, path   # a models.toml name and file
+        self.binary = None       # a preset's own llama_server, if it has one
         self.inv = self.fit = self.shape = self.q = None
         self.exact = self.refined = False
         self.why = None
@@ -238,7 +239,9 @@ def evaluate(c, qm, mach, opts, profile, binary):
     if c.repo and not same_model(c.inv, qm, c.node):
         c.why = impostor(c.inv, qm, c.node)
         return
-    if hw.arch_supported(binary, c.inv.arch) is False:
+    # a preset that names its own build is judged by that build: a fork
+    # made for an arch upstream lacks must not be turned away for it
+    if hw.arch_supported(c.binary or binary, c.inv.arch) is False:
         c.why = "llama.cpp here does not load %s" % c.inv.arch
         return
     c.fit, ctx = best_fit(c.inv, mach, opts, profile)
@@ -345,6 +348,8 @@ def local_cands(models, qm):
             continue
         c = Cand(None, name, inv.quant_label, inv.file_size, local=name,
                  path=p)
+        if isinstance(cfg.get("llama_server"), str):
+            c.binary = cfg["llama_server"]
         c.inv, c.exact = inv, True
         c.hash = evalrun.file_hash(p)
         ident, parent, method = link_local(inv, qm.nodes)

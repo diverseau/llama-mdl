@@ -382,10 +382,16 @@ grader that can be satisfied without doing the work is worse than no
 grader: it still reads as evidence.
 
 The items are generated from a seed in `~/.config/mdl/eval-seed`, so
-they exist on this machine and nowhere else, and no model can have
-trained on them. Model-written code runs in a subprocess in a temp
-directory with a timeout; `--sandbox` runs it in a throwaway podman or
-docker container with no network instead. Results go to
+these exact questions exist on this machine and nowhere else, and a model
+cannot have memorised them. That is narrower than "never seen anything
+like them": the templates, the problem families and the algorithms behind
+the reference solutions are public, and familiar to any model trained on
+code. Model-written code runs in a subprocess in a temp directory with a
+timeout - that is not a sandbox: it runs as you, and can read your files
+and reach the network. `--sandbox` runs it in a throwaway podman or
+docker container with no network, 512 MB and 128 processes instead. The
+expected answers never enter either: the code writes its results, and
+mdl compares them outside. Results go to
 `~/.config/mdl/evals.jsonl`, keyed by the file, quant, KV type and
 context they were run at.
 
@@ -423,6 +429,12 @@ mdl find --new                         only what has appeared since last time
 mdl find --no-fetch                    use cached GGUF headers only
 ```
 
+The ranking is a heuristic for a shortlist, not a measured quality
+scale: it combines public scores that were run by different people with
+different harnesses, assumed quant and KV penalties, and lineage priors.
+The bands around each estimate are the same heuristic's, not validated
+confidence intervals. Your own `mdl eval` results are the measurement.
+
 It looks at everything in models.toml and at the catalog: a mix of popular
 and newly created GGUF repositories, grouped by their source models, with
 the eval results those models report. For the best-scoring candidates
@@ -433,7 +445,7 @@ expected quality:
 - Public results are put on one scale (50 + 15 z against the catalog).
   A score far above what the model's other scores predict, or one on a
   benchmark the model card says it trained on, is down-weighted and
-  flagged with ⚑.
+  flagged with ⚑ - inconsistent evidence, not proof of gaming.
 - A fine-tune with no results of its own borrows its parent's, with
   wider error bars per generation.
 - Lower-bit quants and 4-bit KV cost points; how many is relearned once
@@ -442,8 +454,9 @@ expected quality:
   shown on your local scale instead.
 
 Models no one has rated show up under "worth testing" when they could
-beat the #1, with the `mdl fit --write` and `mdl eval` commands that
-would rate them.
+beat the #1, with the steps that would rate them: download the quant,
+then `mdl fit <file> --write NAME` and `mdl eval NAME`. mdl does not
+download models itself.
 
 The catalog is one SQLite file in `~/.cache/mdl/` (`$XDG_CACHE_HOME` is
 honoured). `mdl catalog
@@ -451,13 +464,11 @@ pull` fetches a published snapshot from
 [diversemate/mdl-catalog](https://huggingface.co/datasets/diversemate/mdl-catalog)
 (`$MDL_CATALOG_REPO` points it elsewhere).
 
-As of September 17, 2026, nightly publication is deliberately disabled
-(`CATALOG_ENABLED=false` in GitHub Actions), and the public dataset has no
-`catalog.sqlite` yet. Until a snapshot is published, `mdl catalog pull`
-reports that no published catalog is available. Build one locally with
-`mdl catalog build` instead.
-The nightly job requires `CATALOG_ENABLED=true` and a write-capable
-`HF_TOKEN`; a skipped run does not refresh the catalog.
+A scheduled GitHub Actions job rebuilds and publishes the snapshot; it
+runs only when the repository enables it (`CATALOG_ENABLED=true`, with a
+write-capable `HF_TOKEN`), and a skipped run does not refresh it. If the
+dataset has no snapshot, `mdl catalog pull` says so; `mdl catalog build`
+makes one locally.
 
 The default build takes the top 3,000 GGUF repositories by downloads and
 the newest 500 by creation date, deduplicates the overlap, and reads their

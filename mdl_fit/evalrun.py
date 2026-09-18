@@ -776,6 +776,20 @@ def chars_per_token(client):
     return len(sample) / n if n else 4.0
 
 
+def sans_port(argv):
+    """A command without its --port: `mdl run x --port N` moves the
+    server, it does not change what it serves."""
+    out, skip = [], False
+    for a in argv:
+        if skip:
+            skip = False
+        elif a == "--port":
+            skip = True
+        else:
+            out.append(a)
+    return out
+
+
 def wait_ready(proc, port, name, log):
     import mdl
     deadline = time.monotonic() + mdl.ready_timeout()
@@ -868,31 +882,47 @@ def main(args, out=None):
     if o.get("sandbox") and not env.runtime:
         die("--sandbox needs podman or docker on PATH")
     state = mdl.read_state(name)
-    started = False
+    started, ran = False, argv
     if state:
         port = state["port"]
-        w("server   %s is already running on port %d; using it\n" % (
-            name, port))
-    else:
-        proc, log, port = mdl.spawn(name, models, binary,
-                                    int(o["port"]) if "port" in o else None)
-        w("server   starting %s on port %d...\n" % (name, port))
-        out.flush()
-        wait_ready(proc, port, name, log)
-        started = True
-    w("\n")
+        # B15: a server started before the config changed is not the
+        # config: the record must describe what is answering
+        ran = state.get("argv")
+        if ran is not None and sans_port(ran) != sans_port(argv):
+            die("%s is running with other settings than %s has now; "
+                "'mdl stop %s' and run again, so the result describes "
+                "what ran" % (name, mdl.CONFIG, name))
+        w("server   %s is already running on port %d; using it%s\n" % (
+            name, port, "" if ran else
+            " (started by an older mdl: its settings are not checked)"))
     t0, done, partial = time.time(), [], False
-    progress = Progress(out)
+    progress = None
     try:
+        if not state:
+            proc, log, port = mdl.spawn(
+                name, models, binary, int(o["port"]) if "port" in o else None)
+            # B14: ours from the moment it exists - a Ctrl-C while it
+            # loads must stop it too, not only one during the run
+            started = True
+            w("server   starting %s on port %d...\n" % (name, port))
+            out.flush()
+            wait_ready(proc, port, name, log)
+        w("\n")
+        progress = Progress(out)
         client = Client(port)
         cpt = chars_per_token(client)
         props = client.props()
+        served = props.get("model_path")
+        if served and Path(served).name != target.model_path.name:
+            die("the server on port %d is serving %s, not %s" % (
+                port, Path(served).name, target.model_path.name))
         n_ctx = (props.get("default_generation_settings") or {}).get(
             "n_ctx") or flags.ctx
         run_items(client, items, env, cpt, n_ctx, done, progress)
         progress.close()
     except KeyboardInterrupt:
-        progress.close()
+        if progress:
+            progress.close()
         partial = True
         w("\ninterrupted; keeping the %d items done\n" % len(done))
     finally:
@@ -908,8 +938,8 @@ def main(args, out=None):
            "arch": target.inv.arch, "quant": target.inv.quant_label,
            "bpw": round(target.inv.bpw, 3), "params": target.inv.n_params,
            "kv": flags.kv_label, "ctx": flags.ctx, "build": build,
-           "sampling": sampling_of(mdl.build_argv(name, models[name],
-                                                  binary)),
+           "sampling": sampling_of(ran or argv),
+           "argv": ran, "runtime_checked": ran is not None,
            "suite_version": evalsuite.SUITE_VERSION,
            "grader_version": evalsuite.GRADER_VERSION,
            "seed_id": evalsuite.seed_id(seed),

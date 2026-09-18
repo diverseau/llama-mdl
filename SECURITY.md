@@ -18,8 +18,9 @@ talks to it over localhost. The parts worth attacking are:
 - **The config.** `models.toml` becomes command-line arguments. A path that
   escapes the argument list, or an `args` entry that makes `mdl` run something
   other than the configured binary, is a bug worth reporting.
-- **The state file.** `~/.local/state/mdl/state.json` records a pid that `mdl`
-  will later signal. Anything that lets another user's file, or a crafted one,
+- **The state files.** One per running server, in `~/.local/state/mdl/run/`
+  (`<name>.json`, `$XDG_STATE_HOME` honoured), each recording a pid and
+  process group that `mdl` will later signal. Anything that lets another user's file, or a crafted one,
   make `mdl` signal a process it did not start is in scope.
 - **Log and config writes.** Anywhere `mdl` writes through a symlink it did not
   expect, or leaves a file readable that should not be.

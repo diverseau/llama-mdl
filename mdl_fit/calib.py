@@ -202,21 +202,47 @@ def bench_argv(bench_bin, model_path, flags, n_prompt=512, n_gen=128,
             "-r", str(reps), "-o", "json"]
     if not flags.mmap:
         argv += ["-mmp", "0"]
+    threads = threads or flags.threads     # the config's, unless overridden
     if threads:
         argv += ["-t", str(threads)]
     return argv
 
 
-def run_bench(bench_bin, model_path, flags, timeout=1800, **kw):
-    """{'pp': t/s, 'tg': {depth: t/s}} from llama-bench, or None (which
-    is also what an OOM looks like)."""
+OOM = re.compile(r"out of memory|OutOfDeviceMemory|failed to allocate|"
+                 r"cudaMalloc failed|unable to allocate|alloc.*failed|"
+                 r"not enough memory|std::bad_alloc", re.I)
+UNSUPPORTED = re.compile(r"unknown argument|invalid argument|"
+                         r"invalid parameter|unrecognized|error: unknown",
+                         re.I)
+
+
+def bench(bench_bin, model_path, flags, timeout=1800, **kw):
+    """(result or None, why): why is "ok", "oom", "timeout",
+    "unsupported" or "error", so a caller can tell a config that did not
+    fit from one this build does not take - only the first is evidence
+    about memory."""
     try:
         p = subprocess.run(bench_argv(bench_bin, model_path, flags, **kw),
                            capture_output=True, text=True, timeout=timeout,
                            creationflags=hw.NO_WINDOW, errors="replace")
+    except subprocess.TimeoutExpired:
+        return None, "timeout"
     except (OSError, subprocess.SubprocessError):
-        return None
-    return parse_bench(p.stdout)
+        return None, "error"
+    got = parse_bench(p.stdout)
+    if got:
+        return got, "ok"
+    said = p.stderr or ""
+    if OOM.search(said):
+        return None, "oom"
+    if UNSUPPORTED.search(said):
+        return None, "unsupported"
+    return None, "error"
+
+
+def run_bench(bench_bin, model_path, flags, timeout=1800, **kw):
+    """{'pp': t/s, 'tg': {depth: t/s}} from llama-bench, or None."""
+    return bench(bench_bin, model_path, flags, timeout, **kw)[0]
 
 
 def parse_bench(stdout):

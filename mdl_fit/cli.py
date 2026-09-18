@@ -647,17 +647,26 @@ def cmd_verify(target, o, out):
     w("speed    running llama-bench (pp2048 at ub %d, tg64 at depth %s)...\n"
       % (flags.ub, "/".join(kctx(d) if d else "0" for d in depths)))
     out.flush()
-    got = calib.run_bench(bench_bin, target.model_path, flags, n_prompt=2048,
-                          n_gen=0, reps=1)
-    tg = calib.run_bench(bench_bin, target.model_path, flags, n_prompt=0,
-                         n_gen=64, reps=1, depth=",".join(map(str, depths)))
+    got, why_pp = calib.bench(bench_bin, target.model_path, flags,
+                              n_prompt=2048, n_gen=0, reps=1)
+    tg, why_tg = calib.bench(bench_bin, target.model_path, flags, n_prompt=0,
+                             n_gen=64, reps=1,
+                             depth=",".join(map(str, depths)))
+    if not got and not tg and "oom" not in (why_pp, why_tg):
+        # a timeout, a flag this build does not take, a crash: none of it
+        # says the config did not fit, so none of it moves the margin
+        die("llama-bench did not complete (%s); nothing learned. Run it "
+            "by hand to see why: %s" % (
+                why_tg if why_tg == why_pp else "%s, %s" % (why_pp, why_tg),
+                " ".join(calib.bench_argv(bench_bin, target.model_path,
+                                          flags, n_prompt=0, n_gen=64))))
     if not got and not tg:
         mach_saved = hw.load_saved()
         margins = mach_saved.setdefault("margin_arch", {})
         margins[target.inv.arch] = margins.get(target.inv.arch,
                                                hw.DEFAULT_MARGIN) + 256 * MiB
         hw.save(mach_saved)
-        die("llama-bench did not complete (out of memory?). The margin for "
+        die("llama-bench ran out of memory. The margin for "
             "%s is now %d MiB; run mdl fit again" % (
                 target.inv.arch, margins[target.inv.arch] // MiB))
     p = perf.params(mach)
