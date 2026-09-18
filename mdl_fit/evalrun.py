@@ -95,6 +95,7 @@ class Reply:
         self.prompt_tokens, self.completion_tokens = (prompt_tokens,
                                                       completion_tokens)
         self.error = error
+        self.timings = None      # llama-server's own speed report, if any
 
 
 _THINK = re.compile(r"<think>.*?(?:</think>|$)", re.S)
@@ -160,10 +161,12 @@ class Client:
             calls.append(Call(tc.get("id") or "call_%d" % i,
                               fn.get("name", ""), args, raw))
         usage = data.get("usage") or {}
-        return Reply(content, (msg.get("reasoning_content") or "") + inline,
-                     calls, choice.get("finish_reason") or "",
-                     usage.get("prompt_tokens", 0),
-                     usage.get("completion_tokens", 0))
+        r = Reply(content, (msg.get("reasoning_content") or "") + inline,
+                  calls, choice.get("finish_reason") or "",
+                  usage.get("prompt_tokens", 0),
+                  usage.get("completion_tokens", 0))
+        r.timings = data.get("timings") if isinstance(data, dict) else None
+        return r
 
     def tokens(self, text):
         try:
@@ -323,6 +326,7 @@ def run_item(client, item, env, cpt=4.0):
     world = item.world() if item.world else None
     prompt = completion = 0
     capped = thought = False
+    speed = []
     budget = item.meta.get("turns", MAX_TURNS) if world else 1
     for _ in range(budget):
         r = client.chat(msgs, item.tools, item.max_tokens, seed)
@@ -330,6 +334,13 @@ def run_item(client, item, env, cpt=4.0):
         completion += r.completion_tokens
         capped = capped or r.finish == "length"
         thought = thought or bool(r.reasoning)
+        t = r.timings or {}
+        if t:
+            # the depth a token was decoded at is the whole prompt, cached
+            # or not; the prefill rate is over the part that was not
+            speed.append([r.prompt_tokens, t.get("predicted_per_second"),
+                          t.get("predicted_n", 0),
+                          t.get("prompt_per_second"), t.get("prompt_n", 0)])
         if r.error or world is None or not r.calls:
             break
         msgs.append({"role": "assistant", "content": r.content or "",
@@ -353,7 +364,7 @@ def run_item(client, item, env, cpt=4.0):
             "error": bool(r.error), "thinking": thought,
             "reply": (r.content or "")[-400:],
             "prompt_tokens": prompt, "completion_tokens": completion,
-            "seconds": round(time.time() - t0, 2)}
+            "seconds": round(time.time() - t0, 2), "speed": speed}
 
 
 RETRIES = (2, 5)          # seconds before each retry of a server error
@@ -1121,6 +1132,15 @@ def main(args, out=None):
            "partial": partial or any("failed" in r for r in done),
            "items": done}
     save(rec)
+    # the replies' own timings are a measurement of this exact
+    # configuration at the depths the suite reached: book them as its
+    # profile, which mdl fit shows beside its prediction
+    if served_as and not partial:
+        samples = [x for r in done for x in r.get("speed") or []]
+        calib.record_profile(
+            "eval", target.model_path, rec["hash"], build,
+            (served_as.get("binary") or {}).get("path"),
+            model.parse_argv(ran or argv)[0], calib.from_samples(samples))
     if o.get("json"):
         w(json.dumps(rec, indent=1) + "\n")
         return rec

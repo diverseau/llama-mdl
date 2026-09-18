@@ -261,6 +261,7 @@ mdl fit hf:someorg/Some-Model-GGUF               every quant in a repo,
                                                  headers only, nothing downloaded
 mdl fit tiel-coder-Fast --explain                why it does not fit, and fixes
 mdl fit tiel-coder-Fast --verify                 run it, measure, learn
+mdl fit tiel-coder-Fast --profiles               what each config measured here
 mdl fit hw                                       measure this machine (~3 min)
 mdl fit hw --idle                                book now as what idle looks like
 mdl fit inspect <gguf>                           per-layer tensor inventory
@@ -293,6 +294,16 @@ figure means the oracle agreed. What it gets wrong is stored against the
 file in `~/.config/mdl/calib.jsonl`, so the next fit starts from it.
 Speed is bytes over bandwidth per side, and the bandwidths are seeds
 until `mdl fit hw` has measured them; the confidence line says which.
+
+A prediction is replaced by a measurement where there is one. `--verify`
+runs llama-bench at the config, and every `mdl eval` keeps the speed the
+server itself reported for each reply at the depth it was made; both are
+filed as a measured profile of that exact configuration - the same model
+bytes, the same llama.cpp build from the same binary, the same flags.
+`mdl fit <name>` shows the current config's profile under its prediction,
+with the difference, and `--profiles` lists every configuration of the
+model measured here. A profile is speed only: it says nothing about
+quality.
 
 VRAM and RAM are planned for the machine at idle, not as the scan finds
 it: a game or a browser full of tabs open while you run `mdl fit` is

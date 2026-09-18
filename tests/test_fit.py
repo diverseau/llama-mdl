@@ -20,8 +20,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import support                                   # noqa: E402
 from support import mdl, run, sandbox, teardown  # noqa: E402
 
-from mdl_fit import (calib, emit, explain, gguf, hw, model,  # noqa: E402
-                     perf, remote, search)
+from mdl_fit import (calib, cli, emit, evalrun, evalsuite,  # noqa: E402
+                     explain, gguf, hw, model, perf, remote, search)
 
 t = support.Tally("test_fit")
 check = t.check
@@ -522,6 +522,57 @@ check("which builds a command", "-fa" in mdl.build_argv(
 _, err, code = run(mdl.cmd_fit, ["demo", "--no-oracle", "--write", "tuned"])
 check("--write refuses a name that exists", ("already in" in err, code),
       (True, 1))
+
+# --------------------------------------------------- measured profiles --
+check("samples are filed under the depth they reached, by median",
+      calib.from_samples([(100, 40.0, 64, 900.0, 512),
+                          (200, 44.0, 64, None, 0),
+                          (300, 90.0, 3, None, 0),       # too few tokens
+                          (20000, 30.0, 64, 700.0, 300)]),
+      {"tg": {0: 42.0, 16384: 30.0}, "n": {0: 2, 16384: 1}, "pp": 800.0})
+check("no usable sample, no profile",
+      calib.from_samples([(0, 50.0, 2, 10.0, 10)]), None)
+base = ("h", 10424, "/bin/ls", model.Flags(ctx=8192))
+check("a profile is its exact configuration: model, build, binary, flags",
+      len({calib.profile_key(*k) for k in (
+          base, ("h2",) + base[1:], ("h", 10425) + base[2:],
+          ("h", 10424, "/bin/other", base[3]),
+          base[:3] + (model.Flags(ctx=16384),))}), 5)
+target = cli.resolve("demo")
+tctx = search.Context(target.inv, hw.probe())
+calib.record_profile("eval", target.model_path, cli._model_hash(target),
+                     tctx.build, cli._binary_path(target.binary),
+                     target.flags, {"tg": {0: 12.5, 4096: 11.0},
+                                    "pp": 300.0, "n": {0: 3, 4096: 2}})
+calib.record_profile("bench", target.model_path, cli._model_hash(target),
+                     tctx.build, cli._binary_path(target.binary),
+                     target.flags.replace(ub=2048),
+                     {"tg": {0: 14.0}, "pp": 500.0, "n": {}})
+out, err, code = run(mdl.cmd_fit, ["demo", "--no-oracle", "--min-ctx", "2k",
+                                   "--profile", "chat"])
+check("fit shows what the current config measured, beside the prediction",
+      ["measured  decode 0 12.5 t/s (predicted" in out,
+       "4k 11.0 t/s" in out, "prefill 300 t/s" in out,
+       "1 other measured configuration" in out], [True] * 4)
+out, err, code = run(mdl.cmd_fit, ["demo", "--profiles"])
+check("--profiles lists every configuration measured, newest first",
+      (code, out.count("decode "), "<- current config" in out,
+       out.index("bench") < out.index("eval"),
+       "nothing about quality" in out), (0, 2, True, True, True))
+reply = evalrun.Reply("x", prompt_tokens=5000, completion_tokens=80)
+reply.timings = {"predicted_per_second": 21.0, "predicted_n": 80,
+                 "prompt_per_second": 650.0, "prompt_n": 5000}
+
+
+class Timed:
+    def chat(self, *a, **k):
+        return reply
+
+
+spent = evalrun.run_item(Timed(), evalsuite.build(["reason"], "s")[0],
+                         evalrun.Env())
+check("an eval reply's own timings are kept with the item",
+      spent["speed"], [[5000, 21.0, 80, 650.0, 5000]])
 
 # a config that is far over: explain it, and apply the first fix
 with open(mdl.CONFIG, "a", encoding="utf-8") as fh:

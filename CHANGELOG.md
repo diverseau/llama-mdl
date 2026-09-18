@@ -2,6 +2,19 @@
 
 Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
 
+## [0.6.16] - 2026-09-19
+
+### Added
+
+- Measured fit profiles: what one exact configuration - model bytes,
+  llama.cpp build, binary and flags - did on this machine, as decode
+  speed at the depths it reached and prefill speed. `mdl fit --verify`
+  books its llama-bench run as one, and `mdl eval` books the timings the
+  server reported for every reply. `mdl fit <name>` shows the current
+  config's measurements beside the prediction, with the difference, and
+  `mdl fit <name> --profiles` lists every configuration measured. Speed
+  only - a profile claims nothing about quality.
+
 ## [0.6.15] - 2026-09-19
 
 ### Added

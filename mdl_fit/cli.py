@@ -3,6 +3,7 @@ numbers come from model, perf, search and calib."""
 
 import json
 import re
+import shutil
 import sys
 from pathlib import Path
 
@@ -32,6 +33,8 @@ options:
                      write pick N into <name>
   --write NAME       append the winner to models.toml as [NAME]
   --verify           run the config: oracle + llama-bench, and learn
+  --profiles         every measured profile for this model: what each
+                     configuration did here, from --verify and mdl eval
   --no-oracle        analytic only; skip llama-fit-params
   --now              plan for the machine as it is this minute, open apps
                      and all, instead of at idle
@@ -46,7 +49,7 @@ VALUE_OPTS = {"--profile", "--min-ctx", "--min-tps", "--max-ctx",
               "--kv-floor", "--np", "--mmproj", "--apply", "--write",
               "--depth"}
 BOOL_OPTS = {"--explain", "--verify", "--no-oracle", "--json", "--yes",
-             "--now"}
+             "--now", "--profiles"}
 
 
 def die(msg):
@@ -426,6 +429,8 @@ def fit_one(target, o, out):
             verdict(ctx_obj, current)))
         for note in fit_notes(ctx_obj, current):
             w("          %s\n" % note)
+        for line in measured_lines(ctx_obj, target, mach):
+            w(line + "\n")
         w("\n")
     hint = kv_hint(ctx_obj, o, target, result, mach)
     if not result.picks:
@@ -534,6 +539,107 @@ def apply_to(target, flags, ctx_obj, label):
     mdl.patch_params(target.name, keys, drop=drop)
     print("applied %s to [%s] in %s (old config kept as .bak)" % (
         label, target.name, mdl.CONFIG))
+
+
+# ------------------------------------------------------------ profiles --
+
+def _binary_path(binary):
+    return str(Path(shutil.which(binary) or binary).resolve())
+
+
+def _model_hash(target):
+    from . import evalrun
+    try:
+        return evalrun.file_hash(target.model_path)
+    except OSError:
+        return None
+
+
+def _predicted(ctx_obj, mach, flags, depths):
+    p = perf.params(mach)
+    pl = perf.Placement(ctx_obj.shape, flags)
+    return ({d: 1 / perf.decode_time(pl, p, d) for d in depths},
+            2048 / perf.prefill_time(pl, p, 2048, flags.ub))
+
+
+def _speeds(e, pred_tg):
+    parts = []
+    for d, tps in sorted(((int(k), v) for k, v in e["tg"].items())):
+        pred = pred_tg.get(d)
+        parts.append("%s %.1f t/s%s" % (
+            kctx(d) if d else "0", tps, " (predicted %.1f, %+.0f%%)" % (
+                pred, (pred / tps - 1) * 100) if pred else ""))
+    return parts
+
+
+def measured_lines(ctx_obj, target, mach):
+    """What this exact configuration measured here, beside what the
+    model predicts for it - or nothing, when it has not been measured."""
+    if target.flags is None or target.model_path is None:
+        return []
+    mh = _model_hash(target)
+    if not mh:
+        return []
+    have = calib.profiles(mh)
+    key = calib.profile_key(mh, ctx_obj.build, _binary_path(target.binary),
+                            target.flags)
+    mine = next((e for e in have if e.get("key") == key), None)
+    out = []
+    if mine:
+        depths = sorted(int(k) for k in mine["tg"])
+        pred_tg, pred_pp = _predicted(ctx_obj, mach, target.flags, depths)
+        out.append("measured  decode " + " · ".join(_speeds(mine, pred_tg)))
+        if mine.get("pp"):
+            out.append("          prefill %.0f t/s (predicted %.0f, %+.0f%%)"
+                       % (mine["pp"], pred_pp,
+                          (pred_pp / mine["pp"] - 1) * 100))
+        out.append("          from %s, %s" % (
+            "mdl eval" if mine.get("source") == "eval"
+            else "llama-bench (--verify)", mine.get("at", "?")[:10]))
+    others = len(have) - (1 if mine else 0)
+    if others:
+        out.append("          %d other measured configuration%s of this "
+                   "model: mdl fit %s --profiles" % (
+                       others, "" if others == 1 else "s",
+                       target.name or target.model_path))
+    return out
+
+
+def cmd_profiles(target, o, out):
+    """Every measured profile of this model's bytes, newest first."""
+    w = out.write
+    mh = _model_hash(target)
+    have = calib.profiles(mh) if mh else []
+    if o.get("json"):
+        w(json.dumps(have, indent=1) + "\n")
+        return have
+    if not have:
+        w("no measured profiles for %s yet: mdl fit %s --verify, or "
+          "mdl eval, measures one\n" % (target.model_path.name,
+                                        target.name or target.model_path))
+        return have
+    mach = machine_for(target, o)
+    ctx_obj = search.Context(target.inv, mach)
+    current = (calib.profile_key(mh, ctx_obj.build,
+                                 _binary_path(target.binary), target.flags)
+               if target.flags else None)
+    w("%d measured profile%s of %s on this machine - speeds only; they say "
+      "nothing about quality\n\n" % (len(have), "" if len(have) == 1 else "s",
+                                     target.model_path.name))
+    for e in have:
+        f = model.Flags(**{k: v for k, v in e["flags"].items()
+                           if k in model.Flags.DEFAULTS})
+        pred_tg, _ = _predicted(ctx_obj, mach, f,
+                                [int(k) for k in e["tg"]])
+        w("%s %s · %s · ctx %s · kv %s · %s · ub %d · build %s%s\n" % (
+            e.get("at", "?")[:10], e.get("source", "?"),
+            offload(f, ctx_obj.shape), kctx(f.ctx), f.kv_label,
+            "fa on" if f.fa else "fa off", f.ub, e.get("build") or "?",
+            "  <- current config" if e.get("key") == current else ""))
+        w("           decode %s\n" % " · ".join(_speeds(e, pred_tg)))
+        if e.get("pp"):
+            w("           prefill %.0f t/s\n" % e["pp"])
+    return have
 
 
 # ------------------------------------------------------------- explain --
@@ -681,6 +787,11 @@ def cmd_verify(target, o, out):
              "pred_tg": {str(k): v for k, v in pred_tg.items()},
              "pp": (got or {}).get("pp"), "pred_pp": pred_pp}
     calib.append(entry)
+    calib.record_profile(
+        "bench", target.model_path, _model_hash(target), ctx_obj.build,
+        _binary_path(target.binary), flags,
+        {"tg": meas_tg, "pp": entry["pp"], "n": {}} if meas_tg or entry["pp"]
+        else None)
     for d in depths:
         if d in meas_tg:
             w("decode @%-5s predicted %5.1f  measured %5.1f t/s  (%+.0f%%)\n"
@@ -1133,6 +1244,8 @@ def main(args, out=None):
                 "disk; download the quant, then mdl fit <file> --write NAME")
         return cmd_hf(o["target"], o, out)
     target = resolve(o["target"])
+    if o.get("profiles"):
+        return cmd_profiles(target, o, out)
     if o.get("explain"):
         return cmd_explain(target, o, out)
     if o.get("verify"):

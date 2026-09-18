@@ -10,9 +10,11 @@ starts from it. llama-bench does the same job for speed.
 Everything lands in calib.jsonl, one line per observation.
 """
 
+import hashlib
 import json
 import os
 import re
+import statistics
 import subprocess
 import time
 from pathlib import Path
@@ -328,6 +330,89 @@ def passive(name, argv, log_path, build=None):
         return entry
     except Exception:          # noqa: BLE001 - passive by definition
         return None
+
+
+# ------------------------------------------------------------ profiles --
+#
+# A measured profile is what one exact configuration did on this
+# machine: decode speed at the context depths it was measured at, and
+# prefill speed. Exact means the same model bytes, the same llama.cpp
+# build from the same binary, and the same flags - change any of them and
+# the numbers are another profile's. They are kept apart from the
+# per-arch efficiency factors above: those nudge every prediction for an
+# architecture, these only ever describe the configuration they were
+# measured at, and say nothing about quality.
+
+DEPTHS = (0, 4096, 16384, 32768, 65536, 131072)
+MIN_DECODE = 16          # tokens: fewer is timer noise, not a speed
+MIN_PREFILL = 256
+
+
+def _build_no(build):
+    return build.get("build") if isinstance(build, dict) else build
+
+
+def profile_key(model_hash, build, binary, flags):
+    """What must match for a measurement to describe a configuration."""
+    body = {"model": model_hash, "build": _build_no(build),
+            "binary": str(binary or ""), "flags": flags.as_dict()
+            if hasattr(flags, "as_dict") else dict(flags)}
+    return hashlib.sha256(json.dumps(body, sort_keys=True).encode()
+                          ).hexdigest()[:16]
+
+
+def bucket(depth):
+    """The measured depth a sample is filed under: the largest of DEPTHS
+    at or below it, so a 20k-token prompt counts toward 16k."""
+    return max(d for d in DEPTHS if d <= max(0, depth))
+
+
+def from_samples(samples):
+    """{"tg": {depth: t/s}, "pp": t/s, "n": {depth: count}} from
+    (depth, decode t/s, decode tokens, prefill t/s, prefill tokens)
+    samples, taking the median per depth so one slow reply - a cold
+    cache, a busy GPU - does not become the profile."""
+    tg, pp = {}, []
+    for depth, dec, n_dec, pre, n_pre in samples:
+        if dec and n_dec >= MIN_DECODE:
+            tg.setdefault(bucket(depth), []).append(dec)
+        if pre and n_pre >= MIN_PREFILL:
+            pp.append(pre)
+    if not tg and not pp:
+        return None
+    return {"tg": {d: statistics.median(v) for d, v in sorted(tg.items())},
+            "n": {d: len(v) for d, v in sorted(tg.items())},
+            "pp": statistics.median(pp) if pp else None}
+
+
+def record_profile(source, model_path, model_hash, build, binary, flags,
+                   measured):
+    """Book a measurement against its exact configuration."""
+    if not measured:
+        return None
+    entry = {"kind": "profile", "source": source, "model": str(model_path),
+             "model_hash": model_hash, "build": _build_no(build),
+             "binary": str(binary or ""),
+             "flags": flags.as_dict() if hasattr(flags, "as_dict")
+             else dict(flags),
+             "key": profile_key(model_hash, build, binary, flags),
+             "tg": {str(d): round(v, 2) for d, v in measured["tg"].items()},
+             "n": {str(d): v for d, v in (measured.get("n") or {}).items()},
+             "pp": round(measured["pp"], 1) if measured.get("pp") else None}
+    append(entry)
+    return entry
+
+
+def profiles(model_hash):
+    """The latest profile per configuration for one model's bytes,
+    newest first."""
+    latest = {}
+    for i, e in enumerate(load("profile")):
+        if e.get("model_hash") == model_hash:
+            latest[e.get("key")] = (i, e)       # later lines win
+    # file order, not the timestamp: two measured in one second still
+    # come out in the order they were made
+    return [e for _, e in sorted(latest.values(), key=lambda p: -p[0])]
 
 
 def seen_failures(model_path):
