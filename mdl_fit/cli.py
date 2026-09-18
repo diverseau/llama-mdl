@@ -1,9 +1,14 @@
 """mdl fit - the command line. Everything here is presentation; the
 numbers come from model, perf, search and calib."""
 
+import difflib
 import json
+import os
 import re
+import shlex
+import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 from . import calib, emit, explain, gguf, hw, model, perf, remote, search
@@ -31,6 +36,7 @@ options:
   --apply N          with --explain, apply fix N to <name>; without it,
                      write pick N into <name>
   --write NAME       append the winner to models.toml as [NAME]
+  --dry-run          preview --apply or --write without editing the config
   --verify           run the config: oracle + llama-bench, and learn
   --no-oracle        analytic only; skip llama-fit-params
   --now              plan for the machine as it is this minute, open apps
@@ -46,7 +52,7 @@ VALUE_OPTS = {"--profile", "--min-ctx", "--min-tps", "--max-ctx",
               "--kv-floor", "--np", "--mmproj", "--apply", "--write",
               "--depth"}
 BOOL_OPTS = {"--explain", "--verify", "--no-oracle", "--json", "--yes",
-             "--now"}
+             "--now", "--dry-run"}
 
 
 def die(msg):
@@ -80,6 +86,11 @@ def parse(args):
         else:
             pos.append(a)
             i += 1
+    if opts.get("dry-run") and not (opts.get("apply") or opts.get("write")):
+        die("--dry-run needs --apply N or --write NAME")
+    if opts.get("dry-run") and (opts.get("verify") or (
+            opts.get("explain") and not opts.get("apply"))):
+        die("--dry-run needs an edit; cannot combine with these options")
     if len(pos) != 1:
         die(USAGE.rstrip())
     opts["target"] = pos[0]
@@ -511,7 +522,31 @@ def as_json(ctx_obj, opts, result, target, current):
 
 # --------------------------------------------------------------- write --
 
-def write_new(name, keys, comment):
+def preview(name, old, new, out=None):
+    """Show the exact planned text and commands without touching the config."""
+    import mdl
+    commands = []
+    for text in (old, new):
+        data = tomllib.loads(text)
+        if name not in data:
+            commands.append("(new preset)")
+            continue
+        binary = (os.environ.get("MDL_LLAMA_SERVER")
+                  or data.get("llama_server") or mdl.DEFAULT_BIN)
+        argv = mdl.build_argv(name, data[name], str(binary))
+        # Match native shell quoting: list2cmdline on Windows, shlex on POSIX.
+        commands.append(subprocess.list2cmdline(argv) if os.name == "nt"
+                        else shlex.join(argv))
+    out = out or sys.stdout
+    for line in difflib.unified_diff(old.splitlines(), new.splitlines(),
+                                     "models.toml", "models.toml (proposed)",
+                                     n=3, lineterm=""):
+        out.write(line + "\n")
+    out.write("before: %s\nafter: %s\ndry run: nothing written\n"
+              % tuple(commands))
+
+
+def write_new(name, keys, comment, dry_run=False, out=None):
     import mdl
     mdl.check_name(name)
     models, _ = mdl.load_config()
@@ -519,19 +554,25 @@ def write_new(name, keys, comment):
         die("%s is already in %s; pick another name, or use --apply "
             "on it" % (name, mdl.CONFIG))
     text = mdl.CONFIG.read_text(encoding="utf-8")
-    mdl.append_table(text.rstrip("\n") + "\n\n",
-                     emit.block(name, keys, comment), name)
+    _, proposed = mdl.plan_append_table(text.rstrip("\n") + "\n\n",
+                                         emit.block(name, keys, comment), name)
+    if dry_run:
+        return preview(name, text, proposed, out)
+    mdl.write_atomic(mdl.CONFIG, proposed, keep_backup=True)
     print("added [%s] to %s" % (name, mdl.CONFIG))
 
 
-def apply_to(target, flags, ctx_obj, label):
+def apply_to(target, flags, ctx_obj, label, dry_run=False, out=None):
     import mdl
     keys, drop = emit.table(flags, target.model_path, ctx_obj.shape.n_layer,
                             ctx_obj.machine.build or {}, target.mmproj,
                             keep_args=target.cfg.get("args", []))
     keys.pop("model", None)
     keys.pop("mmproj", None)
-    mdl.patch_params(target.name, keys, drop=drop)
+    old, proposed = mdl.plan_patch_params(target.name, keys, drop=drop)
+    if dry_run:
+        return preview(target.name, old, proposed, out)
+    mdl.write_atomic(mdl.CONFIG, proposed, keep_backup=True)
     print("applied %s to [%s] in %s (old config kept as .bak)" % (
         label, target.name, mdl.CONFIG))
 
@@ -608,7 +649,8 @@ def cmd_explain(target, o, out):
         if not 1 <= n <= len(fixes):
             die("no fix #%s" % choice)
         apply_to(target, fixes[n - 1].fit.flags, ctx_obj,
-                 "fix #%d (%s)" % (n, fixes[n - 1].label))
+                 "fix #%d (%s)" % (n, fixes[n - 1].label),
+                 dry_run=o.get("dry-run", False), out=out)
 
 
 # -------------------------------------------------------------- verify --
@@ -1147,7 +1189,8 @@ def main(args, out=None):
                              keep_args=(target.cfg or {}).get("args", []))
         write_new(o["write"], keys, emit.stamp(
             opts.profile, f.gpu, ctx_obj.machine.vram_usable,
-            f.speed.decode0, (ctx_obj.machine.build or {}).get("build")))
+            f.speed.decode0, (ctx_obj.machine.build or {}).get("build")),
+            dry_run=o.get("dry-run", False), out=out)
     elif o.get("apply"):
         if target.kind != "name":
             die("--apply writes into a models.toml entry; for a file use "
@@ -1155,4 +1198,5 @@ def main(args, out=None):
         n = int(o["apply"])
         if not 1 <= n <= len(result.picks):
             die("no pick #%s" % o["apply"])
-        apply_to(target, result.picks[n - 1].flags, ctx_obj, "pick #%d" % n)
+        apply_to(target, result.picks[n - 1].flags, ctx_obj, "pick #%d" % n,
+                 dry_run=o.get("dry-run", False), out=out)
