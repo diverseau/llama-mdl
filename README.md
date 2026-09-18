@@ -43,6 +43,13 @@ pipx install llama-mdl          # or: pip install llama-mdl
 pipx install "llama-mdl[ui]"    # with the terminal dashboard
 ```
 
+To update, ask for it: pip leaves an installed package alone otherwise,
+and `mdl --version` says which one you are running.
+
+```sh
+pipx upgrade llama-mdl          # or: pip install -U "llama-mdl[ui]"
+```
+
 The package is `llama-mdl`; the command it installs is `mdl`. (Plain `mdl`
 on PyPI is an unrelated project.) Nothing but the dashboard has a
 dependency, and that is [Textual](https://textual.textualize.io/).
