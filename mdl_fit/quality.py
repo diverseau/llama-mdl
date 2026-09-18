@@ -343,6 +343,34 @@ class Model:
     def penalty(self, bpw, params, ctk="f16", ctv="f16"):
         return quant_penalty(bpw, params, self.scale) + kv_penalty(ctk, ctv)
 
+    def evidence_details(self, node, profile, cat=None):
+        """Read the public inputs and parent priors without changing scores.
+
+        Public tuples retain normalized scores, not benchmark names or raw
+        values, so the explanation reads those back from the same catalog.
+        Parents contribute even when a child has evidence of its own.
+        """
+        chain, seen = [], set()
+        current = node
+        while current and current not in seen and len(chain) <= 16:
+            chain.append(current)
+            seen.add(current)
+            row = self.nodes.get(current)
+            current = row["parent"] if row is not None else None
+        domains = set(WEIGHTS.get(profile, WEIGHTS["agent"]))
+        benchmarks = []
+        for r in cat.all_evals() if cat else []:
+            used = sorted(domains.intersection(domains_of(r["benchmark"],
+                                                         self.cfg)))
+            if r["node"] in seen and r["value"] is not None and used:
+                benchmarks.append({"node": r["node"],
+                                   "benchmark": r["benchmark"],
+                                   "value": r["value"],
+                                   "verified": bool(r["verified"]),
+                                   "domains": used})
+        return {"inherited": len(chain) > 1, "parents": chain[1:],
+                "benchmarks": benchmarks}
+
     def estimate(self, node, domain, _depth=0):
         key = (node, domain)
         if key in self.memo:

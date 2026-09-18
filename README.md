@@ -461,6 +461,12 @@ different harnesses, assumed quant and KV penalties, and lineage priors.
 The bands around each estimate are the same heuristic's, not validated
 confidence intervals. Your own `mdl eval` results are the measurement.
 
+`mdl find --why MODEL` explains a catalog id or models.toml name (a unique,
+case-insensitive substring works too): its rank or why it is absent, every
+considered quant and rejection, and the heuristic's evidence, parent priors,
+flags and quant/KV penalties. It uses the same profile and filters as `find`;
+add `--json` for the explanation as data.
+
 It looks at everything in models.toml and at the catalog: a mix of popular
 and newly created GGUF repositories, grouped by their source models, with
 the eval results those models report. For the best-scoring candidates

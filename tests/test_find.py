@@ -345,4 +345,214 @@ find.evaluate(alien, qm, mach, opts, "agent", binary)
 check("but a preset's own fork that loads it is not turned away",
       alien.why != "llama.cpp here does not load alienarch", True)
 
+# Explanations use the same pipeline, including its early decisions, without
+# changing the table or requiring a real catalog, header, machine or eval.
+from unittest.mock import patch                    # noqa: E402
+import mdl                                         # noqa: E402
+
+
+decisions, why_notes = [], []
+why_qm = quality.Model(cat)
+why_cands = find.catalog_cands(cat, why_qm, mach, "agent", binary, {},
+                              why_notes, decisions=decisions)
+find.fit_all(why_cands, why_qm, mach, opts, "agent", binary, False, why_notes)
+why_main, why_explore = find.choose(why_cands, why_qm)
+while find.refine(why_main[:find.ROWS] + why_explore[:5], why_qm, mach,
+                  opts, "agent", binary, False):
+    why_main, why_explore = find.choose(why_cands, why_qm)
+check("early size and architecture decisions retain every quant",
+      [(n, r["quant"], code) for n, r, code, _ in decisions],
+      [("big/Huge", "Q4_K_M", "too-big"),
+       ("odd/Alien", "Q8_0", "arch")])
+check("impostors and their unsized siblings have stable reasons",
+      [(c.reject[0], c.why == c.reject[1]) for c in drafts],
+      [("impostor", True), ("impostor", True)])
+alien.binary = None
+find.evaluate(alien, why_qm, mach, opts, "agent", binary)
+check("the header's architecture rejection is structured",
+      (alien.reject[0], alien.why == alien.reject[1]), ("arch", True))
+
+floor_cand = find.Cand("Fam/Base-Instruct", "short", "Q8_0", 32_000_000)
+floor_cand.inv = inv_of("short")
+floor_cand.inv.meta["llama.context_length"] = 4096
+find.evaluate(floor_cand, why_qm, mach, opts, "agent", binary)
+check("a real fit below the context floor explains the floor",
+      (floor_cand.reject[0], floor_cand.why == floor_cand.reject[1],
+       "context" in floor_cand.why), ("floors", True, True))
+for profile, floor in (("agent", ("s_turn", 0.0)),
+                       ("chat", ("decode_d", 1e12))):
+    floor_cand.inv = inv_of("slow")
+    with patch.dict(find.FLOORS, {profile: floor}):
+        find.evaluate(floor_cand, why_qm, mach, find.search.Options(profile),
+                      profile, binary)
+    check("a real fit explains the %s speed floor" % profile,
+          (floor_cand.reject[0], "s/turn" in floor_cand.why if
+           profile == "agent" else "decode" in floor_cand.why),
+          ("floors", True))
+
+bad_headers = [find.Cand("Fam/Base-Instruct", "bad", q, 32_000_000,
+                          "q/bad", q + ".gguf") for q in ("Q8_0", "Q4_K_M")]
+with patch.object(find, "fetch", side_effect=OSError("broken header")):
+    find.fit_all(bad_headers, why_qm, mach, opts, "agent", binary, False, [])
+check("failed headers explain the error for every dependent quant",
+      [(c.reject, c.why) for c in bad_headers],
+      [(("header", "broken header"), "broken header")] * 2)
+cached = find.Cand("Fam/Base-Instruct", "cached", "Q8_0", 32_000_000,
+                   "q/cached", "cached.gguf")
+find.fit_all([cached], why_qm, mach, opts, "agent", binary, True, [])
+check("no-fetch explains an uncached header",
+      (cached.reject[0], "not cached" in cached.why), ("header", True))
+
+quant_rows = [{"node": "Fam/Base-Instruct", "quant": q, "file": q,
+               "size": size, "repo": "q/test"} for q, size in
+              (("F16", 60_000_000), ("Q8_0", 32_000_000),
+               ("Q4_K_M", 18_000_000), ("Q3_K_M", 13_000_000))]
+quant_drops = []
+find.pick_quants(quant_rows, mach, 30_000_000, quant_drops)
+check("quant selection records both the bpw cap and representative limit",
+      [(r["quant"], code, "cap" in msg) for _, r, code, msg in quant_drops],
+      [("Q3_K_M", "quant-cap", False), ("F16", "quant-cap", True)])
+
+
+def why_run(*args, models=None):
+    out = io.StringIO()
+    with patch.object(mdl, "load_config", return_value=(models or {}, binary)), \
+            patch.object(hw, "probe", return_value=mach), \
+            patch.object(find.evalrun, "load", return_value=[]), \
+            patch.object(find.evalsuite, "secret", return_value="seed"):
+        find.main(["--catalog", str(path), *args], out=out)
+    return out.getvalue()
+
+
+ranked_text = why_run("--why", "Fam/Base-Instruct")
+check("--why shows rank, every quant, evidence and penalties",
+      [s in ranked_text for s in ("main table · rank #1", "Q8_0", "Q4_K_M",
+                                  "heuristic", "humaneval = 70",
+                                  "quant/KV penalty", "KV ")], [True] * 7)
+for name, code in (("big/Huge", "too-big"), ("odd/Alien", "arch")):
+    result = why_run("--why", name)
+    check("--why explains %s before fitting" % code,
+          ("not shown" in result, code + ":" in result), (True, True))
+fresh_text = why_run("--why", "new/Fresh")
+check("unrated models explain worth testing and inherited evidence",
+      [s in fresh_text for s in ("worth testing · rank #1", "unrated",
+                                 "inherited from Fam/Base-Instruct",
+                                 "humaneval = 70")], [True] * 4)
+check("case-insensitive unique substring matches the same model",
+      why_run("--why", "base-INSTRUCT"), ranked_text)
+for query, expected in (("Fam/", ("ambiguous", "Fam/Base",
+                                  "Fam/Base-Instruct")),
+                        ("nonexistent", ("no model matches",))):
+    try:
+        why_run("--why", query)
+        message = ""
+    except mdl.MdlError as e:
+        message = str(e)
+    check("matching errors are one line and useful: %s" % query,
+          (all(s in message for s in expected), "\n" not in message),
+          (True, True))
+
+data = json.loads(why_run("--why", "Fam/Base-Instruct", "--json"))
+check("explanation JSON carries the same model, rank, quants and evidence",
+      (data["node"], data["status"], data["rank"], len(data["quants"]),
+       data["quality"]["heuristic"], data["quality"]["rated"],
+       data["quality"]["lo"] < data["quality"]["mean"] < data["quality"]["hi"],
+       all(r["fit"]["ctx"] >= opts.min_ctx and r["penalty"] >= 0
+           for r in data["quants"])),
+      ("Fam/Base-Instruct", "main table", 1, 2, True, True, True, True))
+check("JSON retains rejection codes for early drops",
+      json.loads(why_run("--why", "big/Huge", "--json"))[
+          "quants"][0]["reject"]["code"], "too-big")
+
+# One displayed row makes the second rated model lose its place. Local
+# evidence excludes it from explore, as choose() does in a full table.
+loser = next(c for c in why_cands if c.node == "ft/Coder")
+loser.q.kinds.add("local")
+with patch.object(find, "ROWS", 1):
+    limited, testing = find.choose(why_cands, why_qm)
+    beaten = find.explain(loser.node, why_cands, decisions, limited, testing,
+                          why_qm, "agent", cat)
+    beaten_text = io.StringIO()
+    find.show_why(beaten, beaten_text.write)
+check("a rankable model outside the table names who beat it and the gap",
+      (beaten["status"], beaten["quants"][0]["beaten_by"][0]["node"],
+       beaten["quants"][0]["beaten_by"][0]["by"] > 0,
+       "beaten by Fam/Base-Instruct" in beaten_text.getvalue()),
+      ("not shown", "Fam/Base-Instruct", True, True))
+loser.q.kinds.remove("local")
+
+normal = io.StringIO()
+find.show(why_main, why_explore, why_qm, mach, opts, "agent", cat.meta(),
+          why_notes, normal.write, items)
+check("normal CLI table remains byte-identical to show() for the fixture",
+      why_run().encode("utf-8"), normal.getvalue().encode("utf-8"))
+check("normal JSON shape and rows stay unchanged",
+      json.loads(why_run("--json")),
+      find.as_json(why_main, why_explore, why_qm, "agent"))
+filtered = json.loads(why_run("--why", "Fam/Base-Instruct", "--license",
+                              "mit", "--json"))
+check("--why respects filters without inventing a fit rejection",
+      (filtered["status"], filtered["quants"][0]["reject"],
+       filtered["quants"][0]["selection"]),
+      ("not shown", None, ["excluded by --license or --tag"]))
+
+real_profile = quality.Model.profile
+
+
+def locally_rated(self, node, profile):
+    result = real_profile(self, node, profile)
+    if node == "ft/Coder":
+        result.kinds.add("local")
+    return result
+
+
+with patch.object(find, "ROWS", 1), \
+        patch.object(quality.Model, "profile", locally_rated):
+    check("the CLI explains a rankable model beaten out of the table",
+          "beaten by Fam/Base-Instruct" in why_run("--why", "ft/Coder"), True)
+
+# Force the existing TIE rule to admit both real fitted quants, so the
+# explanation must agree with choose() about which speed wins.
+with patch.object(find, "TIE", 100):
+    tie_main, tie_explore = find.choose(why_cands, why_qm)
+    tie_data = find.explain("Fam/Base-Instruct", why_cands, [], tie_main,
+                            tie_explore, why_qm, "agent", cat)
+    check("the faster quant's win is explained using the ranking TIE rule",
+          any("faster quant" in s and "TIE" in s
+              for r in tie_data["quants"] for s in r["selection"]), True)
+
+local_path = TMP / "local.gguf"
+local_path.write_bytes(b"fixture")
+local_inv = inv_of(str(local_path))
+local_inv.meta["general.source.huggingface.repository"] = "Fam/Base-Instruct"
+with patch.object(gguf, "load", return_value=local_inv):
+    local_data = json.loads(why_run("--why", "my-preset", "--json",
+                                    models={"my-preset": {
+                                        "model": str(local_path)}}))
+check("models.toml names resolve to their catalog identity and own quant",
+      (local_data["node"], any(r["local"] == "my-preset" and
+                              r["header"] == "exact"
+                              for r in local_data["quants"])),
+      ("Fam/Base-Instruct", True))
+with patch.object(gguf, "load", side_effect=gguf.NotGGUF("bad local header")):
+    bad_local = json.loads(why_run("--why", "my-preset", "--json",
+                                   models={"my-preset": {
+                                       "model": str(local_path)}}))
+check("unreadable local GGUFs retain their header error",
+      bad_local["quants"][0]["reject"],
+      {"code": "header", "message": "bad local header"})
+no_fetch = json.loads(why_run("--why", "Fam/Base-Instruct", "--no-fetch",
+                              "--json"))
+check("--why --no-fetch uses the normal cache-only pipeline",
+      (no_fetch["status"], [r["reject"]["code"] for r in no_fetch["quants"]]),
+      ("not shown", ["header", "header"]))
+check("flags and their reasons appear in explanations",
+      "⚑ ft/Coder claims" in why_run("--why", "ft/Coder"), True)
+check("chat explanations use the table's decode units",
+      "decode" in why_run("--why", "Fam/Base-Instruct", "--profile", "chat"),
+      True)
+shortlist = json.loads(why_run("--why", "ft/Coder", "--top", "1", "--json"))
+check("shortlist omissions are distinct from fit rejections",
+      shortlist["quants"][0]["selection"], ["outside the --top shortlist"])
+
 sys.exit(t.done())
