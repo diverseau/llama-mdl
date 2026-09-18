@@ -2,6 +2,20 @@
 
 Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
 
+## [0.6.17] - 2026-09-19
+
+### Added
+
+- `mdl fit --apply N --dry-run` and `--write NAME --dry-run` show the
+  exact change first: a diff of models.toml and the llama-server command
+  before and after, and write nothing. A dry run fails the same way the
+  real one would.
+- Every write to models.toml keeps the last five versions
+  (`models.toml.bak`, then `.bak.1` to `.bak.4`); `mdl config --history`
+  lists them with the tables each differs in, and `mdl config --undo`
+  swaps the config with the newest backup - a second `--undo` puts it
+  back.
+
 ## [0.6.16] - 2026-09-19
 
 ### Added

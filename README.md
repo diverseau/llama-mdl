@@ -75,6 +75,11 @@ For bulk edits, run `mdl config` to open models.toml in `$VISUAL` or
 `$EDITOR` (Notepad on Windows or vi elsewhere if neither is set).
 Editor arguments work too, for example `EDITOR="code --wait"`.
 `mdl config --path` prints the active config's location.
+Writes by mdl keep five previous versions: `.bak` (newest), then `.bak.1`
+through `.bak.4`. `mdl config --history` lists their dates, sizes and changed
+tables. `mdl config --undo` swaps the current file with `.bak`, leaving the
+older backups in place; undo twice to get back where you started.
+Edits made directly in your editor do not create these backups.
 
 ## Config
 
@@ -334,6 +339,8 @@ the limit would page from disk on every token. A busy CPU is noted, and
 existing entry with pick or fix N, leaving its sampling flags, comments
 and a `.bak` behind. Every flag the prediction rests on is written out,
 including `-np` and `-fit off`, so what runs is what was predicted.
+Add `--dry-run` to `--apply N` or `--write NAME` to see the config diff and
+server command before and after. Nothing is written, including backups.
 
 ## Scoring a model: `mdl eval`
 

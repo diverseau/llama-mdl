@@ -188,4 +188,75 @@ check("the dashboard still clears a field it leaves out",
       {"ngl": 5})
 teardown(root)
 
+
+# ------------------------------------------- bounded config history ----
+def config_snapshot():
+    return {p.name: p.read_bytes() for p in mdl.CONFIG.parent.iterdir()}
+
+
+root, port = sandbox()
+versions = [mdl.CONFIG.read_bytes()]
+for i in range(6):
+    mdl.patch_params("demo", {"ctx": 5000 + i})
+    versions.append(mdl.CONFIG.read_bytes())
+backups = mdl.config_backups(mdl.CONFIG)
+check("six writes retain exactly five backups",
+      sorted(p.name for p in mdl.CONFIG.parent.glob("*.bak*")),
+      sorted(p.name for p in backups))
+check("backups hold previous contents newest first",
+      [p.read_bytes() for p in backups], list(reversed(versions[1:6])))
+snapshot = config_snapshot()
+older = [p.read_bytes() for p in backups[1:]]
+out, err, code = run(mdl.cmd_config, ["--undo"])
+check("undo restores the previous bytes", mdl.CONFIG.read_bytes(), versions[5])
+check("undo reports version date and remaining count",
+      (code, "restored config from" in out, "5 backups remain" in out),
+      (0, True, True))
+check("undo retains older history", [p.read_bytes() for p in backups[1:]], older)
+run(mdl.cmd_config, ["--undo"])
+check("undo twice restores both files and history", config_snapshot(), snapshot)
+out, err, code = run(mdl.cmd_config, ["--history"])
+check("history lists indices, dates, sizes and changed tables",
+      (code, len(out.splitlines()), all("bytes  differs: demo" in line
+                                      for line in out.splitlines())),
+      (0, 5, True))
+check("history is read only", config_snapshot(), snapshot)
+backups[0].write_text("[broken", encoding="utf-8")
+snapshot = config_snapshot()
+_, err, code = run(mdl.cmd_config, ["--undo"])
+check("invalid backup is one line and changes nothing",
+      (code, len(err.splitlines()), config_snapshot()), (1, 1, snapshot))
+backups[0].unlink()
+snapshot = config_snapshot()
+_, err, code = run(mdl.cmd_config, ["--undo"])
+check("missing backup is one line and changes nothing",
+      (code, len(err.splitlines()), config_snapshot()), (1, 1, snapshot))
+mdl.patch_params("demo", {"ctx": 6000})
+check("rotation tolerates holes", backups[0].read_bytes(), versions[6])
+
+# Fail after one older slot has moved: the current config must survive.
+real_replace = mdl.os.replace
+calls = []
+
+
+def fail_mid_rotation(src, dst):
+    calls.append(src)
+    if len(calls) == 2:
+        raise OSError("disk full")
+    return real_replace(src, dst)
+
+
+before = mdl.CONFIG.read_bytes()
+mdl.os.replace = fail_mid_rotation
+try:
+    mdl.patch_params("demo", {"ctx": 7000})
+except OSError:
+    pass
+finally:
+    mdl.os.replace = real_replace
+check("a partial rotation never loses current config", mdl.CONFIG.read_bytes(),
+      before)
+check("a partial rotation leaves no temp files", strays(root), [])
+teardown(root)
+
 sys.exit(t.done())

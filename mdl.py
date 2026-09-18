@@ -33,7 +33,7 @@ CONFIG_DIR = _base("XDG_CONFIG_HOME", ".config") / "mdl"
 CONFIG = CONFIG_DIR / "models.toml"
 STATE_DIR = _base("XDG_STATE_HOME", ".local", "state") / "mdl"
 STATE = STATE_DIR / "state.json"
-VERSION = "0.6.16"
+VERSION = "0.6.17"
 DEFAULT_BIN = "llama-server"
 CONFIG_DATA = {}          # last parsed config, for UI-only settings
 DEFAULT_PORT = 8080
@@ -50,7 +50,8 @@ KNOWN = {"model", "mmproj", "ngl", "n_cpu_moe", "ctx", "flash_attn",
 SIMPLE = (("ngl", "-ngl"), ("n_cpu_moe", "--n-cpu-moe"), ("ctx", "-c"),
           ("parallel", "-np"), ("port", "--port"))
 
-USAGE = ("usage: mdl {init|config [--path]|add <model.gguf>|check|list|"
+USAGE = ("usage: mdl {init|config [--path|--undo|--history]|"
+         "add <model.gguf>|check|list|"
          "doctor [--json] [name]|run <name> [--port N]|"
          "stop [<name>|--all]|ps [--json]|logs [-f] [name]|ui [--no-fx]|"
          "fit <gguf|hf:repo|name> [--help]|eval <name> [--help]|"
@@ -198,8 +199,8 @@ def _comment(value):
     return ""
 
 
-def write_params(name, cfg, path=None, drop=()):
-    """Make [name]'s keys exactly `cfg`, rewriting the file in place.
+def plan_params(name, cfg, path=None, drop=()):
+    """Return (old, proposed) text making [name] exactly `cfg`, without writing.
 
     Only key lines are touched, so comments, ordering and blank lines
     survive - which a dump-and-rewrite through tomllib would not. A key
@@ -255,13 +256,11 @@ def write_params(name, cfg, path=None, drop=()):
     if set(got) != want:
         die(f"not writing {path}: [{name}] would have "
             f"{', '.join(sorted(set(got) ^ want))} wrong")
-    # Atomic, with a .bak: this is the user's own file.
-    write_atomic(path, out, keep_backup=True)
+    return text, out
 
 
-def append_table(current, block, name, path=None):
-    """Add a new [name] table, refusing if the result would not parse or
-    would not hold exactly one table of that name."""
+def plan_append_table(current, block, name, path=None):
+    """Return (old, proposed) text, refusing an invalid new [name] table."""
     path = path or CONFIG
     out = current + block
     try:
@@ -270,11 +269,13 @@ def append_table(current, block, name, path=None):
         die(f"not writing {path}: the new [{name}] would not parse ({e})")
     if not isinstance(got.get(name), dict):
         die(f"not writing {path}: [{name}] would not read back as a table")
-    write_atomic(path, out, keep_backup=True)
+    return current, out
 
 
-def patch_params(name, changes, path=None, drop=()):
-    """Set `changes` in [name] and remove `drop`, keeping every other key.
+def plan_patch_params(name, changes, path=None, drop=()):
+    """Plan `changes` in [name] and remove `drop`, keeping every other key.
+
+    Return (old, proposed) text without writing either file.
 
     write_params makes the table exactly what it is given, so `mdl fit
     --apply` - which knows about the flags it tuned and nothing else -
@@ -290,7 +291,25 @@ def patch_params(name, changes, path=None, drop=()):
         die(f"no [{name}] table in {path} to update")
     merged = {k: v for k, v in table.items() if k not in drop}
     merged.update({k: v for k, v in changes.items() if k not in drop})
-    write_params(name, merged, path=path)
+    return plan_params(name, merged, path=path)
+
+
+def write_params(name, cfg, path=None, drop=()):
+    """Replace the table, including clearing fields omitted by the dashboard."""
+    _, text = plan_params(name, cfg, path, drop)
+    write_atomic(path or CONFIG, text, keep_backup=True)
+
+
+def patch_params(name, changes, path=None, drop=()):
+    """Write a validated patch while preserving unrelated keys."""
+    _, text = plan_patch_params(name, changes, path, drop)
+    write_atomic(path or CONFIG, text, keep_backup=True)
+
+
+def append_table(current, block, name, path=None):
+    """Write a validated new table."""
+    _, text = plan_append_table(current, block, name, path)
+    write_atomic(path or CONFIG, text, keep_backup=True)
 
 
 def check_port(value, where=""):
@@ -750,10 +769,24 @@ def write_atomic(path, text, keep_backup=False):
     either the whole old file or the whole new one.
     """
     if keep_backup and path.exists():
-        shutil.copy2(path, path.with_name(path.name + ".bak"))
+        backups = config_backups(path)
+        for i in range(4, 0, -1):
+            if backups[i - 1].exists():
+                os.replace(backups[i - 1], backups[i])
+            else:
+                backups[i].unlink(missing_ok=True)
+        # Never move the current config: a failed rotation leaves it intact.
+        tmp_backup = path.with_name(path.name + ".bak.tmp%d" % os.getpid())
+        try:
+            shutil.copy2(path, tmp_backup)
+            os.replace(tmp_backup, backups[0])
+        finally:
+            tmp_backup.unlink(missing_ok=True)
     tmp = path.with_name(path.name + ".tmp%d" % os.getpid())
     try:
-        with open(tmp, "w", encoding="utf-8") as fh:
+        mode = "wb" if isinstance(text, bytes) else "w"
+        kwargs = {} if isinstance(text, bytes) else {"encoding": "utf-8"}
+        with open(tmp, mode, **kwargs) as fh:
             fh.write(text)
             fh.flush()
             os.fsync(fh.fileno())    # the rename is no use if the data is not down
@@ -930,7 +963,10 @@ def learn_from_log(name, cfg, binary, log):
 
 def cmd_fit(args):
     from mdl_fit import cli
-    cli.main(args)
+    try:
+        cli.main(args)
+    except OSError as e:           # a file or the config, not a bug
+        die("cannot fit: %s" % " ".join(str(e).splitlines()))
 
 
 def cmd_eval(args):
@@ -1107,12 +1143,68 @@ def human_size(nbytes):
     return f"{nbytes}B"
 
 
+def config_backups(path):
+    """Newest first, with five slots shared by every config writer."""
+    return [path.with_name(path.name + ".bak" + (".%d" % i if i else ""))
+            for i in range(5)]
+
+
+def config_history(undo=False):
+    """Undo swaps current and .bak; older slots stay in place.
+
+    The replaced current is the next undo target, so two undos are an
+    identity, not a walk backwards through history. Ordinary writes push
+    that target into .bak.1 and retain at most five previous versions.
+    """
+    backups = config_backups(CONFIG)
+    try:
+        if undo:
+            backup = backups[0]
+            if not backup.is_file():
+                die("no config backup to undo")
+            previous = backup.read_bytes()
+            tomllib.loads(previous.decode("utf-8"))
+            stamp = time.ctime(backup.stat().st_mtime)
+            current = CONFIG.read_bytes()
+            # Save the displaced bytes before replacing the current file.
+            write_atomic(backup, current)
+            try:
+                write_atomic(CONFIG, previous)
+            except (OSError, KeyboardInterrupt):
+                write_atomic(backup, previous)
+                raise
+            print("restored config from %s; %d backups remain" % (
+                stamp, sum(p.is_file() for p in backups)))
+            return
+        current = tomllib.loads(CONFIG.read_text(encoding="utf-8"))
+        for i, backup in enumerate(backups):
+            if not backup.is_file():
+                continue
+            stat = backup.stat()
+            try:
+                old = tomllib.loads(backup.read_text(encoding="utf-8"))
+                names = sorted(k for k in current.keys() | old.keys()
+                               if (isinstance(current.get(k), dict)
+                                   or isinstance(old.get(k), dict))
+                               and current.get(k) != old.get(k))
+                detail = ", ".join(names) or "(none)"
+            except (ValueError, UnicodeError):
+                detail = "(invalid TOML)"
+            print("%d  %s  %d bytes  differs: %s" % (
+                i, time.ctime(stat.st_mtime), stat.st_size, detail))
+    except (OSError, ValueError, UnicodeError) as e:
+        die("cannot %s config: %s" % (
+            "undo" if undo else "read", " ".join(str(e).splitlines())))
+
+
 def cmd_config(args):
+    if args in (["--undo"], ["--history"]):
+        return config_history(undo=args == ["--undo"])
     if args == ["--path"]:
         print(CONFIG.resolve())
         return
     if args:
-        die("usage: mdl config [--path]")
+        die("usage: mdl config [--path|--undo|--history]")
     if not CONFIG.is_file():
         die("No config found. Run 'mdl init' first.")
     editor = (os.environ.get("VISUAL") or os.environ.get("EDITOR")

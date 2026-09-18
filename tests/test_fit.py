@@ -902,4 +902,59 @@ check("sizes: absolute or a share of the total",
       [cli.size("0.5G", 0), cli.size("512MiB", 0), cli.size("35%", 100)],
       [GiB // 2, 512 << 20, 35])
 
+
+# ----------------------------------------------- preview is read only ----
+hw.probe = lambda *a, **k: machine(vram=int(0.02 * GiB), ram=GiB)
+root, port = sandbox(model=dense)
+mdl.patch_params("demo", {"ctx": 4097})
+mdl.patch_params("demo", {"ctx": 4098})
+
+
+def config_snapshot():
+    return {p.name: p.read_bytes() for p in mdl.CONFIG.parent.iterdir()}
+
+
+base = ["demo", "--no-oracle", "--min-ctx", "2k", "--profile", "chat"]
+for edit in (["--apply", "1"], ["--write", "preview"]):
+    before = config_snapshot()
+    out, err, code = run(mdl.cmd_fit, base + edit + ["--dry-run"])
+    check("%s preview includes diff and both commands" % edit[0],
+          (code, all(x in out for x in ("--- models.toml",
+           "+++ models.toml (proposed)", "before: ", "after: ",
+           "dry run: nothing written"))), (0, True))
+    check("%s preview preserves bytes and directory listing" % edit[0],
+          config_snapshot(), before)
+    if edit[0] == "--write":
+        check("new preset has no before command", "before: (new preset)" in out,
+              True)
+for edit in (["--write", "demo"], ["--write", "bad name"], ["--apply", "999"]):
+    before = config_snapshot()
+    _, dry_err, dry_code = run(mdl.cmd_fit, base + edit + ["--dry-run"])
+    _, err, code = run(mdl.cmd_fit, base + edit)
+    check("invalid edit has identical real and preview error: %s" % edit,
+          (dry_err, dry_code, len(dry_err.splitlines())), (err, 1, 1))
+    check("invalid edit leaves no files changed", config_snapshot(), before)
+for args in (["--dry-run"], ["demo", "--dry-run"]):
+    _, err, code = run(mdl.cmd_fit, args)
+    check("dry run without an edit is one line", (code, len(err.splitlines())),
+          (1, 1))
+mdl.patch_params("demo", {"ctx": 8192, "kv_type": "f16"})
+before = config_snapshot()
+out, err, code = run(mdl.cmd_fit, ["demo", "--explain", "--no-oracle",
+                                    "--apply", "1", "--dry-run"])
+check("explain can preview a fix", (code, "after: " in out), (0, True))
+check("explain preview is read only", config_snapshot(), before)
+# Parsing validation also runs in the shared append planner.
+errors = []
+for dry_run in (True, False):
+    before = config_snapshot()
+    _, err, code = run(cli.write_new, "bad", {"bad key": 1}, "",
+                       dry_run)
+    errors.append(err)
+    check("unrenderable edit is refused before writing",
+          (code, len(err.splitlines())), (1, 1))
+    check("refused plan leaves no files changed", config_snapshot(), before)
+check("parse errors match for preview and write", errors[0], errors[1])
+teardown(root)
+
 sys.exit(t.done())
