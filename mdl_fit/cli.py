@@ -530,7 +530,7 @@ def apply_to(target, flags, ctx_obj, label):
                             keep_args=target.cfg.get("args", []))
     keys.pop("model", None)
     keys.pop("mmproj", None)
-    mdl.write_params(target.name, keys, drop=drop)
+    mdl.patch_params(target.name, keys, drop=drop)
     print("applied %s to [%s] in %s (old config kept as .bak)" % (
         label, target.name, mdl.CONFIG))
 

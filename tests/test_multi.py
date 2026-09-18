@@ -148,4 +148,56 @@ check("a corrupt one is discarded, not fatal", mdl.read_states(), {})
 check("and cleared away", mdl.STATE.exists(), False)
 teardown(root)
 
+# ------------------------------- a wrapper that leaves its server (B03) ----
+# The wrapper exits at once; the server it started ignores SIGTERM and
+# holds the port. Stop used to watch only the wrapper's pid, see it gone,
+# and say "stopped" with the server still up and ps showing nothing.
+import os          # noqa: E402
+import socket      # noqa: E402
+import subprocess  # noqa: E402
+import time        # noqa: E402
+
+root, port = sandbox()
+kid_py = root / "server.py"
+kid_py.write_text(
+    "import signal, socket, sys, time\n"
+    "if hasattr(signal, 'SIGTERM'):\n"
+    "    signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+    "s = socket.socket()\n"
+    "s.bind(('127.0.0.1', int(sys.argv[1])))\n"
+    "s.listen()\n"
+    "open(sys.argv[2], 'w').close()\n"
+    "while True:\n"
+    "    time.sleep(1)\n", encoding="utf-8")
+up = root / "up"
+wrap_py = root / "wrapper.py"
+wrap_py.write_text(
+    "import subprocess, sys\n"
+    "subprocess.Popen([sys.executable] + sys.argv[1:],\n"
+    "                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,\n"
+    "                 stderr=subprocess.DEVNULL)\n", encoding="utf-8")
+w = subprocess.Popen([sys.executable, str(wrap_py), str(kid_py), str(port),
+                      str(up)], start_new_session=True)
+mdl.run_dir().mkdir(parents=True, exist_ok=True)
+mdl.write_atomic(mdl.state_path("wrapped"), json.dumps(
+    {"name": "wrapped", "pid": w.pid, "port": port, "started": time.time(),
+     "log": "", "born": mdl.proc_started(w.pid),
+     "pgid": w.pid if os.name != "nt" else None}))
+w.wait(10)
+for _ in range(100):
+    if up.exists():
+        break
+    time.sleep(0.1)
+check("the wrapper is gone and its server is up",
+      (mdl.alive(w.pid), mdl.port_busy(port)), (False, True))
+check("ps still lists a server whose wrapper exited",
+      sorted(mdl.read_states()), ["wrapped"])
+out, err, code = run(mdl.cmd_stop, ["wrapped"])
+check("stop takes the orphaned server down with it", code, 0)
+check("the port can be bound again", not mdl.port_busy(port), True)
+with socket.socket() as again:
+    again.bind(("127.0.0.1", port))
+check("and nothing is left listed", mdl.read_states(), {})
+teardown(root)
+
 sys.exit(t.done())

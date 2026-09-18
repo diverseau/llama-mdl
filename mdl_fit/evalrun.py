@@ -17,6 +17,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -182,14 +183,27 @@ class Env:
     def __init__(self, runtime=None, timeout=10, image=IMAGE):
         self.runtime, self.timeout, self.image = runtime, timeout, image
 
-    def run_python(self, files, entry="main.py", timeout=None):
+    def run_python(self, files, entry="main.py", timeout=None, read=None):
+        """Run `entry` among `files`; (passed, the tail of its output).
+
+        With `read`, also the text of that file as the run left it, or
+        None - a third item, so a grader can take its answer from a file
+        rather than from output the code under test also writes to.
+
+        The output kept is the last TAIL characters however much is
+        printed, and a run that outlives its timeout is killed with
+        everything it started, not just the process we launched.
+        """
         timeout = timeout or self.timeout
         with tempfile.TemporaryDirectory(prefix="mdl-eval-",
                                          ignore_cleanup_errors=True) as tmp:
             for name, text in files.items():
                 Path(tmp, name).write_text(text, encoding="utf-8")
+            box = None
             if self.runtime:
-                argv = [self.runtime, "run", "--rm", "--network", "none",
+                box = "mdl-eval-%s" % os.urandom(6).hex()
+                argv = [self.runtime, "run", "--rm", "--name", box,
+                        "--network", "none",
                         "--memory", "512m", "--pids-limit", "128",
                         "-v", "%s:/w" % tmp, "-w", "/w", self.image,
                         "python", "-E", "-s", entry]
@@ -202,16 +216,74 @@ class Env:
                 ("PYTHONIOENCODING", "utf-8"),
                 ("PYTHONDONTWRITEBYTECODE", "1"),
                 ("TEMP", tmp), ("TMP", tmp), ("TMPDIR", tmp)) if v}
+            ok, out = _bounded(argv, tmp, env, timeout, box, self.runtime)
+            if read is None:
+                return ok, out
             try:
-                p = subprocess.run(argv, cwd=tmp, env=env, capture_output=True,
-                                   text=True, errors="replace",
-                                   timeout=timeout, creationflags=NO_WINDOW,
-                                   stdin=subprocess.DEVNULL)
-            except subprocess.TimeoutExpired:
-                return False, "timed out after %ds" % timeout
-            except OSError as e:
-                return False, str(e)
-            return p.returncode == 0, (p.stdout + p.stderr)[-2000:]
+                got = Path(tmp, read).read_text(encoding="utf-8",
+                                                errors="replace")
+            except OSError:
+                got = None
+            return ok, out, got
+
+
+TAIL = 4000
+
+
+def _kill_tree(p):
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/T", "/F", "/PID", str(p.pid)],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                       creationflags=NO_WINDOW)
+    else:
+        try:
+            os.killpg(p.pid, 9)          # its own session: the group is the tree
+        except OSError:
+            pass
+    try:
+        p.kill()
+    except OSError:
+        pass
+
+
+def _bounded(argv, cwd, env, timeout, box=None, runtime=None):
+    """Run argv with stdout and stderr merged into a pipe that is drained
+    as it fills, keeping only the tail - so a flood of output can neither
+    fill memory nor block the child on a full pipe."""
+    try:
+        p = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
+                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                             creationflags=NO_WINDOW,
+                             start_new_session=os.name != "nt")
+    except OSError as e:
+        return False, str(e)
+    tail = bytearray()
+
+    def pump():
+        for chunk in iter(lambda: p.stdout.read(8192), b""):
+            tail.extend(chunk)
+            if len(tail) > 2 * TAIL:
+                del tail[:-TAIL]
+
+    reader = threading.Thread(target=pump, daemon=True)
+    reader.start()
+    try:
+        code = p.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _kill_tree(p)
+        if box:
+            subprocess.run([runtime, "rm", "-f", box],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           creationflags=NO_WINDOW)
+        try:
+            p.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+        reader.join(1)
+        return False, "timed out after %ds" % timeout
+    reader.join(5)
+    text = bytes(tail[-TAIL:]).decode("utf-8", errors="replace")
+    return code == 0, text
 
 
 # ----------------------------------------------------------------- run --

@@ -119,4 +119,73 @@ check("an edit keeps a backup",
       before)
 teardown(root)
 
+# ------------------------------------------------ patch_params (B01) ----
+# `mdl fit --apply` knows the flags it tuned and nothing else. It used to
+# write through the full-replace path and delete model, port, group and
+# llama_server with it; the next run had no model to load.
+root, port = sandbox()
+mdl.CONFIG.write_text(
+    "[demo]  # the fork build\n"
+    "model = \"C:/m/x.gguf\"   # keep me\n"
+    "mmproj = \"C:/m/mmproj.gguf\"\n"
+    "llama_server = \"C:/prism/llama-server.exe\"\n"
+    "port = 8181\n"
+    "group = \"forks\"\n"
+    "ctx = 4096\n"
+    "n_cpu_moe = 12\n"
+    "args = [\n"
+    "  \"--jinja\",\n"
+    "  \"--temp\", \"0.6\",\n"
+    "]\n\n"
+    "[other]\nmodel = \"o.gguf\"\n", encoding="utf-8")
+mdl.patch_params("demo", {"ctx": 65536, "ngl": 99, "flash_attn": True,
+                          "args": ["--jinja", "--temp", "0.6"]},
+                 drop=("n_cpu_moe",))
+saved = mdl.CONFIG.read_text(encoding="utf-8")
+got = tomllib.loads(saved)
+check("a patch keeps every key it was not about",
+      {k: got["demo"][k] for k in ("model", "mmproj", "llama_server", "port",
+                                   "group")},
+      {"model": "C:/m/x.gguf", "mmproj": "C:/m/mmproj.gguf",
+       "llama_server": "C:/prism/llama-server.exe", "port": 8181,
+       "group": "forks"})
+check("sets what it was given, drops only what it was told to",
+      (got["demo"]["ctx"], got["demo"]["ngl"], "n_cpu_moe" in got["demo"]),
+      (65536, 99, False))
+check("an args array over several lines is replaced, not left dangling",
+      got["demo"]["args"], ["--jinja", "--temp", "0.6"])
+check("the next table is untouched", got["other"], {"model": "o.gguf"})
+check("inline comments on rewritten and kept lines survive",
+      ("# keep me" in saved, "# the fork build" in saved), (True, True))
+models, binary = mdl.load_config()
+check("and the preset still builds a command on its own server",
+      mdl.build_argv("demo", models["demo"], binary)[:3],
+      ["C:/prism/llama-server.exe", "-m", "C:/m/x.gguf"])
+teardown(root)
+
+# --------------------------------------- hand-written layouts (B06) ----
+# valid TOML the old writer could not find, or wrote twice
+root, port = sandbox()
+for label, text in (
+        ("a comment after the header", "[demo] # mine\nngl = 1\n"),
+        ("an indented table", "  [demo]\n  ngl = 1\n  ctx = 2\n"),
+        ("a quoted name", "[\"demo\"]\nngl = 1\n")):
+    mdl.CONFIG.write_text(text, encoding="utf-8")
+    mdl_ui.write_params("demo", {"ngl": 40, "ctx": 8})
+    saved = mdl.CONFIG.read_text(encoding="utf-8")
+    check("%s is edited, not refused" % label,
+          tomllib.loads(saved)["demo"], {"ngl": 40, "ctx": 8})
+    check("%s: no key written twice" % label, saved.count("ngl"), 1)
+mdl.CONFIG.write_text("[demo]\nngl = 1\n", encoding="utf-8")
+_, err, code = support.run(mdl.write_params, "nope", {"ngl": 2})
+check("a missing table is one line, not a ValueError",
+      (code, "no [nope] table" in err), (1, True))
+mdl_ui.write_params("demo", {"ngl": 5})       # the dashboard clears by omission
+mdl.CONFIG.write_text("[demo]\nngl = 1\nctx = 2\n", encoding="utf-8")
+mdl_ui.write_params("demo", {"ngl": 5})
+check("the dashboard still clears a field it leaves out",
+      tomllib.loads(mdl.CONFIG.read_text(encoding="utf-8"))["demo"],
+      {"ngl": 5})
+teardown(root)
+
 sys.exit(t.done())

@@ -301,4 +301,27 @@ check("a sized sibling keeps the shapes and takes the file size",
        rescaled.n_params == inv_of("a").n_params),
       (len(inv_of("a").tensors), True, True))
 
+
+# B05: a sized guess that passes, then fails on its own header, must stop
+# ranking - it used to keep its score and crash choose() on c.fit.speed
+guess = next(c for c in cands if c.q is not None and c.repo)
+real_best = find.best_fit
+find.best_fit = lambda inv, *a: (None, type("C", (), {"shape": None})())
+try:
+    guess.exact = guess.refined = False
+    find.refine([guess], qm, mach, opts, "agent", binary, False)
+finally:
+    find.best_fit = real_best
+check("a row that misses on its own header loses its score and reason",
+      (guess.fit, guess.q, guess.why), (None, None, "misses the floors"))
+again, _ = find.choose(cands, qm)
+check("and choose() passes over it rather than crashing",
+      guess in again, False)
+guess.why = None
+guess.q = qm.profile(guess.node, "agent")       # a stale score, no fit
+check("nothing without a fit is ranked, whatever else it carries",
+      guess in find.choose(cands, qm)[0], False)
+check("a row is tried once, so refinement settles",
+      find.refine([guess], qm, mach, opts, "agent", binary, False), False)
+
 sys.exit(t.done())

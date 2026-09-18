@@ -32,7 +32,7 @@ CONFIG_DIR = _base("XDG_CONFIG_HOME", ".config") / "mdl"
 CONFIG = CONFIG_DIR / "models.toml"
 STATE_DIR = _base("XDG_STATE_HOME", ".local", "state") / "mdl"
 STATE = STATE_DIR / "state.json"
-VERSION = "0.6.7"
+VERSION = "0.6.8"
 DEFAULT_BIN = "llama-server"
 CONFIG_DATA = {}          # last parsed config, for UI-only settings
 DEFAULT_PORT = 8080
@@ -129,39 +129,133 @@ def toml_value(v):
                             .replace(chr(34), chr(92) + chr(34))) + chr(34)
 
 
+KEY_LINE = re.compile(r'\s*([A-Za-z0-9_-]+|"[^"]*")\s*=')
+
+
+def _parses(text):
+    try:
+        tomllib.loads(text)
+        return True
+    except tomllib.TOMLDecodeError:
+        return False
+
+
+def _header(line):
+    """The table a line opens - "[demo]", "[ demo ]  # note", '["demo"]' -
+    or None. tomllib decides, so anything it accepts as a header is one."""
+    s = line.strip()
+    if not s.startswith("[") or s.startswith("[["):
+        return None
+    try:
+        t = tomllib.loads(s + chr(10))
+    except tomllib.TOMLDecodeError:
+        return None
+    if len(t) == 1:
+        (key, value), = t.items()
+        if value == {}:
+            return key
+    return ""                       # a header, but a dotted one: not ours
+
+
+def _value_end(lines, i, eq):
+    """Index of the last line of the value that starts after `eq` on
+    line i. An array can run over several lines; tomllib says when it
+    has closed."""
+    for j in range(i, min(len(lines), i + 500)):
+        text = chr(10).join([lines[i][eq:]] + lines[i + 1:j + 1])
+        if _parses("v =" + text):
+            return j
+    return i
+
+
+def _comment(value):
+    """A trailing comment on a one-line value, kept when it is rewritten."""
+    for hit in re.finditer("#", value):
+        head = value[:hit.start()]
+        if head.strip() and _parses("v =" + head):
+            return "  " + value[hit.start():].strip()
+    return ""
+
+
 def write_params(name, cfg, path=None, drop=()):
-    """Rewrite [name]'s keys in the config in place.
+    """Make [name]'s keys exactly `cfg`, rewriting the file in place.
 
     Only key lines are touched, so comments, ordering and blank lines
-    survive - which a dump-and-rewrite through tomllib would not. Keys in
-    `drop` are removed; both the dashboard and `mdl fit` write through
-    here.
+    survive - which a dump-and-rewrite through tomllib would not. A key
+    left out of `cfg` is removed: that is how the dashboard clears a
+    field. To change some keys and keep the rest, use patch_params.
+
+    A header or key the way people write them by hand - a comment after
+    "[demo]", indentation, a quoted name, an args array over several
+    lines - is found as tomllib reads it. The result is parsed before it
+    replaces the file, so a write that would break the config is refused.
     """
     path = path or CONFIG
-    lines = path.read_text(encoding="utf-8").split(chr(10))
-    head = lines.index("[" + name + "]")
-    tail = head + 1
-    while tail < len(lines) and not lines[tail].startswith("["):
-        tail += 1
+    text = path.read_text(encoding="utf-8")
+    lines = text.split(chr(10))
+    head = next((i for i, ln in enumerate(lines) if _header(ln) == name),
+                None)
+    if head is None:
+        die(f"no [{name}] table in {path} to update")
     body, seen, insert_at = [], set(), 0
-    for line in lines[head + 1:tail]:
-        key = re.match(r"([A-Za-z_]\w*)\s*=", line)
-        if not key:
+    i, tail = head + 1, len(lines)
+    while i < len(lines):
+        line = lines[i]
+        if _header(line) is not None:
+            tail = i
+            break
+        m = KEY_LINE.match(line)
+        if not m:
             body.append(line)
+            i += 1
             continue
-        seen.add(key.group(1))
-        if key.group(1) in drop:
-            continue
-        if key.group(1) in cfg:
-            body.append("%s = %s" % (key.group(1), toml_value(cfg[key.group(1)])))
+        key = m.group(1).strip(chr(34))
+        end = _value_end(lines, i, m.end())
+        seen.add(key)
+        if key in cfg and key not in drop:
+            one_line = end == i
+            note = _comment(line[m.end():]) if one_line else ""
+            indent = line[:len(line) - len(line.lstrip())]
+            body.append("%s%s = %s%s" % (indent, key, toml_value(cfg[key]),
+                                         note))
             insert_at = len(body)
+        i = end + 1
     for key in cfg:
-        if key not in seen:
+        if key not in seen and key not in drop:
             body.insert(insert_at, "%s = %s" % (key, toml_value(cfg[key])))
             insert_at += 1
     lines[head + 1:tail] = body
+    out = chr(10).join(lines)
+    try:
+        got = tomllib.loads(out).get(name, {})
+    except tomllib.TOMLDecodeError as e:
+        die(f"not writing {path}: the edit would not parse ({e})")
+    want = {k for k in cfg if k not in drop}
+    if set(got) != want:
+        die(f"not writing {path}: [{name}] would have "
+            f"{', '.join(sorted(set(got) ^ want))} wrong")
     # Atomic, with a .bak: this is the user's own file.
-    write_atomic(path, chr(10).join(lines), keep_backup=True)
+    write_atomic(path, out, keep_backup=True)
+
+
+def patch_params(name, changes, path=None, drop=()):
+    """Set `changes` in [name] and remove `drop`, keeping every other key.
+
+    write_params makes the table exactly what it is given, so `mdl fit
+    --apply` - which knows about the flags it tuned and nothing else -
+    once deleted model, port, group and llama_server along the way.
+    """
+    path = path or CONFIG
+    try:
+        current = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError) as e:
+        die(f"cannot read {path}: {e}")
+    table = current.get(name)
+    if not isinstance(table, dict):
+        die(f"no [{name}] table in {path} to update")
+    merged = {k: v for k, v in table.items() if k not in drop}
+    merged.update({k: v for k, v in changes.items() if k not in drop})
+    write_params(name, merged, path=path)
 
 
 def build_argv(name, cfg, binary):
@@ -331,14 +425,88 @@ def live_state(path):
     except (OSError, ValueError, KeyError, TypeError):
         path.unlink(missing_ok=True)
         return None
-    if not isinstance(pid, int) or not alive(pid):
+    if not isinstance(pid, int) or not running(state):
         path.unlink(missing_ok=True)
         return None
-    born = state.get("born")
-    if born is not None and proc_started(pid) not in (None, born):
-        path.unlink(missing_ok=True)     # pid recycled onto someone else
-        return None
     return state
+
+
+def running(state):
+    """True while anything this server started is still alive.
+
+    The pid we launched is only the start of it: if llama_server is a
+    wrapper, the wrapper can exit and leave the real server behind, still
+    holding the port and the GPU. So a dead leader is not the end - its
+    process group (POSIX) or its descendants (Windows) are checked too.
+    """
+    pid = state["pid"]
+    if alive(pid):
+        born = state.get("born")
+        # a live pid created at another instant is a recycled pid: the
+        # server is gone, and whatever group that pid leads is not ours
+        return born is None or proc_started(pid) in (None, born)
+    return bool(survivors(state))
+
+
+def survivors(state):
+    """What is left of a server whose leader has exited, or [].
+
+    POSIX: spawn() made the leader a session leader, so the group id is
+    its pid, and the kernel hands out no pid that is still in use as a
+    group id - a group with members is the one we started. Windows keeps
+    a dead parent's pid on its children, so they are found by parent pid,
+    and a child created before the leader was is a recycled pid, not ours.
+    """
+    if os.name == "nt":
+        return _descendants_nt(state["pid"], state.get("born"))
+    pgid = state.get("pgid")
+    if not isinstance(pgid, int) or pgid <= 1:
+        return []
+    try:
+        os.killpg(pgid, 0)
+    except PermissionError:
+        return [pgid]
+    except OSError:
+        return []
+    return [pgid]
+
+
+def _descendants_nt(pid, born):
+    """Live descendants of pid created after it was, via a toolhelp
+    snapshot. Empty when we cannot tell - never someone else's."""
+    if born is None:
+        return []
+
+    class Entry(ctypes.Structure):
+        _fields_ = [("size", ctypes.c_ulong), ("usage", ctypes.c_ulong),
+                    ("pid", ctypes.c_ulong), ("heap", ctypes.c_size_t),
+                    ("module", ctypes.c_ulong), ("threads", ctypes.c_ulong),
+                    ("ppid", ctypes.c_ulong), ("base", ctypes.c_long),
+                    ("flags", ctypes.c_ulong), ("exe", ctypes.c_char * 260)]
+
+    kernel32 = ctypes.windll.kernel32
+    kernel32.CreateToolhelp32Snapshot.restype = ctypes.c_void_p
+    snap = kernel32.CreateToolhelp32Snapshot(0x2, 0)   # TH32CS_SNAPPROCESS
+    if not snap or snap == ctypes.c_void_p(-1).value:
+        return []
+    kids = {}
+    try:
+        e = Entry()
+        e.size = ctypes.sizeof(Entry)
+        ok = kernel32.Process32First(ctypes.c_void_p(snap), ctypes.byref(e))
+        while ok:
+            kids.setdefault(e.ppid, []).append(e.pid)
+            ok = kernel32.Process32Next(ctypes.c_void_p(snap), ctypes.byref(e))
+    finally:
+        kernel32.CloseHandle(ctypes.c_void_p(snap))
+    out, todo = [], [pid]
+    while todo:
+        for kid in kids.get(todo.pop(), []):
+            t = proc_started(kid)
+            if kid not in out and kid != pid and t is not None and t >= born:
+                out.append(kid)
+                todo.append(kid)
+    return out
 
 
 def read_states():
@@ -427,18 +595,32 @@ def tail_until_ready(proc, log, name, port):
             time.sleep(0.2)
 
 
-def terminate(pid, sig):
+def terminate(pid, sig, state=None):
     """Signal the whole process tree, not just the pid we launched.
 
     If llama_server is a wrapper script - setting LD_LIBRARY_PATH, say -
     the recorded pid is the wrapper and the real server is its child.
     Signalling only the wrapper orphans the server and leaves the port
-    held. spawn() puts it in its own session, so the group is the tree.
+    held. spawn() puts it in its own session, so the group is the tree;
+    given the state, the group recorded there is signalled even once the
+    wrapper has gone, which getpgid() on a dead pid cannot find.
     """
     if os.name == "nt":
-        subprocess.run(["taskkill", "/T", "/F", "/PID", str(pid)],
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        pids = [pid] + (survivors(state) if state else [])
+        for p in pids:
+            if p == pid or alive(p):
+                subprocess.run(["taskkill", "/T", "/F", "/PID", str(p)],
+                               stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL,
+                               creationflags=getattr(subprocess,
+                                                     "CREATE_NO_WINDOW", 0))
+        return
+    pgid = (state or {}).get("pgid")
+    if isinstance(pgid, int) and pgid > 1:
+        try:
+            os.killpg(pgid, sig)
+        except ProcessLookupError:
+            pass                         # nothing left in it
         return
     try:
         os.killpg(os.getpgid(pid), sig)
@@ -526,7 +708,10 @@ def spawn(name, models, binary, port=None):
         handle.close()
     write_atomic(state_path(name), json.dumps(
         {"name": name, "pid": proc.pid, "port": port, "started": time.time(),
-         "log": str(log), "born": proc_started(proc.pid)}))
+         "log": str(log), "born": proc_started(proc.pid),
+         # start_new_session: the pid is the group id, and the group
+         # outlives a wrapper that exits and leaves the server behind
+         "pgid": proc.pid if os.name != "nt" else None}))
     return proc, log, port
 
 
@@ -588,27 +773,45 @@ def cmd_find(args):
 
 
 def stop_one(name, state):
-    """SIGTERM, wait, SIGKILL. True if it is gone afterwards."""
+    """SIGTERM, wait, SIGKILL. True if it is gone afterwards.
+
+    Gone means everything it started, not the pid we launched: a wrapper
+    that exits on SIGTERM while its server ignores it used to count as a
+    clean stop, and the server kept the port with nothing listed in ps.
+    """
     pid = state["pid"]
     try:
-        terminate(pid, signal.SIGTERM)
+        terminate(pid, signal.SIGTERM, state)
     except OSError as e:
         print(f"mdl: cannot signal {name} (pid {pid}): {e}", file=sys.stderr)
         return False
     for _ in range(100):
-        if not alive(pid):
+        if not running(state):
             break
         time.sleep(0.1)
     else:
         try:
-            terminate(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
+            terminate(pid, getattr(signal, "SIGKILL", signal.SIGTERM), state)
         except OSError:
             pass
-        time.sleep(0.5)
-    if alive(pid):
+        for _ in range(30):
+            if not running(state):
+                break
+            time.sleep(0.1)
+    if running(state):
         print(f"mdl: {name} (pid {pid}) would not die", file=sys.stderr)
         return False
     state_path(name).unlink(missing_ok=True)
+    port = state.get("port")
+    for _ in range(30):
+        if not isinstance(port, int) or not port_busy(port):
+            break
+        time.sleep(0.1)
+    else:
+        print(f"mdl: {name} (pid {pid}) is gone, but port {port} is still "
+              f"held - something it started may have outlived it",
+              file=sys.stderr)
+        return False
     print(f"stopped {name} (pid {pid})")
     return True
 

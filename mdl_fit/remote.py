@@ -8,6 +8,8 @@ inventories are cached by repo, file and content hash, so the second look
 at a repo costs nothing.
 """
 
+import hashlib
+import http.client
 import json
 import os
 import re
@@ -53,7 +55,10 @@ def parse_spec(spec):
     return repo, (selector or None)
 
 
-def _request(url, headers=None, timeout=30):
+def _request(url, headers=None, timeout=30, limit=None):
+    """(status, headers, body). With `limit`, at most that many bytes are
+    read and the connection is closed on the rest - a server that ignores
+    Range must not get to send a whole model into memory."""
     headers = dict(headers or {})
     headers.setdefault("User-Agent", UA)
     tok = token()
@@ -62,7 +67,8 @@ def _request(url, headers=None, timeout=30):
     req = urllib.request.Request(url, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
-            return r.status, dict(r.headers), r.read()
+            return r.status, dict(r.headers), (
+                r.read() if limit is None else r.read(limit))
     except urllib.error.HTTPError as e:
         if e.code in (401, 403):
             raise RemoteError("%s: access denied - a gated repo needs "
@@ -70,7 +76,8 @@ def _request(url, headers=None, timeout=30):
         if e.code == 404:
             raise RemoteError("%s: not found" % url) from None
         raise RemoteError("%s: HTTP %d" % (url, e.code)) from None
-    except (urllib.error.URLError, OSError) as e:
+    except (urllib.error.URLError, OSError,
+            http.client.HTTPException) as e:
         raise RemoteError("%s: %s" % (url, getattr(e, "reason", e))) from None
 
 
@@ -151,38 +158,75 @@ def mmproj_files(files):
         "mmproj") and f["path"].lower().endswith(".gguf")]
 
 
+CONTENT_RANGE = re.compile(r"bytes (\d+)-(\d+)/(\d+|\*)$")
+
+
+def _range(url, path, want, size):
+    """The first `want` bytes of a file, read no further than that."""
+    status, headers, body = _request(
+        url, {"Range": "bytes=0-%d" % (want - 1)}, limit=want)
+    if size and len(body) < want:          # want <= size: all of it
+        raise RemoteError("%s: the server sent %d of the %d bytes asked for"
+                          % (path, len(body), want))
+    if status == 206:
+        got = {k.lower(): v for k, v in headers.items()}.get("content-range")
+        m = CONTENT_RANGE.match((got or "").strip())
+        if (not m or int(m.group(1)) != 0
+                or int(m.group(2)) != len(body) - 1
+                or (m.group(3) != "*" and size
+                    and int(m.group(3)) != size)):
+            raise RemoteError("%s: the server answered a header request "
+                              "with the wrong range (%s)" % (path, got))
+    elif status != 200:                   # 200: Range ignored, read bounded
+        raise RemoteError("%s: HTTP %d to a range request" % (path, status))
+    return body
+
+
 def fetch_header(repo, path, size, revision="main"):
-    """Just enough of a remote GGUF to parse its header."""
+    """Just enough of a remote GGUF to parse its header.
+
+    Never more than LIMIT bytes, whatever the server does with Range and
+    whatever length the header claims to need: a length field is data
+    from the file, and a bad one must not become a 4 GB request.
+    """
     url = "%s/%s/resolve/%s/%s" % (endpoint(), repo, revision,
                                    urllib.parse.quote(path))
-    want = min(FIRST, size) if size else FIRST
+    cap = min(LIMIT, size) if size else LIMIT
+    want = min(FIRST, cap)
     while True:
-        status, _, body = _request(url, {"Range": "bytes=0-%d" % (want - 1)})
-        if status == 200 and size and len(body) > want:
-            body = body[:want]                    # server ignored Range
+        body = _range(url, path, want, size)
         try:
             gguf.parse_header(body)
             return body
         except gguf.Truncated as e:
-            if (size and want >= size) or want >= LIMIT:
+            need = int(e.args[0])
+            if want >= cap or need > cap:
                 raise RemoteError("%s: header larger than %d MiB"
-                                  % (path, want >> 20)) from None
-            want = max(want * 2, int(e.args[0]) + (1 << 20))
-            if size:
-                want = min(want, size)
+                                  % (path, cap >> 20)) from None
+            want = min(max(want * 2, need + (1 << 20)), cap)
 
 
-def _cache_path(repo, key, oid):
+def manifest(shards):
+    """What a cached inventory was parsed from: every shard's path, size
+    and content id in order, and the hub it came from. Any of them
+    changing is a different file."""
+    return [endpoint()] + [[s.get("path", ""), s.get("size", 0),
+                            s.get("oid", "")] for s in shards]
+
+
+def _cache_path(repo, key, shards):
+    digest = hashlib.sha256(json.dumps(manifest(shards)).encode()).hexdigest()
     safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", "%s__%s__%s" % (
-        repo, key, (oid or "")[:16]))
+        repo, key, digest[:32]))
     return hw.cache_dir() / "gguf" / (safe + ".json")
 
 
 def inventory(repo, key, shards, revision="main", cache=True):
     """Inventory for one quant (all its shards), cached by content hash."""
-    oid = "+".join(s.get("oid", "") for s in shards)
-    path = _cache_path(repo, key, oid)
-    if cache and oid:
+    # a shard with no content id cannot be told from its next version
+    cache = cache and all(s.get("oid") for s in shards)
+    path = _cache_path(repo, key, shards)
+    if cache:
         try:
             return gguf.Inventory.from_json(path.read_text(encoding="utf-8"))
         except (OSError, ValueError, KeyError):
@@ -190,12 +234,14 @@ def inventory(repo, key, shards, revision="main", cache=True):
     pieces = [(fetch_header(repo, s["path"], s["size"], revision), s["size"])
               for s in shards]
     inv = gguf.merge("hf:%s/%s" % (repo, key), pieces)
-    if cache and oid:
+    if cache:
+        tmp = path.with_name("%s.%d.tmp" % (path.name, os.getpid()))
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(inv.to_json(), encoding="utf-8")
+            tmp.write_text(inv.to_json(), encoding="utf-8")
+            os.replace(tmp, path)             # never a half-written cache
         except OSError:
-            pass
+            tmp.unlink(missing_ok=True)
     return inv
 
 

@@ -2,6 +2,44 @@
 
 Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
 
+## [0.6.8] - 2026-09-18
+
+### Fixed
+
+- `mdl fit --apply` kept only the keys it tuned and deleted the rest of
+  the model's table - `model`, `port`, `group`, `llama_server` - so the
+  next `mdl run` had nothing to load. It now changes what it tuned and
+  leaves everything else alone.
+- Editing `models.toml` from `fit` or the dashboard handles tables the
+  way people write them by hand: a comment after `[name]`, indentation,
+  a quoted name, an `args` array over several lines. The result is
+  parsed before it replaces the file, and a missing table is one line,
+  not a traceback.
+- `mdl eval` code suite: the score no longer comes from the harness's own
+  output and exit code, which the code under test shares. A submission
+  that exited cleanly at import, printed a pass line or wrote its own
+  results scored full marks. The expected answers now stay in the
+  grading process; anything short of one well-formed result per case
+  scores nothing. Output is kept to a bounded tail, and a run that times
+  out is killed with everything it started.
+- `mdl stop` reported success when a `llama_server` wrapper exited and
+  left the real server running - still holding the port and the GPU,
+  with `ps` showing nothing. The process group (POSIX) or process tree
+  (Windows) is now tracked after the wrapper exits, signalled, and
+  checked; stop succeeds only when it is gone and the port is free.
+- `fit hf:` header fetches read at most what they asked for, even from a
+  server that ignores Range; a wrong Content-Range or a short body is
+  refused; and a header whose length fields claim more than the 256 MiB
+  limit is refused instead of fetched.
+- The remote header cache is keyed by every shard's path, size and
+  content id and the hub it came from, not the first 16 characters of
+  the first shard; it is written atomically.
+- `mdl find` could crash when a row sized from a sibling's header failed
+  on its own: the old score stayed and the ranking read a fit it no
+  longer had. A re-evaluation clears everything derived, only rows with
+  a fit, a score and no rejection are ranked, and refinement repeats
+  until the rows shown have their own headers.
+
 ## [0.6.7] - 2026-09-18
 
 ### Added

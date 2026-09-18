@@ -81,9 +81,16 @@ class Cand:
         self.repo, self.key, self.shards = repo, key, shards or []
         self.local, self.path = local, path   # a models.toml name and file
         self.inv = self.fit = self.shape = self.q = None
-        self.exact = False
+        self.exact = self.refined = False
         self.why = None
         self.hash = None
+
+    @property
+    def rankable(self):
+        """A fit that clears the floors, a quality estimate, no reason to
+        turn it away - all from the same evaluation."""
+        return (self.fit is not None and self.q is not None
+                and self.why is None)
 
     @property
     def spec(self):
@@ -95,8 +102,8 @@ class Cand:
 
 def fetch(c, cache_only=False):
     """The candidate's own header (cached by content hash)."""
-    oid = "+".join(s.get("oid", "") for s in c.shards)
-    if cache_only and not remote._cache_path(c.repo, c.key, oid).is_file():
+    if cache_only and not remote._cache_path(c.repo, c.key,
+                                             c.shards).is_file():
         return None
     return remote.inventory(c.repo, c.key, c.shards)
 
@@ -224,6 +231,10 @@ def best_fit(inv, mach, opts, profile):
 
 
 def evaluate(c, qm, mach, opts, profile, binary):
+    # everything derived goes first: a refinement that turns a sized
+    # guess into a miss used to keep the guess's score, rank on it, and
+    # crash reading the fit it no longer had
+    c.fit = c.shape = c.q = c.why = None
     if c.repo and not same_model(c.inv, qm, c.node):
         c.why = impostor(c.inv, qm, c.node)
         return
@@ -389,7 +400,7 @@ def choose(cands, qm):
     when their upper band beats the #1."""
     by_node = {}
     for c in cands:
-        if c.q is not None:
+        if c.rankable:
             by_node.setdefault(c.node, []).append(c)
     best = {}
     for nid, cs in by_node.items():
@@ -410,9 +421,11 @@ def choose(cands, qm):
 
 def refine(rows, qm, mach, opts, profile, binary, cache_only):
     """The rows about to be shown get their own header, if they were
-    sized from a sibling's."""
-    todo = [c for c in rows if not c.exact and c.repo]
+    sized from a sibling's. Each is tried once, so a header that cannot
+    be had does not stop the rows from settling."""
+    todo = [c for c in rows if not c.exact and c.repo and not c.refined]
     for c in todo:
+        c.refined = True
         try:
             inv = fetch(c, cache_only)
         except (remote.RemoteError, gguf.NotGGUF, gguf.Truncated,
@@ -590,8 +603,10 @@ def main(args, out=None):
                                since)
     fit_all(cands, qm, mach, opts, profile, binary, o.get("no-fetch"), notes)
     main_rows, explore = choose(cands, qm)
-    if refine(main_rows[:ROWS] + explore[:5], qm, mach, opts, profile,
-              binary, o.get("no-fetch")):
+    # a row that fails on its own header drops out and lets another in,
+    # which may itself only be sized from a sibling - so until it settles
+    while refine(main_rows[:ROWS] + explore[:5], qm, mach, opts, profile,
+                 binary, o.get("no-fetch")):
         main_rows, explore = choose(cands, qm)
     if o.get("new"):
         seen_path().parent.mkdir(parents=True, exist_ok=True)

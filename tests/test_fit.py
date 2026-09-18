@@ -503,6 +503,7 @@ files = {"Some-Model-Q8_0.gguf": dense.read_bytes(),
              (TMP / "Split-00002-of-00002.gguf").read_bytes(),
          "mmproj-F16.gguf": b"GGUF"}
 hits = []
+HUB_MODE = {}
 
 
 class Hub(http.server.BaseHTTPRequestHandler):
@@ -531,9 +532,21 @@ class Hub(http.server.BaseHTTPRequestHandler):
         if rng:
             lo, hi = (int(x) for x in rng.split("=")[1].split("-"))
             hi = min(hi, len(data) - 1)
+        mode = HUB_MODE.get(name, "")
+        if mode == "ignore-range":
+            rng, lo, hi = None, 0, len(data) - 1
         self.send_response(206 if rng else 200)
+        if rng and mode != "no-content-range":
+            first = 5 if mode == "wrong-start" else lo
+            self.send_header("Content-Range", "bytes %d-%d/%d"
+                             % (first, hi, len(data)))
         self.end_headers()
-        self.wfile.write(data[lo:hi + 1])
+        if mode == "short":
+            hi = lo + (hi - lo) // 2
+        try:
+            self.wfile.write(data[lo:hi + 1])
+        except OSError:
+            pass                        # the client stopped reading: fine
 
 
 server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Hub)
@@ -563,6 +576,55 @@ check("the second look costs no requests", len(hits) - before, 0)
 check("a selector narrows to one quant",
       list(remote.select(groups, "q8_0")), ["Some-Model-Q8_0.gguf"])
 check("hf spec parsing", remote.parse_spec("hf:a/b:Q4_K"), ("a/b", "Q4_K"))
+
+# B04: a header request reads a bounded prefix, whatever the server does
+big = "Big-Q8_0.gguf"
+files[big] = dense.read_bytes() + b"\0" * (8 << 20)
+remote.FIRST = 4 << 20
+HUB_MODE[big] = "ignore-range"
+body = remote.fetch_header(REPO, big, len(files[big]))
+check("a server that ignores Range is read no further than asked",
+      len(body), min(remote.FIRST, len(files[big])))
+for mode, words in (("wrong-start", "wrong range"),
+                    ("no-content-range", "wrong range"),
+                    ("short", "bytes asked for")):
+    HUB_MODE[big] = mode
+    try:
+        remote.fetch_header(REPO, big, len(files[big]))
+        got = "no error"
+    except remote.RemoteError as e:
+        got = str(e)
+    check("a %s response is refused, not parsed" % mode, words in got, True)
+HUB_MODE.clear()
+# a string that claims to need more than LIMIT: the next request is
+# refused rather than sized from it
+evil = "Evil-Q8_0.gguf"
+files[evil] = (b"GGUF" + (3).to_bytes(4, "little") + (0).to_bytes(8, "little")
+               + (1).to_bytes(8, "little") + (8).to_bytes(8, "little")
+               + b"general." + (8).to_bytes(4, "little")
+               + (5000).to_bytes(8, "little") + b"x" * 8000)
+remote.FIRST, remote.LIMIT = 1024, 2048
+before = len(hits)
+try:
+    remote.fetch_header(REPO, evil, len(files[evil]))
+    got = "no error"
+except remote.RemoteError as e:
+    got = str(e)
+remote.FIRST, remote.LIMIT = 4 << 20, 256 << 20
+check("a length past the limit is refused, not fetched",
+      ("header larger" in got, len(hits) - before), (True, 1))
+del files[big], files[evil]
+
+# B11: the cache is keyed by every shard, not the first 16 characters
+two = [{"path": "a-00001-of-00002.gguf", "size": 1, "oid": "x" * 64},
+       {"path": "a-00002-of-00002.gguf", "size": 1, "oid": "y" * 64}]
+changed = [dict(two[0]), dict(two[1], oid="z" * 64)]
+check("changing a later shard changes the cache entry",
+      remote._cache_path(REPO, "a.gguf", two)
+      != remote._cache_path(REPO, "a.gguf", changed), True)
+check("so does reordering them",
+      remote._cache_path(REPO, "a.gguf", two)
+      != remote._cache_path(REPO, "a.gguf", two[::-1]), True)
 root, port = sandbox()
 out, err, code = run(mdl.cmd_fit, ["hf:" + REPO, "--profile", "chat",
                                    "--min-ctx", "1k"])

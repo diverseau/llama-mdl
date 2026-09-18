@@ -936,19 +936,30 @@ def _business(rng):
 
 
 
+# The runner holds the arguments and nothing else. The expected answers
+# stay in the grading process, which reads what the runner wrote and
+# compares it there: code under test shares the runner's process, its
+# stdout and its exit code, so none of those can carry the score.
 HARNESS = """import json
-import solution
 
-cases = json.loads(@CASES@)
-passed = 0
-for args, want in cases:
-    try:
-        got = json.loads(json.dumps(getattr(solution, @NAME@)(*args)))
-    except Exception:
+with open("cases.json", encoding="utf-8") as f:
+    task = json.load(f)
+try:
+    import solution
+    fn = getattr(solution, task["name"])
+except BaseException as e:
+    fn, why = None, type(e).__name__
+out = []
+for args in task["cases"]:
+    if fn is None:
+        out.append(["err", why])
         continue
-    passed += got == want
-print("@NONCE@ passed %d of %d" % (passed, len(cases)))
-raise SystemExit(0 if passed == len(cases) else 1)
+    try:
+        out.append(["ok", json.loads(json.dumps(fn(*args)))])
+    except BaseException as e:
+        out.append(["err", type(e).__name__])
+with open("results.json", "w", encoding="utf-8") as f:
+    json.dump(out, f)
 """
 
 
@@ -973,32 +984,37 @@ def expected(src, name, cases):
 
 
 def _grade_code(name, cases, want):
-    payload = json.dumps([[a, e] for a, e in zip(cases, want, strict=True)])
-    main = HARNESS.replace("@CASES@", repr(payload)).replace("@NAME@",
-                                                             repr(name))
+    task = json.dumps({"name": name, "cases": cases})
 
     def grade(reply, env, world=None):
         src = extract_code(reply.content, name)
         if src is None:
             return 0.0, "no function %s in the reply" % name
-        # the count is only believed when it carries a word the
-        # submission could not have known: the code under test writes to
-        # the same stdout the score is read from, and "passed 9 of 9" is
-        # four keystrokes to print
-        nonce = secrets.token_hex(8)
-        ok, out = env.run_python(
-            {"solution.py": src, "main.py": main.replace("@NONCE@", nonce)})
-        out = out or ""
-        said = [ln for ln in out.strip().splitlines() if ln.strip()]
-        last = (said[-1] if said else "no output").replace(nonce + " ", "")
+        ok, out, got = env.run_python(
+            {"solution.py": src, "main.py": HARNESS, "cases.json": task},
+            read="results.json")
+        said = [ln for ln in (out or "").strip().splitlines() if ln.strip()]
+        last = (said[-1] if said else "no output")[:160]
+        # fail closed: no results, or results that are not one well-formed
+        # entry per case, score nothing whatever the exit code said
+        try:
+            rows = json.loads(got) if got is not None else None
+        except ValueError:
+            rows = None
+        if (not isinstance(rows, list) or len(rows) != len(want)
+                or not all(isinstance(r, list) and len(r) == 2
+                           and r[0] in ("ok", "err") for r in rows)):
+            return 0.0, last if said else "no results"
         # part marks: a function that handles the ordinary cases and
         # trips on one edge is not the same answer as one that does not
         # run at all, and scoring both zero flattens the whole suite
-        hit = re.search(r"%s passed (\d+) of (\d+)" % nonce, out)
-        if hit:
-            n, total = int(hit.group(1)), int(hit.group(2))
-            return (n / total if total else 0.0), last[:160]
-        return (1.0 if ok else 0.0), last[:160]
+        n = sum(r[0] == "ok" and r[1] == w
+                for r, w in zip(rows, want, strict=True))
+        errs = [r[1] for r in rows if r[0] == "err"]
+        note = "passed %d of %d" % (n, len(want))
+        if errs:
+            note += " (%s)" % errs[0]
+        return n / len(want), note[:160]
     return grade
 
 

@@ -71,6 +71,39 @@ check("a __main__ block in the reply does not run",
       first.grade(R("```python\n%s\nif __name__ == '__main__':\n"
                     "    input()\n```" % first.meta["reference"]), env)[0],
       1.0)
+# B02: the score used to come from the harness's own stdout and exit code,
+# both of which the code under test shares. Each of these scored 1.0.
+cheats = {
+    "exits clean at import": "import os\nos._exit(0)\ndef %s(*a):\n"
+                             "    return \"no such answer\"\n",
+    "raises SystemExit(0)": "raise SystemExit(0)\ndef %s(*a):\n"
+                            "    return \"no such answer\"\n",
+    "prints a pass line": "import re, sys\nsrc = open('main.py').read()\n"
+                          "print('passed 99 of 99')\nsys.stdout.flush()\n"
+                          "import os\nos._exit(0)\ndef %s(*a):\n"
+                          "    return \"no such answer\"\n",
+    "reads the cases": "import json\nT = json.load(open('cases.json'))\n"
+                       "def %s(*a):\n    return T\n",
+    "writes its own results": "import json, atexit, os\n"
+                              "def _w():\n"
+                              "    json.dump([['ok', 1]] * 99, "
+                              "open('results.json', 'w'))\n"
+                              "    os._exit(0)\n"
+                              "atexit.register(_w)\n"
+                              "def %s(*a):\n    return \"no such answer\"\n",
+    "floods its output": "import sys\nsys.stdout.write('x' * 5000000)\n"
+                         "def %s(*a):\n    return \"no such answer\"\n",
+}
+for label, src in cheats.items():
+    for it in by["code"][:3]:
+        name = it.id.split("-", 2)[2]
+        check("a submission that %s scores nothing (%s)" % (label, name),
+              it.grade(R("```python\n%s```" % (src % name)), env)[0], 0.0)
+ok, out = env.run_python({"main.py": "print('y' * 3000000)\n"})
+check("output is kept to a bounded tail", (ok, len(out) <= 4000), (True, True))
+check("and a reference still scores in full after all that",
+      first.grade(R("```python\n%s```" % first.meta["reference"]), env)[0],
+      1.0)
 check("the code block that defines the function wins",
       evalsuite.extract_code("```python\nprint(1)\n```\n```python\ndef f(x):"
                              "\n    return x\n```\n```\nf(2)\n```", "f"),
@@ -472,8 +505,8 @@ check("while a reply that is not writing is under it",
 # A grader that can be satisfied without doing the work is worse than no
 # grader, because it still reads as evidence. Every item is fed replies
 # that contain no knowledge at all, and none of them may be paid for.
-# (The code suite is left to the slower check in the scratchpad: it
-# needs a subprocess per reply.)
+# (The code suite needs a subprocess per reply, so its cheats - a clean
+# exit, a forged pass line, a results file of its own - are under "code".)
 
 SINK = (
     "Answer: 0\nAnswer: 1\nAnswer: 42\nAnswer: yes\nAnswer: no\n"
