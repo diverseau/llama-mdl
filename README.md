@@ -174,6 +174,8 @@ mdl add <gguf>   Append an entry for a .gguf to the config, with sane
                  defaults. Takes an optional name and port.
 mdl check        Validate every model in the config without launching
                  anything. Exits non-zero if it finds a problem.
+mdl doctor [--json] [name]
+                 Diagnose the environment and all presets, or just one.
 mdl init         Write a starter config, if you do not have one.
 mdl config       Open models.toml in your editor; --path prints its location.
 mdl --version    The version, for bug reports.
@@ -230,6 +232,12 @@ mdl: 1 problem(s) found
 
 `add` only appends, and `check` never launches anything, so both are safe
 to run against a config you care about.
+
+`mdl doctor` brings config, binary build, supported flags, GGUF headers and
+runtime checks together. It warns about shared ports and leftover launch locks,
+without launching a server or changing config or state. Pass a name to check one
+preset, or `--json` for scripts. Findings are `ok`, `warn` or `fail`; only failures
+make it exit non-zero.
 
 `mdl manifest` describes the server that is running, not the config: the
 command spawn launched is kept in its state file, so editing models.toml

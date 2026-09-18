@@ -2,6 +2,19 @@
 
 Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
 
+## [0.6.14] - 2026-09-19
+
+### Added
+
+- `mdl doctor [--json] [name]`: one diagnosis of the environment and
+  every preset - the config's checks, the llama-server each one runs and
+  its build, whether that build lists every flag the preset passes, GGUF
+  headers on the model and projector, and each server's health against
+  its state (a stale state, a server whose launcher is gone, something
+  else on its port, a leftover launch lock). It never launches a server
+  and never changes the config or the state files; only failures make
+  it exit non-zero.
+
 ## [0.6.13] - 2026-09-19
 
 ### Added

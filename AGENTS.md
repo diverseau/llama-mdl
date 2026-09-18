@@ -3,7 +3,7 @@
 Working notes for coding agents in the `mdl` repo. This is the canonical
 file; `CLAUDE.md` points here and adds only Claude Code specifics.
 
-Written against **0.6.13**. Where a fact is likely to drift, this says how to
+Written against **0.6.14**. Where a fact is likely to drift, this says how to
 re-derive it instead of quoting it.
 
 ## What this is
@@ -112,7 +112,7 @@ workflow via OIDC.
 
 ```sh
 # bump VERSION in mdl.py and add a CHANGELOG.md entry, commit, push main, then
-git tag -a v0.6.13 -m "0.6.13" && git push origin v0.6.13
+git tag -a v0.6.14 -m "0.6.14" && git push origin v0.6.14
 ```
 
 - The tag must equal `mdl.VERSION` or the build job fails on purpose. The
