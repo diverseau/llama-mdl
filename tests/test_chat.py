@@ -136,8 +136,13 @@ async def main():
             check("%s: a streaming reply is followed" % label,
                   (screen.follow, pane.scroll_y >= pane.max_scroll_y - 1),
                   (True, True))
-            pane.scroll_to(y=0, animate=False)
-            await pilot.pause()
+            # a follow-scroll queued by the lines above can land after this
+            # one on a slow runner; wait until the scroll up has registered
+            for _ in range(20):
+                pane.scroll_to(y=0, animate=False)
+                await pilot.pause()
+                if pane.scroll_y == 0 and not screen.follow:
+                    break
             for i in range(20):
                 screen._feed("text", "more %d\n" % i)
             await pilot.pause()

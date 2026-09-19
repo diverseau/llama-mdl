@@ -2,6 +2,14 @@
 
 Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
 
+## [0.6.20] - 2026-09-19
+
+### Fixed
+
+- A chat-scroll test raced a queued follow-scroll on slow CI runners and
+  failed intermittently; it now waits for the scroll up to register. No
+  change to mdl itself.
+
 ## [0.6.19] - 2026-09-19
 
 ### Fixed
