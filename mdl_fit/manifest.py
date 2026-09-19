@@ -15,6 +15,7 @@ measurement: the command minus its port, the build, the model's bytes.
 import hashlib
 import json
 import re
+import sys
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -24,6 +25,7 @@ from . import gguf, hw, model
 # Flags whose value is a secret, or a path to one: redact() blanks them.
 SECRET_FLAGS = {"--api-key", "--api-key-file", "--ssl-key-file",
                 "--ssl-cert-file", "-hft", "--hf-token"}
+ABSOLUTE = re.compile(r"^(?:[A-Za-z]:)?/.")
 BUILD = re.compile(r"\bbuild[:=]?\s*(\d+)\s*\(([0-9a-f]{6,})\)", re.I)
 
 
@@ -46,18 +48,87 @@ def shards(path):
             for i in range(1, total + 1)]
 
 
+def _cache_path():
+    return hw.config_dir() / "hashes.json"
+
+
+def _read_cache():
+    try:
+        got = json.loads(_cache_path().read_text(encoding="utf-8"))
+        return got if isinstance(got, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def digest(path, compute=True):
+    """sha256 of a file's every byte, kept against its size and mtime so
+    a 20 GB model is read once, not on every eval. None when it is not
+    cached and `compute` is off. OSError if the file cannot be read."""
+    import mdl
+    p = Path(path).resolve()
+    st = p.stat()
+    stamp = [st.st_size, st.st_mtime_ns]
+    got = _read_cache().get(str(p))
+    if isinstance(got, dict) and got.get("stamp") == stamp:
+        return got.get("sha256")
+    if not compute:
+        return None
+    print("mdl: hashing %s once (kept until the file changes)" % p.name,
+          file=sys.stderr, flush=True)
+    h = hashlib.sha256()
+    with open(p, "rb") as f:
+        for chunk in iter(lambda: f.read(8 << 20), b""):
+            h.update(chunk)
+    out = h.hexdigest()
+    after = p.stat()
+    if [after.st_size, after.st_mtime_ns] == stamp:   # not written meanwhile
+        cache = _read_cache()
+        cache[str(p)] = {"stamp": stamp, "sha256": out}
+        try:
+            _cache_path().parent.mkdir(parents=True, exist_ok=True)
+            mdl.write_atomic(_cache_path(), json.dumps(cache))
+        except OSError:
+            pass
+    return out
+
+
+def model_key(path, mmproj=None, compute=True):
+    """One name for every byte a model loads - each shard and the
+    projector - or None when a digest is not to be had."""
+    files = list(shards(path)) + ([Path(mmproj)] if mmproj else [])
+    try:
+        parts = [digest(f, compute) for f in files]
+    except OSError:
+        return None
+    if not all(parts):
+        return None
+    return hashlib.sha256(":".join(parts).encode()).hexdigest()[:16]
+
+
 def model_files(path):
-    """[{name, size, hash}] for each shard - the hash is evalrun's size
-    plus first and last 8 MiB, which reads 16 MiB, not the whole file."""
-    from . import evalrun
+    """[{name, size, hash}] for each shard, the hash a sha256 of the whole
+    file (read once, then cached against its size and mtime)."""
     out = []
     for s in shards(path):
         try:
             out.append({"name": s.name, "path": str(s),
-                        "size": s.stat().st_size,
-                        "hash": evalrun.file_hash(s)})
+                        "size": s.stat().st_size, "hash": digest(s)[:16]})
         except OSError:
             out.append({"name": s.name, "path": str(s), "missing": True})
+    return out
+
+
+def replaced(state):
+    """The model files that are not what the server loaded: stat now
+    against the stat spawn() recorded. A server keeps the file it opened;
+    its manifest must not describe whatever sits at that path today."""
+    import mdl
+    out = []
+    for was in (state or {}).get("model_ids") or []:
+        now = mdl.file_id(was.get("path"))
+        if (now.get("size"), now.get("mtime_ns")) != (was.get("size"),
+                                                      was.get("mtime_ns")):
+            out.append(Path(was.get("path") or "?").name)
     return out
 
 
@@ -130,6 +201,10 @@ def build(name, models=None, binary=None, probe=True):
         n_ctx = (server.get("default_generation_settings") or {}).get("n_ctx")
         if n_ctx:
             out["served_ctx"] = n_ctx
+        if source == "running":
+            changed = replaced(state)
+            if changed:
+                out["model_changed"] = changed
     if probe:
         out["machine"] = machine(exe)
     out["identity"] = identity(out)
@@ -138,16 +213,19 @@ def build(name, models=None, binary=None, probe=True):
 
 def identity(man):
     """What has to match for two runs to be one measurement: the command
-    minus its port, the build (or the binary's stat when the build is
-    unknown), and the model's bytes. Not the machine: evals compare on
-    one machine already, and a driver update is not a new model."""
+    minus its port, the build and the binary's stat (one build number can
+    be compiled many ways), and the model's bytes. Not the machine: evals
+    compare on one machine already, and a driver update is not a new
+    model. A file replaced under the running server is in it too, so
+    that server never matches one that loaded the file now there."""
     from . import evalrun
     key = {"argv": evalrun.sans_port(man["argv"][1:]),
-           "build": man.get("build") or man.get("binary"),
+           "build": man.get("build"), "binary": man.get("binary"),
            "model": [(f.get("name"), f.get("size"), f.get("hash"))
                      for f in man.get("model", [])],
            "mmproj": [(f.get("name"), f.get("hash"))
-                      for f in man.get("mmproj", [])]}
+                      for f in man.get("mmproj", [])],
+           "changed": man.get("model_changed") or []}
     return hashlib.sha256(json.dumps(key, sort_keys=True, default=str)
                           .encode()).hexdigest()[:16]
 
@@ -164,7 +242,9 @@ def redact(man):
         if not isinstance(s, str):
             return s
         flat = s.replace("\\", "/")
-        if "/" in flat and (Path(flat).suffix
+        # any absolute path, not only ones under this home or with an
+        # extension: D:/private/alice/slots names a person too
+        if "/" in flat and (Path(flat).suffix or ABSOLUTE.match(flat)
                             or home.lower() in flat.lower()):
             return Path(flat).name or "<path>"
         at = flat.lower().find(home.lower())

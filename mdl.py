@@ -33,7 +33,7 @@ CONFIG_DIR = _base("XDG_CONFIG_HOME", ".config") / "mdl"
 CONFIG = CONFIG_DIR / "models.toml"
 STATE_DIR = _base("XDG_STATE_HOME", ".local", "state") / "mdl"
 STATE = STATE_DIR / "state.json"
-VERSION = "0.7.0"
+VERSION = "0.7.1"
 DEFAULT_BIN = "llama-server"
 CONFIG_DATA = {}          # last parsed config, for UI-only settings
 DEFAULT_PORT = 8080
@@ -919,7 +919,8 @@ def _spawn(name, models, binary, port):
              "argv": argv,
              # which build: a rebuilt llama-server at the same path is a
              # different runtime, and stat is all a launch can afford
-             "binary": file_id(shutil.which(binary) or binary)}
+             "binary": file_id(shutil.which(binary) or binary),
+             "model_ids": model_ids(argv)}
     try:
         write_atomic(state_path(name), json.dumps(state))
     except OSError as e:
@@ -1002,7 +1003,24 @@ def file_id(path):
     except (OSError, TypeError, ValueError):
         return {"path": str(path), "missing": True}
     return {"path": str(Path(path).resolve()), "size": st.st_size,
-            "mtime": int(st.st_mtime)}
+            "mtime": int(st.st_mtime), "mtime_ns": st.st_mtime_ns}
+
+
+def _no_shards(path):
+    return [path]
+
+
+def model_ids(argv):
+    """file_id of every model file argv loads, taken at launch: what
+    manifest compares later to tell a file replaced under a running
+    server, which still holds the one it opened."""
+    try:
+        from mdl_fit.manifest import shards
+    except ImportError:
+        shards = _no_shards
+    paths = [argv[i + 1] for i, a in enumerate(argv[:-1])
+             if a in ("-m", "--model", "-mm", "--mmproj")]
+    return [file_id(s) for p in paths for s in shards(p)]
 
 
 def stop_one(name, state):

@@ -694,6 +694,44 @@ evalrun.save({"name": "m", "run": "m-1", "partial": False, "n": 3})
 check("a finished run replaces its own partial records, and nothing else",
       [(r["name"], r.get("n")) for r in evalrun.load()],
       [("other", None), ("m", 3)])
+from types import SimpleNamespace as NS  # noqa: E402
+
+from mdl_fit import model  # noqa: E402
+
+done_ck = TMP / "runs" / "done.jsonl"
+done_ck.write_text("".join(json.dumps(r) + "\n" for r in first),
+                   encoding="utf-8")
+fin = NS(model_path=TMP / "m.gguf", mmproj=None,
+         inv=NS(arch="x", quant_label="Q4_K", bpw=4.5, n_params=1))
+(TMP / "m.gguf").write_bytes(b"GGUF")
+real_save = evalrun.save
+saved = []
+
+
+def disk_full(rec):
+    saved.append(rec)
+    raise OSError("disk full")
+
+
+def finish():
+    return evalrun._finish({"json": True}, io.StringIO().write, "m", fin,
+                           model.Flags(), None, NS(build={}), "s", reason[:2],
+                           list(first), False, ["srv"], ["srv"], None, "m-2",
+                           done_ck, 0)
+
+
+evalrun.save = disk_full
+try:
+    finish()
+except OSError:
+    pass
+kept_ck = done_ck.exists()
+evalrun.save = real_save
+finish()
+check("a finished run's checkpoint outlives a failed save, and goes once it "
+      "is saved (peer review)", (len(saved), kept_ck, done_ck.exists()),
+      (1, True, False))
+
 os.environ["MDL_FIT_HOME"] = str(TMP / "home")
 held = TMP / "held.lock"
 held.write_text(str(os.getpid()))           # a live eval holds it
@@ -706,6 +744,66 @@ check("a second eval of the same items on the same server is refused "
 held.unlink()
 check("a container runtime that is not there is not usable",
       evalrun.usable_runtime(str(TMP / "no-such-docker")), False)
+real_usable = evalrun.usable_runtime
+evalrun.usable_runtime = lambda r: r.endswith("docker")
+check("a podman that does not answer does not keep a working docker from "
+      "being used (peer review)",
+      evalrun.pick_runtime(["/bin/podman", "/bin/docker"]), "/bin/docker")
+evalrun.usable_runtime = real_usable
+
+seen_env = {}
+real_bounded = evalrun._bounded
+
+
+def fake_bounded(argv, cwd, env, timeout, box=None, runtime=None):
+    seen_env.update(env)
+    return True, ""
+
+
+evalrun._bounded = fake_bounded
+os.environ["DOCKER_HOST"] = "tcp://elsewhere:2375"
+evalrun.Env("docker").run_python({"main.py": "pass"})
+boxed = seen_env.get("DOCKER_HOST")
+seen_env.clear()
+evalrun.Env().run_python({"main.py": "pass"})
+check("the container client keeps DOCKER_HOST, code run directly does not "
+      "(peer review)", (boxed, "DOCKER_HOST" in seen_env),
+      ("tcp://elsewhere:2375", False))
+del os.environ["DOCKER_HOST"]
+evalrun._bounded = real_bounded
+
+torn = TMP / "runs" / "torn.jsonl"
+torn.write_text(json.dumps(first[0]) + '\n{"id": "cut off', encoding="utf-8")
+keep = evalrun.checkpoint(torn)
+keep(first[1])
+keep.close()
+check("an item appended after a torn line is kept on the next resume "
+      "(peer review)", sorted(evalrun.load_checkpoint(torn)),
+      sorted(r["id"] for r in first[:2]))
+
+
+class Short(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        self.send_response(200)
+        self.send_header("Content-Length", "1000")
+        self.end_headers()
+        self.wfile.write(b'{"choices": [')     # and the connection closes
+        self.close_connection = True
+
+    def log_message(self, *a):
+        pass
+
+
+short = http.server.HTTPServer(("127.0.0.1", 0), Short)
+threading.Thread(target=short.serve_forever, daemon=True).start()
+cut = evalrun.run_items(evalrun.Client(short.server_address[1], timeout=10),
+                        reason[:1], env)
+short.shutdown()
+short.server_close()
+check("a reply cut off before its Content-Length is a server failure, "
+      "not a wrong answer or a traceback (peer review)",
+      ("score" in cut[0], bool(cut[0].get("failed"))), (False, True))
 
 # =========================================================== instruct ===
 

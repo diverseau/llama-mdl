@@ -8,7 +8,9 @@ of the file, the quant, the KV type and the build, with a bootstrap 95%
 interval per suite and per domain.
 """
 
+import contextlib
 import hashlib
+import http.client
 import json
 import os
 import random
@@ -135,8 +137,11 @@ class Client:
         except urllib.error.HTTPError as e:
             detail = e.read()[:300].decode("utf-8", "replace")
             return Reply(error="HTTP %d %s" % (e.code, detail))
-        except (urllib.error.URLError, OSError, ValueError) as e:
-            return Reply(error=str(e))
+        except (urllib.error.URLError, http.client.HTTPException, OSError,
+                ValueError) as e:
+            # HTTPException: a reply cut off before its Content-Length is
+            # a server failure like any other, retried, never a wrong answer
+            return Reply(error=str(e) or type(e).__name__)
         try:
             choice = data["choices"][0]
             msg = choice.get("message") or {}
@@ -172,21 +177,30 @@ class Client:
         try:
             return len(self._call("/tokenize", {"content": text}, 60)
                        .get("tokens", []))
-        except (urllib.error.URLError, OSError, ValueError, AttributeError):
+        except (urllib.error.URLError, http.client.HTTPException, OSError,
+                ValueError, AttributeError):
             return None
 
     def props(self):
         try:
             got = self._call("/props", None, 10)
             return got if isinstance(got, dict) else {}
-        except (urllib.error.URLError, OSError, ValueError):
+        except (urllib.error.URLError, http.client.HTTPException, OSError,
+                ValueError):
             return {}
 
 
 # ------------------------------------------------------------- sandbox --
 
-def find_runtime():
-    return shutil.which("podman") or shutil.which("docker")
+def find_runtimes():
+    """Every container runtime on PATH, podman first."""
+    return [p for p in (shutil.which("podman"), shutil.which("docker")) if p]
+
+
+def pick_runtime(found):
+    """The first of `found` that answers: a podman machine that is
+    stopped must not keep a working docker from being used."""
+    return next((r for r in found if usable_runtime(r)), None)
 
 
 def usable_runtime(runtime):
@@ -239,14 +253,18 @@ class Env:
                         "-v", "%s:/w" % tmp, "-w", "/w", self.image,
                         "python", "-E", "-s", entry]
                 timeout += 60                  # container start
+                # the client, not the code: it needs what usable_runtime()
+                # was checked with (DOCKER_HOST, a context, a podman
+                # machine's connection), and none of it enters the box
+                env = dict(os.environ)
             else:
                 argv = [sys.executable, "-E", "-s", entry]
-            env = {k: v for k, v in (
-                ("PATH", os.environ.get("PATH", "")),
-                ("SYSTEMROOT", os.environ.get("SYSTEMROOT", "")),
-                ("PYTHONIOENCODING", "utf-8"),
-                ("PYTHONDONTWRITEBYTECODE", "1"),
-                ("TEMP", tmp), ("TMP", tmp), ("TMPDIR", tmp)) if v}
+                env = {k: v for k, v in (
+                    ("PATH", os.environ.get("PATH", "")),
+                    ("SYSTEMROOT", os.environ.get("SYSTEMROOT", "")),
+                    ("PYTHONIOENCODING", "utf-8"),
+                    ("PYTHONDONTWRITEBYTECODE", "1"),
+                    ("TEMP", tmp), ("TMP", tmp), ("TMPDIR", tmp)) if v}
             ok, out = _bounded(argv, tmp, env, timeout, box, self.runtime)
             if read is None:
                 return ok, out
@@ -584,6 +602,15 @@ def checkpoint(path):
     """An append-only writer: one line per finished item, flushed, so a
     crash loses at most the item in flight."""
     path.parent.mkdir(parents=True, exist_ok=True)
+    # a line the interrupt cut off would swallow the next one appended
+    # to it: cut the file back to its last whole line first
+    try:
+        with open(path, "rb+") as f:
+            data = f.read()
+            if data and not data.endswith(b"\n"):
+                f.truncate(data.rfind(b"\n") + 1)
+    except FileNotFoundError:
+        pass
     fh = open(path, "a", encoding="utf-8")
 
     def keep(res):
@@ -599,7 +626,9 @@ def custom_dir():
 
 def file_hash(path, window=8 << 20):
     """Size plus the first and last 8 MiB: tells two fine-tunes of one
-    base apart without reading 20 GB."""
+    base apart without reading 20 GB. A quick name for a file in the
+    history, not proof of its bytes - identities and profiles use
+    manifest.digest(), which reads all of them."""
     h = hashlib.sha256()
     size = Path(path).stat().st_size
     h.update(str(size).encode())
@@ -1016,14 +1045,15 @@ def main(args, out=None):
         return None
     if o.get("sandbox") and o.get("no-sandbox"):
         die("--sandbox and --no-sandbox contradict each other")
-    runtime = None if o.get("no-sandbox") else find_runtime()
-    if runtime and not usable_runtime(runtime):
+    found = [] if o.get("no-sandbox") else find_runtimes()
+    runtime = pick_runtime(found)
+    if found and not runtime:
+        names = " and ".join(Path(r).name for r in found)
         if o.get("sandbox"):
-            die("--sandbox: %s is on PATH but is not answering, or cannot "
-                "get %s" % (Path(runtime).name, IMAGE))
-        w("sandbox  %s is not answering; model code runs unsandboxed\n"
-          % Path(runtime).name)
-        runtime = None
+            die("--sandbox: %s on PATH but not answering, or cannot get %s"
+                % (names, IMAGE))
+        w("sandbox  %s not answering; model code runs unsandboxed\n"
+          % names)
     if o.get("sandbox") and not runtime:
         die("--sandbox needs podman or docker on PATH")
     env = Env(runtime)
@@ -1047,7 +1077,11 @@ def main(args, out=None):
             name, port, "" if ran else
             " (started by an older mdl: its settings are not checked)"))
     t0, done, partial = time.time(), [], False
-    progress, run = None, None
+    progress, run, ckpt = None, None, None
+    # held from before the checkpoint is read until the result is saved:
+    # a second eval of these items must not delete, append to, or save
+    # over the first one's checkpoint
+    hold = contextlib.ExitStack()
     try:
         if not state:
             proc, log, port = mdl.spawn(
@@ -1070,6 +1104,10 @@ def main(args, out=None):
         # what answered, recorded before the first item so a result
         # always names its runtime (and a resumed run can check it)
         served_as = manifest.build(name, models, binary, probe=False)
+        if served_as.get("model_changed"):
+            die("%s was replaced since %s started; the server still has the "
+                "old file loaded. 'mdl stop %s' and run again" % (
+                    ", ".join(served_as["model_changed"]), name, name))
         served_as["machine"] = {"gpu": mach.gpu_name, "backend": mach.backend,
                               "driver": mach.driver,
                               "vram_total": mach.vram_total,
@@ -1079,6 +1117,11 @@ def main(args, out=None):
         run = run_id(name, evalsuite.fingerprint(items),
                      served_as["identity"], evalsuite.seed_id(seed))
         ckpt = runs_dir() / (run + ".jsonl")
+        # two evals of these items on this server would share one
+        # checkpoint; the second is refused, not interleaved
+        hold.enter_context(mdl.file_lock(
+            ckpt.with_suffix(".lock"), "another mdl eval is running these "
+            "items on %s now; wait for it, or stop it" % name, tries=1))
         prior = load_checkpoint(ckpt) if ckpt.exists() else {}
         if o.get("resume"):
             if prior:
@@ -1097,20 +1140,13 @@ def main(args, out=None):
         if not prior:
             ckpt.unlink(missing_ok=True)
         done.extend(prior.values())
-        # two evals of these items on this server would write one
-        # checkpoint between them; the second is refused, not interleaved
-        with mdl.file_lock(ckpt.with_suffix(".lock"),
-                           "another mdl eval is running these items on %s "
-                           "now; wait for it, or stop it" % name, tries=1):
-            keep = checkpoint(ckpt)
-            try:
-                run_items(client, items, env, cpt, n_ctx, done, progress,
-                          keep=keep, done_ids=set(prior))
-            finally:
-                keep.close()
+        keep = checkpoint(ckpt)
+        try:
+            run_items(client, items, env, cpt, n_ctx, done, progress,
+                      keep=keep, done_ids=set(prior))
+        finally:
+            keep.close()
         progress.close()
-        if not any("failed" in r for r in done):
-            ckpt.unlink(missing_ok=True)       # complete: nothing to resume
     except KeyboardInterrupt:
         if progress:
             progress.close()
@@ -1118,11 +1154,24 @@ def main(args, out=None):
         w("\ninterrupted; keeping the %d items done%s\n" % (
             len(done), "; mdl eval %s --resume continues" % name
             if run else ""))
+    except BaseException:
+        hold.close()
+        raise
     finally:
         if started:
             state = mdl.read_state(name)
             if state:
                 mdl.stop_one(name, state)
+    with hold:
+        return _finish(o, w, name, target, flags, build, mach, seed, items,
+                       done, partial, ran or argv, ran, served_as, run, ckpt,
+                       t0)
+
+
+def _finish(o, w, name, target, flags, build, mach, seed, items, done,
+            partial, argv, ran, served_as, run, ckpt, t0):
+    """Save the result, then drop its checkpoint - in that order, so a
+    failed save leaves the run resumable - and book its timings."""
     if not any("score" in r for r in done):
         die("no items finished; nothing saved")
     rec = {"at": time.strftime("%Y-%m-%d %H:%M"), "name": name,
@@ -1131,7 +1180,7 @@ def main(args, out=None):
            "arch": target.inv.arch, "quant": target.inv.quant_label,
            "bpw": round(target.inv.bpw, 3), "params": target.inv.n_params,
            "kv": flags.kv_label, "ctx": flags.ctx, "build": build,
-           "sampling": sampling_of(ran or argv),
+           "sampling": sampling_of(argv),
            "argv": ran, "runtime_checked": ran is not None,
            "manifest": served_as, "run": run,
            "suite_version": evalsuite.SUITE_VERSION,
@@ -1146,16 +1195,20 @@ def main(args, out=None):
            "partial": partial or any("failed" in r for r in done),
            "items": done}
     save(rec)
+    if ckpt and not rec["partial"]:
+        ckpt.unlink(missing_ok=True)           # saved: nothing to resume
     # the replies' own timings are a measurement of this exact
     # configuration at the depths the suite reached: book them as its
-    # profile, which mdl fit shows beside its prediction
-    if served_as and not partial:
+    # profile, which mdl fit shows beside its prediction. The flags are
+    # the ones fit looks it up by (a projector's size is in them); the
+    # server runs the preset's command, checked above
+    if served_as and not partial and not served_as.get("model_changed"):
         samples = [x for r in done for x in r.get("speed") or []]
         calib.record_profile(
-            "eval", target.model_path, rec["hash"], build,
-            (served_as.get("binary") or {}).get("path"),
-            model.parse_argv(ran or argv)[0], calib.from_samples(samples),
-            argv=ran or argv)
+            "eval", target.model_path,
+            manifest.model_key(target.model_path, target.mmproj),
+            mach.build, served_as.get("binary"), flags,
+            calib.from_samples(samples), argv=argv)
     if o.get("json"):
         w(json.dumps(rec, indent=1) + "\n")
         return rec

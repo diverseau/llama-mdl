@@ -2,6 +2,49 @@
 
 Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
 
+## [0.7.1] - 2026-09-19
+
+Fixes from a peer review of 0.7.0's manifest, eval resume and profiles.
+
+### Fixed
+
+- A second `mdl eval` of the same items on the same server deleted the
+  first one's checkpoint before it was refused. The run's lock is now
+  taken before the checkpoint is read, and held until the result is
+  saved.
+- A finished eval deleted its checkpoint before saving its result, so a
+  failed save - a full disk - lost the whole run. It saves first.
+- An item appended after a line an interrupt cut off was lost on the
+  next resume along with it; the torn line is cut off first.
+- A server reply cut off before its Content-Length escaped as a
+  traceback instead of being retried and left unscored.
+- A podman that is installed but not answering kept a working docker
+  from being used, and model code ran unsandboxed. Each runtime is tried
+  in turn.
+- Code run in the container lost `DOCKER_HOST` and the other settings
+  the runtime was checked with, so a non-default daemon passed the check
+  and then failed every item.
+- Model files were named by their size and first and last 8 MiB, so a
+  change in the middle went unnoticed by `mdl manifest`, `--resume` and
+  profiles. They are named by a sha256 of every byte, read once and kept
+  against size and mtime. A profile covers every shard and the
+  projector.
+- A model file replaced under a running server was described as if the
+  server had loaded it. The files are stat'ed at launch; `mdl manifest`
+  reports a replaced one and `mdl eval` refuses it.
+- The runtime identity took the build string or the binary, and profiles
+  only the build number and the binary's path: a rebuild with other
+  settings, or another commit under one build number, matched. Both
+  now take the build, its commit and the binary's stat.
+- `mdl fit --verify` booked its measurement to the preset's whole
+  command, flags llama-bench never ran (`-ot`, a split mode) included.
+  Such a measurement is kept, but not as the preset's.
+- An `mdl eval` of a preset with a projector booked its speeds under
+  flags `mdl fit` never looks up, so they were never shown as the
+  current config's.
+- `mdl manifest --redact` left an absolute path outside the home
+  directory with no extension, like `D:/private/alice/slots`, whole.
+
 ## [0.7.0] - 2026-09-19
 
 Everything since 0.6.6. (0.6.7 to 0.6.20 were development builds on

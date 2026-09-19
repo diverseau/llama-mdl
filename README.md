@@ -248,7 +248,12 @@ make it exit non-zero.
 command spawn launched is kept in its state file, so editing models.toml
 after a start does not change what the manifest - or an `mdl eval` result,
 which carries one - says ran. A model that is not running is described
-from its preset, and the manifest says so.
+from its preset, and the manifest says so. Each model file is named by a
+sha256 of all of it: read once - a 20 GB model takes a while the first
+time - and kept against the file's size and modification time after
+that. A file replaced under a running server is reported as replaced,
+since the server still has the old one loaded, and `mdl eval` refuses
+it.
 
 ## Fitting a model: `mdl fit`
 
@@ -304,7 +309,10 @@ A prediction is replaced by a measurement where there is one. `--verify`
 runs llama-bench at the config, and every `mdl eval` keeps the speed the
 server itself reported for each reply at the depth it was made; both are
 filed as a measured profile of that exact configuration - the same model
-bytes, the same llama.cpp build from the same binary, the same flags.
+bytes (every shard and the projector), the same llama.cpp build and
+commit from the same binary, the same command. A `--verify` of a preset
+with flags llama-bench does not take, such as `-ot`, is kept but not
+booked to the preset's command, and says so.
 `mdl fit <name>` shows the current config's profile under its prediction,
 with the difference, and `--profiles` lists every configuration of the
 model measured here. A profile is speed only: it says nothing about

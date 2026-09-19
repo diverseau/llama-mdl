@@ -546,15 +546,33 @@ check("the whole command is in the key: -ot changes the speed, the port "
       == [calib.profile_key(*base, argv=["x", "-ot", "exps=CPU"])] * 2
       and calib.profile_key(*base, argv=["x", "-ot", "exps=CPU"])
       != calib.profile_key(*base, argv=["x"]), True)
+check("two commits under one build number are two builds (peer review)",
+      calib.profile_key("h", {"build": 1, "commit": "aaa"}, *base[2:])
+      != calib.profile_key("h", {"build": 1, "commit": "bbb"}, *base[2:]),
+      True)
+check("and a binary rebuilt at the same path is another binary",
+      calib.profile_key("h", 1, {"path": "/b", "size": 1, "mtime_ns": 1},
+                        base[3])
+      != calib.profile_key("h", 1, {"path": "/b", "size": 1, "mtime_ns": 2},
+                           base[3]), True)
+check("llama-bench does not run -ot: a preset with it is not what it "
+      "measured (peer review)",
+      (calib.unbenched(["srv", "-m", "a", "-ngl", "99", "-ot", "exps=CPU",
+                        "--jinja", "--seed", "-1"]),
+       calib.unbenched(["srv", "-m", "a", "-ngl", "99", "-c", "8192"])),
+      (["-ot"], []))
 target = cli.resolve("demo")
 tctx = search.Context(target.inv, hw.probe())
-calib.record_profile("eval", target.model_path, cli._model_hash(target),
-                     tctx.build, cli._binary_path(target.binary),
+check("showing a profile never hashes a model it has not seen",
+      cli._model_hash(target), None)
+calib.record_profile("eval", target.model_path,
+                     cli._model_hash(target, compute=True),
+                     tctx.machine.build, cli._binary_path(target.binary),
                      target.flags, {"tg": {0: 12.5, 4096: 11.0},
                                     "pp": 300.0, "n": {0: 3, 4096: 2}},
                      argv=cli._preset_argv(target))
 calib.record_profile("bench", target.model_path, cli._model_hash(target),
-                     tctx.build, cli._binary_path(target.binary),
+                     tctx.machine.build, cli._binary_path(target.binary),
                      target.flags.replace(ub=2048),
                      {"tg": {0: 14.0}, "pp": 500.0, "n": {}},
                      argv=cli._preset_argv(target))

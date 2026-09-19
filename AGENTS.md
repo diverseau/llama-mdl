@@ -3,7 +3,7 @@
 Working notes for coding agents in the `mdl` repo. This is the canonical
 file; `CLAUDE.md` points here and adds only Claude Code specifics.
 
-Written against **0.7.0**. Where a fact is likely to drift, this says how to
+Written against **0.7.1**. Where a fact is likely to drift, this says how to
 re-derive it instead of quoting it.
 
 ## What this is
@@ -112,7 +112,7 @@ workflow via OIDC.
 
 ```sh
 # bump VERSION in mdl.py and add a CHANGELOG.md entry, commit, push main, then
-git tag -a v0.7.0 -m "0.7.0" && git push origin v0.7.0
+git tag -a v0.7.1 -m "0.7.1" && git push origin v0.7.1
 ```
 
 - Versions are SemVer, counted from the last release: a new feature bumps
@@ -137,6 +137,7 @@ suite, the 3.10 rejection, and a wheel+sdist install check.
 ~/.config/mdl/models.toml     config
 ~/.config/mdl/eval-seed       the eval seed (see below)
 ~/.config/mdl/evals.jsonl     eval results
+~/.config/mdl/hashes.json     model sha256s, kept against size and mtime
 ~/.local/state/mdl/           pids, ports, logs
 ~/.cache/mdl/catalog.sqlite   the pulled catalog snapshot
 ```

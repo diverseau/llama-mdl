@@ -33,7 +33,9 @@ check("an unknown name is one line", ("no model named 'nope'" in err, code),
 run(mdl.cmd_run, ["demo"])
 state = mdl.read_state("demo")
 check("spawn records the binary it launched, by stat",
-      sorted(state["binary"]), ["mtime", "path", "size"])
+      sorted(state["binary"]), ["mtime", "mtime_ns", "path", "size"])
+check("and the model files it loaded",
+      [Path(f["path"]).name for f in state["model_ids"]], [support.FAKE.name])
 live = manifest.build("demo", probe=False)
 check("a running model is described from its state",
       (live["source"], live["argv"], live["port"]),
@@ -57,6 +59,31 @@ rebuilt = dict(live, build="b9999-abcdef0")
 check("another build is", manifest.identity(rebuilt) != before, True)
 other = dict(live, model=[dict(live["model"][0], hash="0" * 16)])
 check("and so are other model bytes", manifest.identity(other) != before, True)
+relinked = dict(live, binary=dict(live["binary"], size=1))
+check("a binary rebuilt under the same build is another runtime "
+      "(peer review)", manifest.identity(relinked) != before, True)
+
+# ---------------------------------------------- bytes, not a sample ----
+blob = root / "m.gguf"
+blob.write_bytes(b"a" * (20 << 20))
+first = manifest.digest(blob)
+with open(blob, "r+b") as fh:                  # the middle, where a sample
+    fh.seek(10 << 20)                          # of the ends does not look
+    fh.write(b"b")
+check("a change in the middle of a model is another model (peer review)",
+      manifest.digest(blob) != first, True)
+check("and a digest is read once, then kept against size and mtime",
+      manifest.digest(blob, compute=False), manifest.digest(blob))
+proj = root / "p.gguf"
+proj.write_bytes(b"p")
+check("the model key covers the projector (peer review)",
+      manifest.model_key(blob, proj) != manifest.model_key(blob), True)
+loaded = {"model_ids": [mdl.file_id(blob)]}
+check("a file as it was at launch is not replaced", manifest.replaced(loaded),
+      [])
+blob.write_bytes(b"c" * 10)
+check("one written since is: the server still has the old one (peer review)",
+      manifest.replaced(loaded), ["m.gguf"])
 
 # ------------------------------------------------------------ redact ----
 red = manifest.redact(live)
@@ -76,6 +103,10 @@ check("a home path with no extension, either slash or case, does not "
       Path.home().name.lower() in json.dumps(leaky["argv"]).lower(), False)
 check("and a --flag=value keeps its flag",
       leaky["argv"][3].startswith("--slot-save-path="), True)
+check("an absolute path outside the home is cut to its name (peer review)",
+      manifest.redact(dict(live, argv=["ls", "--slot-save-path",
+                                       "D:/private/alice/slots"]))["argv"],
+      ["ls", "--slot-save-path", "slots"])
 check("--api-key=value is blanked too",
       manifest.redact(dict(live, argv=["ls", "--api-key=abc"]))["argv"],
       ["ls", "--api-key=<redacted>"])

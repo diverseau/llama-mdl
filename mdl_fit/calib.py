@@ -352,6 +352,47 @@ def _build_no(build):
     return build.get("build") if isinstance(build, dict) else build
 
 
+def _build_id(build):
+    """The build number and its commit: two commits can share a number."""
+    if isinstance(build, dict):
+        return "%s-%s" % (build.get("build"), build.get("commit"))
+    return build
+
+
+def _binary_id(binary):
+    """A binary as stat names it, so a rebuild at the same path - another
+    backend, other compiler flags - is another configuration."""
+    if isinstance(binary, dict):
+        return [binary.get("path"), binary.get("size"),
+                binary.get("mtime_ns") or binary.get("mtime")]
+    return str(binary or "")
+
+
+# llama-server flags llama-bench reproduces (bench_argv), or that do not
+# change single-stream speed. A preset with anything else was not what
+# llama-bench measured, so the measurement is not booked to its command.
+BENCHED = {"-ngl", "--n-gpu-layers", "--gpu-layers", "-ncmoe", "--n-cpu-moe",
+           "-cmoe", "--cpu-moe", "-fa", "--flash-attn", "-ctk",
+           "--cache-type-k", "-ctv", "--cache-type-v", "-b", "--batch-size",
+           "-ub", "--ubatch-size", "-t", "--threads", "--no-mmap", "--mmap",
+           "-c", "--ctx-size", "-np", "--parallel", "-kvu", "--kv-unified",
+           "--no-kv-unified", "--jinja", "--no-jinja", "-a", "--alias",
+           "--host", "--api-key", "--api-key-file", "--chat-template",
+           "--chat-template-file", "--reasoning-format", "--reasoning-budget",
+           "--temp", "--top-k", "--top-p", "--min-p", "--repeat-penalty",
+           "--presence-penalty", "--frequency-penalty", "-s", "--seed",
+           "--metrics", "--slots", "--no-webui", "-to", "--timeout",
+           "--log-file", "--log-disable", "--log-verbosity", "-v",
+           "--verbose", "--no-mmproj-offload", "--mmproj-offload"}
+FLAG = re.compile(r"^--?[A-Za-z]")
+
+
+def unbenched(argv):
+    """The flags in argv llama-bench did not run with."""
+    return sorted({a.split("=", 1)[0] for a in speed_argv(argv)
+                   if FLAG.match(a)} - BENCHED)
+
+
 def speed_argv(argv):
     """A command as far as speed goes: without the binary, the port, and
     the model paths (the model is named by its bytes instead)."""
@@ -372,8 +413,8 @@ def profile_key(model_hash, build, binary, flags, argv=None):
     The modelled flags are not enough: -ot, a split mode or a draft model
     change the speed and are not among them. So the whole command goes
     in when there is one - a preset's, or the running server's."""
-    body = {"model": model_hash, "build": _build_no(build),
-            "binary": str(binary or ""), "flags": flags.as_dict()
+    body = {"model": model_hash, "build": _build_id(build),
+            "binary": _binary_id(binary), "flags": flags.as_dict()
             if hasattr(flags, "as_dict") else dict(flags),
             "argv": speed_argv(argv) if argv else None}
     return hashlib.sha256(json.dumps(body, sort_keys=True).encode()
@@ -411,7 +452,8 @@ def record_profile(source, model_path, model_hash, build, binary, flags,
         return None
     entry = {"kind": "profile", "source": source, "model": str(model_path),
              "model_hash": model_hash, "build": _build_no(build),
-             "binary": str(binary or ""),
+             "binary": binary.get("path") if isinstance(binary, dict)
+             else str(binary or ""),
              "flags": flags.as_dict() if hasattr(flags, "as_dict")
              else dict(flags),
              "key": profile_key(model_hash, build, binary, flags, argv),

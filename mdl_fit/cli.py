@@ -12,7 +12,8 @@ import sys
 import tomllib
 from pathlib import Path
 
-from . import calib, emit, explain, gguf, hw, model, perf, remote, search
+from . import (calib, emit, explain, gguf, hw, manifest, model, perf, remote,
+               search)
 
 K = 1024
 GiB = model.GiB
@@ -585,15 +586,16 @@ def apply_to(target, flags, ctx_obj, label, dry_run=False, out=None):
 # ------------------------------------------------------------ profiles --
 
 def _binary_path(binary):
-    return str(Path(shutil.which(binary) or binary).resolve())
+    """The binary as stat names it: path, size and mtime."""
+    import mdl
+    return mdl.file_id(shutil.which(binary) or binary)
 
 
-def _model_hash(target):
-    from . import evalrun
-    try:
-        return evalrun.file_hash(target.model_path)
-    except OSError:
-        return None
+def _model_hash(target, compute=False):
+    """Every byte the model loads - all shards and the projector - named
+    by the digests mdl manifest keeps. Showing profiles never reads 20 GB:
+    a file not hashed since it last changed has no profile to show."""
+    return manifest.model_key(target.model_path, target.mmproj, compute)
 
 
 def _preset_argv(target):
@@ -634,7 +636,8 @@ def measured_lines(ctx_obj, target, mach):
     if not mh:
         return []
     have = calib.profiles(mh)
-    key = calib.profile_key(mh, ctx_obj.build, _binary_path(target.binary),
+    key = calib.profile_key(mh, ctx_obj.machine.build,
+                            _binary_path(target.binary),
                             target.flags, _preset_argv(target))
     mine = next((e for e in have if e.get("key") == key), None)
     out = []
@@ -673,7 +676,7 @@ def cmd_profiles(target, o, out):
         return have
     mach = machine_for(target, o)
     ctx_obj = search.Context(target.inv, mach)
-    current = (calib.profile_key(mh, ctx_obj.build,
+    current = (calib.profile_key(mh, ctx_obj.machine.build,
                                  _binary_path(target.binary), target.flags,
                                  _preset_argv(target))
                if target.flags else None)
@@ -842,14 +845,19 @@ def cmd_verify(target, o, out):
              "pred_tg": {str(k): v for k, v in pred_tg.items()},
              "pp": (got or {}).get("pp"), "pred_pp": pred_pp}
     calib.append(entry)
+    preset = _preset_argv(target) if flags is target.flags else None
+    skipped = calib.unbenched(preset) if preset else []
+    if skipped:
+        w("profile  not booked to %s's command: llama-bench ran without %s\n"
+          % (target.name, " ".join(skipped)))
     calib.record_profile(
-        "bench", target.model_path, _model_hash(target), ctx_obj.build,
-        _binary_path(target.binary), flags,
+        "bench", target.model_path, _model_hash(target, compute=True),
+        ctx_obj.machine.build, _binary_path(target.binary), flags,
         {"tg": meas_tg, "pp": entry["pp"], "n": {}} if meas_tg or entry["pp"]
         else None,
         # the preset's command only when it is the preset's config that
-        # was benchmarked, not a pick
-        argv=_preset_argv(target) if flags is target.flags else None)
+        # was benchmarked, not a pick, and llama-bench ran all of it
+        argv=None if skipped else preset)
     for d in depths:
         if d in meas_tg:
             w("decode @%-5s predicted %5.1f  measured %5.1f t/s  (%+.0f%%)\n"
