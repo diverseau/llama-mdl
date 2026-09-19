@@ -3,7 +3,7 @@
 Working notes for coding agents in the `mdl` repo. This is the canonical
 file; `CLAUDE.md` points here and adds only Claude Code specifics.
 
-Written against **0.6.20**. Where a fact is likely to drift, this says how to
+Written against **0.7.0**. Where a fact is likely to drift, this says how to
 re-derive it instead of quoting it.
 
 ## What this is
@@ -112,9 +112,12 @@ workflow via OIDC.
 
 ```sh
 # bump VERSION in mdl.py and add a CHANGELOG.md entry, commit, push main, then
-git tag -a v0.6.20 -m "0.6.20" && git push origin v0.6.20
+git tag -a v0.7.0 -m "0.7.0" && git push origin v0.7.0
 ```
 
+- Versions are SemVer, counted from the last release: a new feature bumps
+  the minor (0.7.0 -> 0.8.0), a release that only fixes bumps the patch
+  (0.7.0 -> 0.7.1), and a breaking change bumps the major.
 - The tag must equal `mdl.VERSION` or the build job fails on purpose. The
   version lives only in `mdl.py`; `pyproject` reads it from there.
 - **This is irreversible.** PyPI will not accept a re-upload of a version, so

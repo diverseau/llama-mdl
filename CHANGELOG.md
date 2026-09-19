@@ -2,85 +2,10 @@
 
 Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
 
-## [0.6.20] - 2026-09-19
+## [0.7.0] - 2026-09-19
 
-### Fixed
-
-- A chat-scroll test raced a queued follow-scroll on slow CI runners and
-  failed intermittently; it now waits for the scroll up to register. No
-  change to mdl itself.
-
-## [0.6.19] - 2026-09-19
-
-### Fixed
-
-- The test suite expected `mdl doctor` to spot a recycled pid on macOS,
-  where process start times cannot be read and mdl does not try; CI
-  failed there. No change to mdl itself.
-
-## [0.6.18] - 2026-09-19
-
-### Fixed
-
-- Piped or redirected output on Windows (`mdl find | more`, `> out.txt`)
-  crashed with a UnicodeEncodeError on the tables' → · ✓ ⚑; what the
-  pipe cannot encode now prints as `?`.
-- A measured profile was keyed by the modelled flags only, so two configs
-  differing in `-ot`, a split mode or a draft model shared one profile.
-  The whole command (bar the port and model paths) is in the key now.
-- Two `mdl eval` runs of the same items on the same server would write
-  one checkpoint between them; the second is refused. Saving a result
-  is locked, so a finished run tidying its partial records cannot lose
-  another eval's append.
-- `mdl manifest --redact` let the user name through in a path with no
-  file extension, or written with the other slash or case; and cut a
-  `--flag=value` down to the value's file name.
-- `mdl find --why` names a local model by its models.toml name, not only
-  its hash.
-
-## [0.6.17] - 2026-09-19
-
-### Added
-
-- `mdl fit --apply N --dry-run` and `--write NAME --dry-run` show the
-  exact change first: a diff of models.toml and the llama-server command
-  before and after, and write nothing. A dry run fails the same way the
-  real one would.
-- Every write to models.toml keeps the last five versions
-  (`models.toml.bak`, then `.bak.1` to `.bak.4`); `mdl config --history`
-  lists them with the tables each differs in, and `mdl config --undo`
-  swaps the config with the newest backup - a second `--undo` puts it
-  back.
-
-## [0.6.16] - 2026-09-19
-
-### Added
-
-- Measured fit profiles: what one exact configuration - model bytes,
-  llama.cpp build, binary and flags - did on this machine, as decode
-  speed at the depths it reached and prefill speed. `mdl fit --verify`
-  books its llama-bench run as one, and `mdl eval` books the timings the
-  server reported for every reply. `mdl fit <name>` shows the current
-  config's measurements beside the prediction, with the difference, and
-  `mdl fit <name> --profiles` lists every configuration measured. Speed
-  only - a profile claims nothing about quality.
-
-## [0.6.15] - 2026-09-19
-
-### Added
-
-- `mdl find --why MODEL` explains one model instead of printing the
-  table: where it ranks, or why it is not shown; every quant considered,
-  each with its fit or the reason it was turned away (too big, an
-  architecture this build does not load, a header that is not the model
-  it claims to be, the floor it misses, a header that could not be had,
-  a quant not kept); the public benchmarks its estimate rests on, the
-  parent it borrows from, the quant and KV penalty, and what beat it.
-  MODEL is a catalog id, a models.toml name or a unique part of either;
-  `--json` for scripts. The estimate is labelled for what it is: a
-  heuristic for a shortlist.
-
-## [0.6.14] - 2026-09-19
+Everything since 0.6.6. (0.6.7 to 0.6.20 were development builds on
+`main`, numbered a patch at a time by mistake and never released.)
 
 ### Added
 
@@ -92,115 +17,81 @@ Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
   else on its port, a leftover launch lock). It never launches a server
   and never changes the config or the state files; only failures make
   it exit non-zero.
-
-## [0.6.13] - 2026-09-19
-
-### Added
-
-- `mdl eval --resume`: every finished item is kept in a checkpoint as it
-  finishes, and an interrupted run continues where it stopped - only onto
-  the same items and the same server (same command bar the port, build
-  and model bytes, per `mdl manifest`); otherwise it starts over and says
-  why. A finished run replaces the partial records its interruptions left.
-
-### Changed
-
-- Model-written code now runs in the podman or docker sandbox by default
-  whenever one is available and answering; `--no-sandbox` opts out, and
-  a run without one says plainly that the code runs as you.
-- An item the server failed on - a dropped connection, an HTTP error - is
-  retried twice, and one that still fails is left unscored and reported,
-  rather than counted as a wrong answer. A run with such items is marked
-  partial.
-
-## [0.6.12] - 2026-09-19
-
-### Added
-
 - `mdl manifest <name>`: what a model is running as - the command line
   it was launched with, the llama.cpp build, each model shard's size and
   hash, and the machine - read from the running server and its state,
   or from the preset (and saying so) when it is not running.
-  `--redact` blanks secret flags and cuts paths to file names for a bug
-  report. The state file now records the binary each server was
-  launched from, and every `mdl eval` result carries the manifest of the
-  server that answered.
-
-## [0.6.11] - 2026-09-18
-
-### Fixed
-
-- `mdl add` makes a relative path absolute without resolving it, so a
-  path through a symlink or a Windows short name is stored as written
-  rather than rewritten to its target (0.6.9 resolved it).
-
-## [0.6.10] - 2026-09-18
-
-### Fixed
-
-- Two launches of one model at the same moment could both start a
-  server, and the second state file hid the first for good. A launch now
-  holds a per-model lock and checks again inside it; a server whose
-  state cannot be written is stopped instead of left untracked.
-- `mdl eval`: Ctrl-C while the model was still loading left the server
-  it had started running. It is the eval's to stop from the moment it
-  exists.
-- `mdl eval` on a server that was already running recorded settings from
-  `models.toml` as it is now, which need not be what the server was
-  started with. The state file keeps the command that actually ran; eval
-  records that, refuses a server whose settings have since changed, and
-  checks the server is serving the file it is about to credit.
-- `mdl find` judged every model by the default llama-server, so a model
-  that names its own fork for an architecture upstream lacks was turned
-  away. Each is judged by the build it runs on.
-- `mdl fit --verify` benchmarked at llama-bench's default thread count
-  rather than the config's, and took any failed benchmark - a timeout, a
-  flag the build does not take - as out of memory and widened the
-  memory margin for the architecture. Only an out-of-memory failure
-  moves the margin now; anything else says what happened.
-
-### Documentation
-
-- The catalog's publishing status is no longer written into the README,
-  where it went stale; SECURITY names the per-server state files; and
-  the eval's claim is the narrower true one - these exact questions
-  cannot have been memorised, the templates are public. The README says
-  plainly that the default code runner is not a sandbox, and that
-  `find`'s ranking is a heuristic for a shortlist.
-
-## [0.6.9] - 2026-09-18
+  `--redact` blanks secret flags and cuts paths, and the home directory,
+  out of it for a bug report. Every `mdl eval` result carries the
+  manifest of the server that answered.
+- `mdl eval --resume`: every finished item is kept in a checkpoint as it
+  finishes, and an interrupted run continues where it stopped - only onto
+  the same items and the same server (same command bar the port, build
+  and model bytes, per `mdl manifest`); otherwise it starts over and says
+  why. A finished run replaces the partial records its interruptions
+  left, and a second eval of the same items on the same server is
+  refused rather than interleaved.
+- `mdl find --why MODEL` explains one model instead of printing the
+  table: where it ranks, or why it is not shown; every quant considered,
+  each with its fit or the reason it was turned away (too big, an
+  architecture this build does not load, a header that is not the model
+  it claims to be, the floor it misses, a header that could not be had,
+  a quant not kept); the public benchmarks its estimate rests on, the
+  parent it borrows from, the quant and KV penalty, and what beat it.
+  MODEL is a catalog id, a models.toml name or a unique part of either;
+  `--json` for scripts. The estimate is labelled for what it is: a
+  heuristic for a shortlist.
+- Measured fit profiles: what one exact configuration - model bytes,
+  llama.cpp build, binary and the whole command - did on this machine,
+  as decode speed at the depths it reached and prefill speed.
+  `mdl fit --verify` books its llama-bench run as one, and `mdl eval`
+  books the timings the server reported for every reply. `mdl fit
+  <name>` shows the current config's measurements beside the prediction,
+  and `mdl fit <name> --profiles` lists every configuration measured.
+  Speed only - a profile claims nothing about quality.
+- `mdl fit --apply N --dry-run` and `--write NAME --dry-run` show the
+  exact change first: a diff of models.toml and the llama-server command
+  before and after, and write nothing. A dry run fails the same way the
+  real one would.
+- Every write to models.toml keeps the last five versions
+  (`models.toml.bak`, then `.bak.1` to `.bak.4`); `mdl config --history`
+  lists them with the tables each differs in, and `mdl config --undo`
+  swaps the config with the newest backup - a second `--undo` puts it
+  back.
+- A model may name its own `llama_server`, for one that needs a
+  different build - a fork that loads a quant type upstream does not,
+  like PrismML's for Bonsai's PQ2_0. It beats `$MDL_LLAMA_SERVER` and the
+  top-level setting for that model only, in `run`, the dashboard, `fit`,
+  `eval` and `find`; `mdl check` and `mdl doctor` say when it is missing.
 
 ### Changed
+
+These can refuse a config, or a comparison, that 0.6.6 accepted.
 
 - Every model's settings are checked before anything runs, each fault
   one line: `port` a number from 1 to 65535, counts not negative,
   `parallel` at least 1, `flash_attn` a real true/false, `args` a list
-  of strings. A string port used to reach the socket code as a
-  traceback. A `--port` or `-m` in `args` is refused: it would override
+  of strings. A `--port` or `-m` in `args` is refused: it would override
   the key mdl reads for its state, its pre-flight and its health check.
 - Model names are letters, digits, `-`, `_` and `.`, starting with a
   letter or digit - they name a TOML table and the state and log files.
   A name with a dot is written quoted.
+- `flash_attn = false` now runs `-fa off` rather than whatever the build
+  defaults to.
 - `mdl eval` results carry a new fingerprint that covers each item's
   system prompt, full tool schemas, reply cap and document content, and
-  the grader version. Runs from before this release are not comparable
-  with later ones, and `--compare` says so rather than subtracting them.
-
-### Fixed
-
-- `mdl add` stored a relative path as given, so the model only ran from
-  the directory it was added in; it stores the absolute path now. A name
-  like `bad name` wrote a table the next load could not parse; it is
-  refused, and so is the whole write if the result would not parse.
-- `mdl fit hf:... --write NAME` said nothing and wrote nothing; it is
-  refused with the step that works (download, then fit the file), and
-  `mdl find` suggests that step instead.
-- `flash_attn = false` now runs `-fa off` rather than whatever the build
-  defaults to. Unified KV (`--kv-unified`) survives a fit, a projector's
-  placement changes cleanly both ways, and `--flag=value` forms are read
-  and replaced like the spaced ones.
-
-## [0.6.8] - 2026-09-18
+  the grader version. Runs from 0.6.6 are not comparable with 0.7.0
+  ones, and `--compare` says so rather than subtracting them.
+- Model-written code runs in the podman or docker sandbox by default
+  whenever one is available and answering; `--no-sandbox` opts out, and
+  a run without one says plainly that the code runs as you.
+- An eval item the server failed on - a dropped connection, an HTTP
+  error - is retried twice, and one that still fails is left unscored
+  and reported, rather than counted as a wrong answer. A run with such
+  items is marked partial.
+- `mdl eval` on a server that was already running refuses one whose
+  settings have changed since it started, and checks the server is
+  serving the file it is about to credit.
 
 ### Fixed
 
@@ -225,6 +116,15 @@ Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
   with `ps` showing nothing. The process group (POSIX) or process tree
   (Windows) is now tracked after the wrapper exits, signalled, and
   checked; stop succeeds only when it is gone and the port is free.
+- Two launches of one model at the same moment could both start a
+  server, and the second state file hid the first for good. A launch now
+  holds a per-model lock and checks again inside it; a server whose
+  state cannot be written is stopped instead of left untracked.
+- `mdl eval`: Ctrl-C while the model was still loading left the server
+  it had started running.
+- `mdl eval` on a running server recorded settings from `models.toml` as
+  it is now, which need not be what the server was started with; it
+  records the command that actually ran.
 - `fit hf:` header fetches read at most what they asked for, even from a
   server that ignores Range; a wrong Content-Range or a short body is
   refused; and a header whose length fields claim more than the 256 MiB
@@ -233,20 +133,37 @@ Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
   content id and the hub it came from, not the first 16 characters of
   the first shard; it is written atomically.
 - `mdl find` could crash when a row sized from a sibling's header failed
-  on its own: the old score stayed and the ranking read a fit it no
-  longer had. A re-evaluation clears everything derived, only rows with
+  on its own. A re-evaluation clears everything derived, only rows with
   a fit, a score and no rejection are ranked, and refinement repeats
   until the rows shown have their own headers.
+- `mdl find` judged every model by the default llama-server, so a model
+  that names its own fork for an architecture upstream lacks was turned
+  away. Each is judged by the build it runs on.
+- `mdl add` stored a relative path as given, so the model only ran from
+  the directory it was added in; it stores it absolute now. A name like
+  `bad name` wrote a table the next load could not parse; it is refused.
+- `mdl fit hf:... --write NAME` said nothing and wrote nothing; it is
+  refused with the step that works (download, then fit the file), and
+  `mdl find` suggests that step instead.
+- Unified KV (`--kv-unified`) survives a fit, a projector's placement
+  changes cleanly both ways, and `--flag=value` forms are read and
+  replaced like the spaced ones.
+- `mdl fit --verify` benchmarked at llama-bench's default thread count
+  rather than the config's, and took any failed benchmark - a timeout, a
+  flag the build does not take - as out of memory and widened the
+  memory margin. Only an out-of-memory failure moves the margin now.
+- Piped or redirected output on Windows (`mdl find | more`, `> out.txt`)
+  crashed with a UnicodeEncodeError on the tables' → · ✓ ⚑; what the
+  pipe cannot encode now prints as `?`.
 
-## [0.6.7] - 2026-09-18
+### Documentation
 
-### Added
-
-- A model may name its own `llama_server`, for one that needs a
-  different build - a fork that loads a quant type upstream does not,
-  like PrismML's for Bonsai's PQ2_0. It beats `$MDL_LLAMA_SERVER` and the
-  top-level setting for that model only, in `run`, the dashboard, `fit`
-  and `eval`; `mdl check` says when it is missing.
+- The catalog's publishing status is no longer written into the README,
+  where it went stale; SECURITY names the per-server state files; and
+  the eval's claim is the narrower true one - these exact questions
+  cannot have been memorised, the templates are public. The README says
+  plainly that running model code without a container is not a sandbox,
+  and that `find`'s ranking is a heuristic for a shortlist.
 
 ## [0.6.6] - 2026-09-18
 
