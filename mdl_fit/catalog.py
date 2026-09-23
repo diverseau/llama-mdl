@@ -18,6 +18,7 @@ general.base_model keys), fingerprint (same arch and parameter count as
 a tracked model), or name (a last resort).
 """
 
+import http.client
 import json
 import os
 import re
@@ -576,12 +577,18 @@ def pull(path=None, repo=None):
                 "no published catalog at %s yet (or it is private); build "
                 "one here with: mdl catalog build" % repo) from None
         raise CatalogError("%s: HTTP %d" % (url, e.code)) from None
-    except (urllib.error.URLError, OSError) as e:
-        raise CatalogError("%s: %s" % (url, getattr(e, "reason", e))) from None
+    except (urllib.error.URLError, OSError, http.client.HTTPException) as e:
+        # HTTPException: a download cut off before its Content-Length
+        raise CatalogError("%s: %s" % (url, getattr(e, "reason", e)
+                                       or type(e).__name__)) from None
     except sqlite3.DatabaseError as e:
-        tmp.unlink(missing_ok=True)
         raise CatalogError("the downloaded catalog is not a catalog: %s"
                            % e) from None
+    finally:
+        # only a whole, checked download is kept, and it has been moved
+        # into place by now; a connection dropped or a Ctrl-C left the
+        # half-written .part beside the catalog for good
+        tmp.unlink(missing_ok=True)
 
 
 # ---------------------------------------------------------------- read --

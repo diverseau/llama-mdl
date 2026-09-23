@@ -116,6 +116,11 @@ class Hub(http.server.BaseHTTPRequestHandler):
             self.send_header("ETag", SNAP["etag"])
             self.send_header("Content-Length", str(len(SNAP["body"])))
             self.end_headers()
+            if SNAP.get("cut"):             # a connection that drops
+                self.wfile.write(SNAP["body"][:len(SNAP["body"]) // 2])
+                self.wfile.flush()
+                self.close_connection = True
+                return
             self.wfile.write(SNAP["body"])
             return
         if url.path.endswith("/tree/main"):
@@ -323,6 +328,17 @@ except catalog.CatalogError as e:
 check("a broken download never replaces a good snapshot",
       (err is not None, catalog.Catalog(TMP / "pulled.sqlite").meta()
        ["nodes"]), (True, 5))
+SNAP.update(etag='"v3"', body=path.read_bytes(), cut=True)
+try:
+    catalog.pull(TMP / "pulled.sqlite")
+    err = None
+except catalog.CatalogError as e:
+    err = str(e)
+SNAP["cut"] = False
+check("a download cut off halfway is an error, not a traceback, and leaves "
+      "no .part behind", (err is not None, (TMP / "pulled.sqlite.part")
+                          .exists(), catalog.Catalog(TMP / "pulled.sqlite")
+                          .meta()["nodes"]), (True, False, 5))
 
 # ================================================================= cli ===
 

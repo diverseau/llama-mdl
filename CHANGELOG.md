@@ -42,6 +42,10 @@ Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
   a Vulkan, ROCm, CPU or Metal machine was drawn as a CUDA one, and a
   model with its own `llama_server` as the default build. It uses each
   build's own backend: booked, else read from the libraries beside it.
+- `mdl catalog pull` cut off by a dropped connection ended in a traceback
+  and left a half-written `.part` file beside the catalog, as did a
+  Ctrl-C. It is an error in one line, and only a whole, checked download
+  is kept.
 
 ## [0.8.0] - 2026-09-23
 
