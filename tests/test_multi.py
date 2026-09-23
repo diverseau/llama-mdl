@@ -131,6 +131,30 @@ out, _, code = run(mdl.cmd_check, [])
 check("check notes a shared port",
       "share port %d; only one at a time" % port in out, True)
 check("but a shared port is not a problem", code, 0)
+
+# --- a server still loading holds its port too -----------------------------
+# It is not listening yet, so the port looked free and the second one
+# started, to die at load with the port taken.
+os.environ["MDL_FAKE_MODE"] = "slow"              # ~3s before it listens
+mdl.spawn("demo", *mdl.load_config())
+check("(demo is loading, not yet listening)", mdl.port_busy(port), False)
+_, err, code = run(mdl.spawn, "twin", *mdl.load_config())
+check("a model sharing the port is refused while the first one loads",
+      ("already serving 'demo'" in err, code), (True, 1))
+check("and nothing of it is left", sorted(mdl.read_states()), ["demo"])
+run(mdl.cmd_stop, ["--all"])
+del os.environ["MDL_FAKE_MODE"]
+
+held = mdl.run_dir() / ("_port-%d.lock" % port)
+held.write_text(str(os.getpid()))                 # another launch onto it
+t0 = time.time()
+_, err, code = run(mdl.spawn, "twin", *mdl.load_config())
+check("a launch onto a port another mdl is launching onto waits, then "
+      "is refused", ("starting a server on port %d" % port in err, code,
+                     time.time() - t0 > 3), (True, 1, True))
+held.unlink()
+check("a port lock is not a name lock: a model may be called port-1",
+      mdl.port_lock(1).path.name != mdl.launch_lock("port-1").path.name, True)
 teardown(root)
 
 # ------------------------------- a wrapper that leaves its server (B03) ----

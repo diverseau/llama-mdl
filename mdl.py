@@ -879,6 +879,18 @@ class launch_lock(file_lock):
                          f"try again in a moment")
 
 
+class port_lock(file_lock):
+    """One launch onto <port> at a time. Two models sharing a port, started
+    at once, both found it free - a server takes seconds to bind - and the
+    second died at load with the port taken. Named with a leading _,
+    which no model name can have, so it never meets a launch_lock."""
+
+    def __init__(self, port):
+        super().__init__(run_dir() / f"_port-{int(port)}.lock",
+                         f"another mdl is starting a server on port {port}; "
+                         f"try again in a moment")
+
+
 def spawn(name, models, binary, port=None):
     """Launch <name> detached, write its state file, return (proc, log, port).
 
@@ -910,12 +922,19 @@ def _spawn(name, models, binary, port):
         die(f"llama-server not found: {binary}")
     if not Path(models[name]["model"]).is_file():
         die(f"model file not found: {models[name]['model']}")
+    with port_lock(port):
+        return _launch(name, argv, binary, port)
+
+
+def _launch(name, argv, binary, port):
+    # a server we started but that is still loading holds the port without
+    # listening on it yet: its state file says so before the socket does
+    owner = next((s["name"] for s in read_states().values()
+                  if s.get("port") == port and s.get("name") != name), None)
+    if owner:
+        die(f"port {port} is already serving '{owner}'; give {name} its "
+            f"own port, or run 'mdl stop {owner}'")
     if port_busy(port):
-        owner = next((s["name"] for s in read_states().values()
-                      if s.get("port") == port), None)
-        if owner:
-            die(f"port {port} is already serving '{owner}'; give {name} its "
-                f"own port, or run 'mdl stop {owner}'")
         die(f"port {port} is already in use")
     try:
         run_dir().mkdir(parents=True, exist_ok=True)

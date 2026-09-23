@@ -16,6 +16,10 @@ Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
   space, `--port` in args - leaving a config nothing would start from.
   They are checked as `mdl run` checks them, and the modal stays open to
   fix them.
+- Two models sharing a port, started at once or one while the other was
+  still loading, both found the port free - a server takes seconds to
+  bind it - and the second died at load. A server still loading now
+  holds its port, and launches onto one port take turns.
 
 ## [0.8.0] - 2026-09-23
 
