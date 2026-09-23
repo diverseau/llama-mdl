@@ -82,6 +82,17 @@ for bad, words in ((["--depth", "lots"], "--depth takes a number"),
     check("%s is one line" % bad[0], (words in err, code, err.count("\n")),
           (True, 1, 1))
 
+s = lab.Sampler(os.getpid(), 60)          # no tick falls in what follows
+s.start()
+s.phase, s.tok = "decode", 7
+s.poke()
+s.phase = "idle"                          # the stream ended at once
+s.flush()
+s.stop()
+check("a poked sample is taken for the moment asked, however short",
+      [(x["phase"], x["tok"]) for x in s.samples if x["phase"] != "ready"],
+      [("decode", 7)])
+
 # ------------------------------------------------------------ the runs --
 model_file = llama(TMP / "Tiny-Q8_0.gguf")
 root, port = sandbox(model=model_file)
@@ -165,6 +176,17 @@ _, out, _, _ = lab_main("ls")
 check("ls lists the run", run_id in out, True)
 _, out, _, _ = lab_main("export", run_id)
 check("export gives its records as JSON", len(json.loads(out)), 6)
+
+run_id, out, err, code = lab_main("run", "demo", "--reps", "1", "--warmup",
+                                  "0", "--max-tokens", "64", "--cooldown", "0",
+                                  "--interval", "60", "--at", "20")
+rec = next(r for r in lab.load() if r["run"] == run_id)
+check("a decode shorter than the interval is sampled at its start, at the "
+      "token asked for and at its end",
+      (code, {1, 20, 64} <= {x["tok"] for x in lab.samples_of(rec)
+                             if x["phase"] == "decode"},
+       (rec["metrics"]["at"]["20"] or {}).get("vram"),
+       rec["metrics"]["vram"]["peak"]), (0, True, 1 * GiB, 1 * GiB))
 
 # --------------------------------------------------------------- suites --
 suites = hw.config_dir() / "lab"

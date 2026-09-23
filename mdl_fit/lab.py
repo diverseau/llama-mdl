@@ -377,7 +377,9 @@ def tree_rss(pid):
 
 class Sampler(threading.Thread):
     """The machine every `interval` seconds while a server runs, each
-    sample tagged with the phase and the tokens generated so far."""
+    sample tagged with the phase and the tokens generated so far - and
+    one more whenever `poke` asks, so a decode shorter than an interval
+    (a fast card, a short reply) still has samples of its own."""
 
     def __init__(self, pid, interval, clock=time.perf_counter):
         super().__init__(daemon=True)
@@ -385,28 +387,66 @@ class Sampler(threading.Thread):
         self.t0 = clock()
         self.phase, self.tok, self.rep, self.depth = "ready", 0, None, None
         self.samples, self.halt = [], threading.Event()
+        self.cond = threading.Condition()
+        self.pending, self.busy = [], False
 
-    def take(self):
+    def tag(self):
+        return {"phase": self.phase, "rep": self.rep, "depth": self.depth,
+                "tok": self.tok}
+
+    def take(self, tag=None):
+        tag = tag or self.tag()
         vram, util, temp, clock_mhz = gpu_now()
         total, avail = hw.ram()
         cpu = usage.cpu_load(0.2)
-        return {"t": round(self.clock() - self.t0, 3), "phase": self.phase,
-                "rep": self.rep, "depth": self.depth, "tok": self.tok,
-                "vram": vram, "gpu_util": util, "temp": temp,
-                "clock": clock_mhz, "rss": tree_rss(self.pid),
-                "ram_used": (total - avail) if total and avail else None,
-                "cpu": round(cpu * 100, 1) if cpu is not None else None}
+        return dict(tag, t=round(self.clock() - self.t0, 3),
+                    vram=vram, gpu_util=util, temp=temp, clock=clock_mhz,
+                    rss=tree_rss(self.pid),
+                    ram_used=(total - avail) if total and avail else None,
+                    cpu=round(cpu * 100, 1) if cpu is not None else None)
+
+    def poke(self):
+        """A sample as things stand now, taken on this thread rather than
+        the caller's: the stream reader must not wait on nvidia-smi, or
+        the gap it leaves is read as the model being slow. The tag is
+        the moment asked for; the reading follows it within a sample's
+        time, while the server still holds what it held."""
+        with self.cond:
+            self.pending.append(self.tag())
+            self.cond.notify_all()
+
+    def flush(self, timeout=30):
+        """Wait for every poked sample to be taken."""
+        with self.cond:
+            self.cond.wait_for(lambda: not self.pending and not self.busy,
+                               timeout)
 
     def run(self):
+        due = self.clock()
         while not self.halt.is_set():
+            with self.cond:
+                self.cond.wait_for(
+                    lambda d=due: self.pending or self.halt.is_set()
+                    or self.clock() >= d, max(0.0, due - self.clock()))
+                if self.halt.is_set():
+                    break
+                tag = self.pending.pop(0) if self.pending else None
+                self.busy = True
             try:
-                self.samples.append(self.take())
+                self.samples.append(self.take(tag))
             except Exception:           # noqa: BLE001 - never kill a run
                 pass
-            self.halt.wait(self.interval)
+            finally:
+                with self.cond:
+                    self.busy = False
+                    self.cond.notify_all()
+            if tag is None:
+                due = self.clock() + self.interval
 
     def stop(self):
         self.halt.set()
+        with self.cond:
+            self.cond.notify_all()
         self.join(timeout=30)
 
 
@@ -840,8 +880,11 @@ def run_variant(run_id, suite, v, models, binary, top, w, out):
                 sampler.rep, sampler.depth, sampler.tok = rep, depth, 0
                 sampler.phase = "prefill"
 
-                def on_token(n, s=sampler):
+                def on_token(n, s=sampler, at=w["at"]):
+                    first_tok = s.phase != "decode"
                     s.phase, s.tok = "decode", n
+                    if first_tok or n == at:
+                        s.poke()        # decode's start, and the @N token
                 try:
                     arrivals, timings = stream(port, text, w, seed, on_token)
                 except (OSError, http.client.HTTPException) as e:
@@ -849,7 +892,10 @@ def run_variant(run_id, suite, v, models, binary, top, w, out):
                        % (_k(depth), rep + 1, e))
                     continue
                 finally:
+                    if sampler.phase == "decode":
+                        sampler.poke()  # its end, with the server still full
                     sampler.phase = "idle"
+                    sampler.flush()
                 taken = sampler.samples[first:]
                 m, flags = rep_metrics(arrivals, timings, taken, w["at"], base)
                 rec = {"schema": SCHEMA, "id": new_id(), "run": run_id,
