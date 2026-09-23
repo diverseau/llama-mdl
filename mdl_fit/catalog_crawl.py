@@ -108,9 +108,9 @@ class Crawl:
         self.db.execute("DELETE FROM evals WHERE node=?", (mid,))
         parents = [(p, r) for p, r in catalog.base_of(m) if r != "quantized"]
         parent, relation = parents[0] if parents else (None, None)
-        writer = catalog.Crawler(self.db, orgs=[])
-        writer.add(m, official=writer.is_official(mid), parent=parent,
-                   relation=relation, method="card" if parent else None)
+        catalog.add_node(self.db, m, official=catalog.is_official(mid),
+                         parent=parent, relation=relation,
+                         method="card" if parent else None)
         if old:
             self.db.execute("UPDATE nodes SET arch=COALESCE(arch, ?), "
                             "params=COALESCE(params, ?), ctx=COALESCE(ctx, ?) "
@@ -339,7 +339,7 @@ def build(path, prev=None, popular=3000, recent=500, minutes=40, log=None,
                            "(SELECT id FROM nodes)")
             # Recompute roots from the direct relationships we actually
             # know. No recursive network calls are needed for this.
-            catalog.Crawler(db, orgs=[]).link()
+            catalog.set_roots(db)
             # A snapshot from before remote.auxiliary() carries drafts and
             # MTP heads as quants; removing them is safe in a partial too.
             db.executemany("DELETE FROM ggufs WHERE repo=? AND file=?", [

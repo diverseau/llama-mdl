@@ -236,6 +236,71 @@ def is_text_model(m):
 
 # --------------------------------------------------------------- crawl --
 
+def add_node(db, m, official, parent=None, relation=None, method=None,
+             depth=0):
+    """One model's row, from the hub's listing of it, and its evals."""
+    mid = m["id"]
+    card = m.get("cardData") or {}
+    gg, st = m.get("gguf") or {}, m.get("safetensors") or {}
+    lic = card.get("license") or _tags_value(m.get("tags"), "license:")
+    db.execute(
+        "INSERT INTO nodes VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (mid, mid.split("/")[0], int(official), None, parent, relation,
+         method, depth, _text(gg.get("architecture")),
+         st.get("total") or gg.get("total"), gg.get("context_length"),
+         _text(lic), _text(m.get("pipeline_tag")), m.get("createdAt"),
+         m.get("lastModified"), m.get("downloads", 0), m.get("likes", 0),
+         int(bool(m.get("gated"))),
+         json.dumps([t for t in m.get("tags") or []
+                     if not t.startswith(("region:", "endpoints_",
+                                          "deploy:"))]),
+         json.dumps(card.get("datasets") or [])))
+    add_evals(db, mid, m)
+
+
+def add_evals(db, mid, m):
+    rows = []
+    for e in m.get("evalResults") or []:
+        d = e.get("data") or {}
+        ds = d.get("dataset") or {}
+        src = d.get("source") or {}
+        if isinstance(d.get("value"), (int, float)) and ds.get("id"):
+            rows.append((mid, ds["id"], ds.get("task_id"), d["value"],
+                         int(bool(e.get("verified"))),
+                         src.get("name") or src.get("url") or "eval_results",
+                         d.get("date")))
+    index = (m.get("cardData") or {}).get("model-index") or []
+    for entry in index if isinstance(index, list) else []:
+        for res in entry.get("results") or []:
+            ds = res.get("dataset") or {}
+            for metric in res.get("metrics") or []:
+                v = metric.get("value")
+                if isinstance(v, (int, float)) and (ds.get("name")
+                                                    or ds.get("type")):
+                    rows.append((mid, ds.get("type") or ds.get("name"),
+                                 metric.get("type"), v,
+                                 int(bool(metric.get("verified"))),
+                                 "model card", None))
+    db.executemany("INSERT INTO evals VALUES (?,?,?,?,?,?,?)", rows)
+
+
+def set_roots(db):
+    """Each node's root: its topmost ancestor, from the parents stored."""
+    parents = dict(db.execute("SELECT id, parent FROM nodes"))
+    for nid in parents:
+        root, seen = nid, {nid}
+        while parents.get(root) and parents[root] not in seen:
+            root = parents[root]
+            seen.add(root)
+        db.execute("UPDATE nodes SET root = ? WHERE id = ?", (root, nid))
+
+
+def is_official(mid, orgs=()):
+    """A family's own release, whichever orgs this build crawls: a
+    --base Qwen/Qwen3-8B is still Qwen's."""
+    return mid.split("/")[0] in set(orgs) | set(FAMILIES)
+
+
 class Crawler:
     def __init__(self, db, orgs=None, allow=None, per_org=60,
                  max_children=100, max_depth=3, max_nodes=5000,
@@ -305,48 +370,8 @@ class Crawler:
             return False
         self.ids.add(mid)
         self.raw[mid] = m
-        card = m.get("cardData") or {}
-        gg, st = m.get("gguf") or {}, m.get("safetensors") or {}
-        lic = card.get("license") or _tags_value(m.get("tags"), "license:")
-        self.db.execute(
-            "INSERT INTO nodes VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (mid, mid.split("/")[0], int(official), None, parent, relation,
-             method, depth, _text(gg.get("architecture")),
-             st.get("total") or gg.get("total"), gg.get("context_length"),
-             _text(lic), _text(m.get("pipeline_tag")), m.get("createdAt"),
-             m.get("lastModified"), m.get("downloads", 0), m.get("likes", 0),
-             int(bool(m.get("gated"))),
-             json.dumps([t for t in m.get("tags") or []
-                         if not t.startswith(("region:", "endpoints_",
-                                              "deploy:"))]),
-             json.dumps(card.get("datasets") or [])))
-        self.add_evals(mid, m)
+        add_node(self.db, m, official, parent, relation, method, depth)
         return True
-
-    def add_evals(self, mid, m):
-        rows = []
-        for e in m.get("evalResults") or []:
-            d = e.get("data") or {}
-            ds = d.get("dataset") or {}
-            src = d.get("source") or {}
-            if isinstance(d.get("value"), (int, float)) and ds.get("id"):
-                rows.append((mid, ds["id"], ds.get("task_id"), d["value"],
-                             int(bool(e.get("verified"))),
-                             src.get("name") or src.get("url") or "eval_results",
-                             d.get("date")))
-        index = (m.get("cardData") or {}).get("model-index") or []
-        for entry in index if isinstance(index, list) else []:
-            for res in entry.get("results") or []:
-                ds = res.get("dataset") or {}
-                for metric in res.get("metrics") or []:
-                    v = metric.get("value")
-                    if isinstance(v, (int, float)) and (ds.get("name")
-                                                        or ds.get("type")):
-                        rows.append((mid, ds.get("type") or ds.get("name"),
-                                     metric.get("type"), v,
-                                     int(bool(metric.get("verified"))),
-                                     "model card", None))
-        self.db.executemany("INSERT INTO evals VALUES (?,?,?,?,?,?,?)", rows)
 
     def add_gguf_repo(self, node, m):
         repo = m["id"]
@@ -382,9 +407,7 @@ class Crawler:
               m.get("lastModified")) for key, shards in groups.items()])
 
     def is_official(self, mid):
-        """A family's own release, whichever orgs this build crawls: a
-        --base Qwen/Qwen3-8B is still Qwen's."""
-        return mid.split("/")[0] in set(self.orgs) | set(FAMILIES)
+        return is_official(mid, self.orgs)
 
     # -- walk --
     def run(self, bases=()):
@@ -463,14 +486,7 @@ class Crawler:
                                     "?, method = 'card' WHERE id = ?",
                                     (base, rel, nid))
                     break
-        parents = dict(self.db.execute("SELECT id, parent FROM nodes"))
-        for nid in parents:
-            root, seen = nid, {nid}
-            while parents.get(root) and parents[root] not in seen:
-                root = parents[root]
-                seen.add(root)
-            self.db.execute("UPDATE nodes SET root = ? WHERE id = ?",
-                            (root, nid))
+        set_roots(self.db)
 
     def prune(self):
         """Keep the tracked orgs' models (they anchor the lineage) and
