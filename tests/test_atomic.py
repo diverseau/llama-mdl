@@ -11,8 +11,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import support                                        # noqa: E402
 from support import mdl, run, sandbox, teardown       # noqa: E402
 
-import mdl_ui                                         # noqa: E402
-
 t = support.Tally("test_atomic")
 check = t.check
 GGUF = support.FAKE
@@ -101,7 +99,7 @@ before = mdl.CONFIG.read_text(encoding="utf-8")
 
 restore = kill_rename(OSError("disk full"))
 try:
-    mdl_ui.write_params("demo", {"ngl": 40})
+    mdl.write_params("demo", {"ngl": 40})
 except OSError:
     pass
 finally:
@@ -110,7 +108,7 @@ check("a failed edit leaves the config untouched",
       mdl.CONFIG.read_text(encoding="utf-8"), before)
 check("a failed edit leaves no temp file", strays(root), [])
 
-mdl_ui.write_params("demo", {"ngl": 40})
+mdl.write_params("demo", {"ngl": 40})
 saved = mdl.CONFIG.read_text(encoding="utf-8")
 check("a good edit lands", tomllib.loads(saved)["demo"]["ngl"], 40)
 check("comments survive the edit", "# my notes" in saved, True)
@@ -171,7 +169,7 @@ for label, text in (
         ("an indented table", "  [demo]\n  ngl = 1\n  ctx = 2\n"),
         ("a quoted name", "[\"demo\"]\nngl = 1\n")):
     mdl.CONFIG.write_text(text, encoding="utf-8")
-    mdl_ui.write_params("demo", {"ngl": 40, "ctx": 8})
+    mdl.write_params("demo", {"ngl": 40, "ctx": 8})
     saved = mdl.CONFIG.read_text(encoding="utf-8")
     check("%s is edited, not refused" % label,
           tomllib.loads(saved)["demo"], {"ngl": 40, "ctx": 8})
@@ -180,9 +178,9 @@ mdl.CONFIG.write_text("[demo]\nngl = 1\n", encoding="utf-8")
 _, err, code = support.run(mdl.write_params, "nope", {"ngl": 2})
 check("a missing table is one line, not a ValueError",
       (code, "no [nope] table" in err), (1, True))
-mdl_ui.write_params("demo", {"ngl": 5})       # the dashboard clears by omission
+mdl.write_params("demo", {"ngl": 5})       # the dashboard clears by omission
 mdl.CONFIG.write_text("[demo]\nngl = 1\nctx = 2\n", encoding="utf-8")
-mdl_ui.write_params("demo", {"ngl": 5})
+mdl.write_params("demo", {"ngl": 5})
 check("the dashboard still clears a field it leaves out",
       tomllib.loads(mdl.CONFIG.read_text(encoding="utf-8"))["demo"],
       {"ngl": 5})

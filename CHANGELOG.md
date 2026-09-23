@@ -4,6 +4,12 @@ Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
 
 ## [Unreleased]
 
+### Removed
+
+- The move of a pre-0.3 `state.json` to one file per server, kept for
+  upgrades from 0.2. A server started by mdl 0.2 and still running is
+  not listed; stop it by hand.
+
 ### Fixed
 
 - A mistyped value ended in a traceback instead of one line: an `hf:`

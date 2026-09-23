@@ -98,7 +98,6 @@ async def main():
     (root / "state").mkdir()
     mdl.CONFIG = root / "config" / "models.toml"
     mdl.STATE_DIR = root / "state"
-    mdl.STATE = root / "state" / "state.json"
     mdl.CONFIG.write_text(DEMO, encoding="utf-8")
 
     app = MdlApp(fx="off")
@@ -129,7 +128,8 @@ def running(app):
     """
     log = mdl.STATE_DIR / "ornith.log"
     log.write_text(chr(10).join(LOG) + chr(10), encoding="utf-8")
-    mdl.write_atomic(mdl.STATE, json.dumps(
+    mdl.run_dir().mkdir(parents=True, exist_ok=True)
+    mdl.write_atomic(mdl.state_path("ornith"), json.dumps(
         {"name": "ornith", "pid": os.getpid(), "port": 8080,
          "started": time.time() - 4520, "log": str(log),
          "born": mdl.proc_started(os.getpid())}))

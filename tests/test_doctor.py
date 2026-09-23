@@ -121,12 +121,11 @@ try:
     (mdl.run_dir() / "live.lock").write_text(str(os.getpid()))
     mdl.state_path("demo").write_text(json.dumps({"pid": 0, "port": port}))
     (mdl.run_dir() / "broken.json").write_text("{")
-    mdl.STATE.write_text(json.dumps({"name": "legacy", "pid": 0}))
     before = snapshot()
     report, _, _ = diagnose()
     check("leftover lock warns", has(report, "warn", "old.lock", None), True)
     check("live lock is not stale", has(report, "warn", "live.lock", None), False)
-    check("stale and legacy state left untouched", snapshot(), before)
+    check("stale state left untouched", snapshot(), before)
     with patch.object(mdl.tempfile, "TemporaryFile",
                       side_effect=PermissionError("not writable")):
         report, _, code = diagnose()

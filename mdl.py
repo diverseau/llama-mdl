@@ -32,7 +32,6 @@ def _base(env, *fallback):
 CONFIG_DIR = _base("XDG_CONFIG_HOME", ".config") / "mdl"
 CONFIG = CONFIG_DIR / "models.toml"
 STATE_DIR = _base("XDG_STATE_HOME", ".local", "state") / "mdl"
-STATE = STATE_DIR / "state.json"
 VERSION = "0.7.1"
 DEFAULT_BIN = "llama-server"
 CONFIG_DATA = {}          # last parsed config, for UI-only settings
@@ -505,31 +504,6 @@ def state_path(name):
     return run_dir() / f"{check_name(name)}.json"
 
 
-def migrate_state():
-    """Move a pre-0.3 single state.json into the per-server directory.
-
-    Someone upgrading with a server up should keep control of it rather
-    than be told nothing is running. This, STATE, and the test that
-    covers them can go in 0.5: by then nobody is stopping a server they
-    started two minor versions ago.
-    """
-    if not STATE.exists():
-        return
-    try:
-        old = json.loads(STATE.read_text())
-        name = old["name"]
-    except (OSError, ValueError, KeyError, TypeError):
-        STATE.unlink(missing_ok=True)
-        return
-    try:
-        run_dir().mkdir(parents=True, exist_ok=True)
-        if not state_path(name).exists():
-            write_atomic(state_path(name), json.dumps(old))
-    except OSError:
-        return                           # try again next time; nothing is lost
-    STATE.unlink(missing_ok=True)
-
-
 def live_state(path):
     """One server's state, or None - clearing the file if it is stale."""
     try:
@@ -629,21 +603,17 @@ def read_states(read_only=False):
     calls at the same moment would otherwise read, modify and write the
     same file, and one of them would lose.
 
-    read_only includes stale and legacy records for diagnosis, without
-    migrating or removing files. Its caller must check liveness itself.
+    read_only includes stale records for diagnosis, without removing
+    files. Its caller must check liveness itself.
     """
-    if not read_only:
-        migrate_state()
     out = {}
     try:
         paths = sorted(run_dir().glob("*.json"))
     except OSError:
         return out
-    if read_only and STATE.is_file():
-        paths.append(STATE)
     for path in paths:
         if read_only:
-            # Diagnosis must leave stale files and legacy state in place.
+            # Diagnosis must leave stale files in place.
             try:
                 state = json.loads(path.read_text())
                 if not isinstance(state, dict) or not isinstance(
@@ -1039,18 +1009,11 @@ def file_id(path):
             "mtime": int(st.st_mtime), "mtime_ns": st.st_mtime_ns}
 
 
-def _no_shards(path):
-    return [path]
-
-
 def model_ids(argv):
     """file_id of every model file argv loads, taken at launch: what
     manifest compares later to tell a file replaced under a running
     server, which still holds the one it opened."""
-    try:
-        from mdl_fit.manifest import shards
-    except ImportError:
-        shards = _no_shards
+    from mdl_fit.manifest import shards
     paths = [argv[i + 1] for i, a in enumerate(argv[:-1])
              if a in ("-m", "--model", "-mm", "--mmproj")]
     return [file_id(s) for p in paths for s in shards(p)]

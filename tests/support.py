@@ -64,7 +64,6 @@ def sandbox(port=None, extra="", model=None, binary=None):
     (root / "state").mkdir()
     mdl.CONFIG = root / "config" / "models.toml"
     mdl.STATE_DIR = root / "state"
-    mdl.STATE = root / "state" / "state.json"
     port = port or free_port()
     binary = binary or _launcher(root)
     model = model or FAKE                # any real file works as the "model"

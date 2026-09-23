@@ -64,11 +64,6 @@ NEWLINE = chr(10)
 BACKSLASH = chr(92)
 
 
-# Moved to mdl.py so `mdl fit` can write the config without textual.
-toml_value = mdl.toml_value
-write_params = mdl.write_params
-
-
 def fx_period(override=None):
     """Seconds per colour cycle. --fx-period beats $MDL_UI_FX_PERIOD
     beats ui_fx_period in the config."""
@@ -1711,7 +1706,7 @@ class MdlApp(App):
             if cfg is None:
                 return
             try:
-                write_params(name, cfg)
+                mdl.write_params(name, cfg)
             # MdlError is how the writer refuses: the table renamed or
             # removed on disk while the dashboard had it open. Uncaught,
             # it took the whole dashboard down with a traceback.

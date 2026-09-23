@@ -1,4 +1,4 @@
-"""Several servers at once: ports, disambiguation, --all, migration.
+"""Several servers at once: ports, disambiguation, --all.
 
 The single-server rules have to keep working exactly as they did while
 only one is up - that is the whole compatibility story - and only ask
@@ -131,25 +131,6 @@ out, _, code = run(mdl.cmd_check, [])
 check("check notes a shared port",
       "share port %d; only one at a time" % port in out, True)
 check("but a shared port is not a problem", code, 0)
-teardown(root)
-
-# ------------------------------------------------------- state migration ----
-# Someone upgrading with a server up keeps control of it.
-root, port = sandbox()
-run(mdl.cmd_run, ["demo"])
-old = mdl.read_state("demo")
-mdl.state_path("demo").unlink()
-mdl.STATE.write_text(json.dumps(old), encoding="utf-8")   # the pre-0.3 layout
-check("a pre-0.3 state file is still understood",
-      mdl.read_state("demo")["pid"], old["pid"])
-check("it was moved to the new place", mdl.state_path("demo").is_file(), True)
-check("and the old file is gone", mdl.STATE.exists(), False)
-out, _, code = run(mdl.cmd_stop, [])
-check("and the migrated server can be stopped", code, 0)
-
-mdl.STATE.write_text("not json at all", encoding="utf-8")
-check("a corrupt one is discarded, not fatal", mdl.read_states(), {})
-check("and cleared away", mdl.STATE.exists(), False)
 teardown(root)
 
 # ------------------------------- a wrapper that leaves its server (B03) ----

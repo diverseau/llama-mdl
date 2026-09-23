@@ -114,9 +114,10 @@ check("stop when idle", (out, code), ("nothing running\n", 0))
 for label, blob in (("stale pid", '{"name":"x","pid":999999,"port":1,"started":0}'),
                     ("corrupt json", "{not json"),
                     ("missing pid", '{"name":"x"}')):
-    mdl.STATE.write_text(blob, encoding="utf-8")
+    mdl.run_dir().mkdir(parents=True, exist_ok=True)
+    mdl.state_path("x").write_text(blob, encoding="utf-8")
     out, _, _ = run(mdl.cmd_ps, [])
-    check("%s self-heals" % label, (out, mdl.STATE.exists()),
+    check("%s self-heals" % label, (out, mdl.state_path("x").exists()),
           ("nothing running\n", False))
 
 check("uptime formatting", [mdl.uptime(x) for x in (0, 45, 201, 3720, 90061, -5)],
@@ -195,7 +196,7 @@ check("logs for an unknown name", (err.startswith("mdl: no log at"), code), (Tru
 out, _, code = run(mdl.cmd_stop, [])
 check("stop", (out, code), ("stopped demo (pid %d)\n" % state["pid"], 0))
 check("process gone", wait_gone(state["pid"]), True)
-check("state cleaned up", mdl.STATE.exists(), False)
+check("state cleaned up", mdl.state_path("demo").exists(), False)
 _, err, code = run(mdl.cmd_logs, [])
 check("logs with nothing running",
       (err.strip(), code), ("mdl: nothing running; pass a model name", 1))
@@ -209,7 +210,8 @@ check("dead server: exit 1", code, 1)
 check("dead server: reports status", "exited with status 1" in err, True)
 check("dead server: one line, no traceback", (err.count("\n"), "Traceback" in err),
       (1, False))
-check("dead server: state cleaned up", mdl.STATE.exists(), False)
+check("dead server: state cleaned up", mdl.state_path("demo").exists(),
+      False)
 teardown(root)
 
 # ------------------------------------- listening but never reporting ready ---
