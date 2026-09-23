@@ -37,6 +37,11 @@ Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
   built - prompt, domain, regex, an `expect` for text checks,
   `max_tokens`, and ids unique within a file - with the file and task
   named.
+- `mdl ui`'s placement pane modelled every model on the first backend
+  `mdl fit` had booked for any build, and on CUDA when none had been, so
+  a Vulkan, ROCm, CPU or Metal machine was drawn as a CUDA one, and a
+  model with its own `llama_server` as the default build. It uses each
+  build's own backend: booked, else read from the libraries beside it.
 
 ## [0.8.0] - 2026-09-23
 

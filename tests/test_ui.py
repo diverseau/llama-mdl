@@ -653,6 +653,35 @@ async def main():
                     os.environ.pop(k, None)
                 else:
                     os.environ[k] = v
+
+    # --- the placement pane, per build --------------------------------------
+    # It modelled every model on the first backend booked for any build,
+    # CUDA if none was: a Vulkan or Metal machine was drawn as CUDA, and a
+    # model with its own llama_server as the default one.
+    old_home = os.environ.get("MDL_FIT_HOME")
+    home = Path(tempfile.mkdtemp(prefix="mdl-pane-"))
+    os.environ["MDL_FIT_HOME"] = str(home)
+    try:
+        vk, cpu = home / "vk", home / "cpu"
+        for d, lib in ((vk, "ggml-vulkan.dll"), (cpu, "ggml-cpu.dll")):
+            d.mkdir()
+            (d / "llama-server").write_text("")
+            (d / lib).write_text("")
+        gguf_file = support.llama(home / "Tiny-Q8_0.gguf")
+        mdl_ui._FIT_ENV.clear()
+        for d, want in ((vk, "Vulkan"), (cpu, "CPU")):
+            placed = mdl_ui.fit_placement([str(d / "llama-server"), "-m",
+                                           str(gguf_file), "-c", "4096"])
+            check("the pane models %s's own backend" % d.name,
+                  (placed is not None,
+                   mdl_ui._FIT_ENV["mach", str(d / "llama-server")].backend),
+                  (True, want))
+    finally:
+        mdl_ui._FIT_ENV.clear()
+        if old_home is None:
+            os.environ.pop("MDL_FIT_HOME", None)
+        else:
+            os.environ["MDL_FIT_HOME"] = old_home
     return t.done()
 
 

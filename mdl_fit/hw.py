@@ -435,8 +435,7 @@ def probe(binary="llama-server", quick=False, now=False):
         kw.update(backend=backend, gpu_name=name, vram_total=total,
                   vram_free=free)
     elif gpus:
-        kw["backend"] = saved.get("backends", {}).get(bkey) or _guess_backend(
-            binary)
+        kw["backend"] = backend_for(binary, saved)
     total, avail = ram()
     kw.update(ram_total=total or 0, ram_avail=avail or 0,
               cores=cpu_cores())
@@ -512,6 +511,26 @@ def _binary_key(binary):
         return "%s@%d" % (path, int(Path(path).stat().st_mtime))
     except OSError:
         return str(path)
+
+
+def backend_for(binary, saved=None):
+    """The backend this build runs on, without starting it: what a probe
+    of this binary booked, else what the libraries beside it are built
+    for, else Metal on a Mac and CUDA elsewhere."""
+    saved = load_saved() if saved is None else saved
+    got = saved.get("backends", {}).get(_binary_key(binary))
+    if got:
+        return got
+    here = Path(shutil.which(binary) or binary).parent
+    names = " ".join(p.name.lower() for p in here.glob("*ggml*"))
+    for key, name in (("cuda", "CUDA"), ("vulkan", "Vulkan"),
+                      ("hip", "ROCm"), ("metal", "Metal")):
+        if key in names:
+            return name
+    if names:
+        return "CPU"            # its ggml libraries, and none for a GPU
+    # nothing beside it: a static build, as Metal ones usually are
+    return "Metal" if sys.platform == "darwin" else "CUDA"
 
 
 def _guess_backend(binary):

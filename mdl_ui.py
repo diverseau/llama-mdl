@@ -521,12 +521,16 @@ def fit_placement(argv):
     except (OSError, ValueError, KeyError, IndexError, gguf.Truncated):
         return None
     if "res" not in _FIT_ENV:
-        saved = hw.load_saved()
         _FIT_ENV["res"] = calib.Residuals()
-        _FIT_ENV["mach"] = hw.Machine(bench=saved.get("bench", {}),
-                                      backend=next(iter(saved.get(
-                                          "backends", {}).values()), "CUDA"))
-    mach = _FIT_ENV["mach"]
+    # per build: a model can name its own llama_server, and the first
+    # backend booked for any build - CUDA if none was - is not this one's
+    binary = argv[0] if argv else "llama-server"
+    if ("mach", binary) not in _FIT_ENV:
+        saved = hw.load_saved()
+        _FIT_ENV["mach", binary] = hw.Machine(
+            bench=saved.get("bench", {}),
+            backend=hw.backend_for(binary, saved))
+    mach = _FIT_ENV["mach", binary]
     residual = _FIT_ENV["res"].lookup(calib.signature(shape.inv),
                                       shape.arch, flags)
     mem = model.memory(shape, flags, None, mach.max_alloc, residual)

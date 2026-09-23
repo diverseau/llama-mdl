@@ -235,6 +235,19 @@ try:
         hw.update = real_update
     check("a probe that learns nothing new leaves hw.json alone",
           len(writes) - before, 0)
+    saved = {"backends": {hw._binary_key(str(binary)): "Vulkan"}}
+    libs = TMP / "rocm"
+    libs.mkdir()
+    (libs / "llama-server").write_text("")
+    (libs / "ggml-hip.dll").write_text("")
+    bare = TMP / "bare"
+    bare.mkdir()
+    (bare / "llama-server").write_text("")
+    check("a build's backend: booked, else its libraries, else the platform",
+          [hw.backend_for(str(binary), saved),
+           hw.backend_for(str(libs / "llama-server"), saved),
+           hw.backend_for(str(bare / "llama-server"), saved)],
+          ["Vulkan", "ROCm", "Metal" if sys.platform == "darwin" else "CUDA"])
 finally:
     hw.nvidia, hw.llama_devices = REAL["nvidia"], REAL["devices"]
     hw.usage.snapshot, hw.llama_build = REAL["snapshot"], REAL["build"]
