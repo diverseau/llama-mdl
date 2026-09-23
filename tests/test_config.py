@@ -1,88 +1,100 @@
-"""Config editing uses the active path without parsing or rewriting TOML."""
+"""mdl config opens the active config in your editor: it never parses or
+rewrites the TOML, so a config too broken to load can still be fixed."""
 import contextlib
 import io
 import os
-from pathlib import Path
 import subprocess
 import sys
 import tempfile
-import unittest
+from pathlib import Path
 from unittest.mock import patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import mdl  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import support                                        # noqa: E402
+from support import mdl, run                          # noqa: E402
+
+t = support.Tally("test_config")
+check = t.check
 
 
-class ConfigTests(unittest.TestCase):
-    def setUp(self):
-        tmp = self.enterContext(tempfile.TemporaryDirectory(prefix="mdl config "))
-        self.path = Path(tmp) / "models.toml"
-        self.path.write_text("invalid TOML [", encoding="utf-8")
-        self.enterContext(patch.object(mdl, "CONFIG", self.path))
-        self.enterContext(patch.dict(os.environ, {"VISUAL": "", "EDITOR": ""}))
-        self.launch = self.enterContext(patch.object(mdl.subprocess, "run"))
-        self.launch.return_value.returncode = 0
+@contextlib.contextmanager
+def config(text="invalid TOML ["):
+    """A throwaway config, no editor set, and the editor never started:
+    (path, the stand-in for subprocess.run)."""
+    with tempfile.TemporaryDirectory(prefix="mdl config ") as tmp:
+        path = Path(tmp) / "models.toml"
+        if text is not None:
+            path.write_text(text, encoding="utf-8")
+        with patch.object(mdl, "CONFIG", path), \
+                patch.dict(os.environ, {"VISUAL": "", "EDITOR": ""}), \
+                patch.object(mdl.subprocess, "run") as launch:
+            launch.return_value.returncode = 0
+            yield path, launch
 
-    def test_visual_wins_and_config_is_not_parsed_or_changed(self):
-        with patch.dict(os.environ, {"VISUAL": "code --wait", "EDITOR": "nano"}):
-            mdl.cmd_config([])
-        self.launch.assert_called_once_with(
-            ["code", "--wait", str(self.path.resolve())])
-        self.assertEqual(self.path.read_text(), "invalid TOML [")
 
-    def test_editor_with_quoted_executable_and_spaces(self):
-        editor = (r'C:\Program Files\Editor\edit.exe'
-                  if os.name == "nt" else "/my editor")
-        with patch.dict(os.environ, {"EDITOR": '"%s" --wait' % editor}):
-            mdl.cmd_config([])
-        self.launch.assert_called_once_with(
-            [editor, "--wait", str(self.path.resolve())])
+def launched(launch):
+    """The one command the editor was started with, or None."""
+    return launch.call_args.args[0] if launch.call_count == 1 else None
 
-    def test_default_editor(self):
+
+with config() as (path, launch):
+    with patch.dict(os.environ, {"VISUAL": "code --wait", "EDITOR": "nano"}):
         mdl.cmd_config([])
-        self.launch.assert_called_once_with(
-            ["notepad" if os.name == "nt" else "vi", str(self.path.resolve())])
+    check("VISUAL wins over EDITOR, and gets the config's path",
+          launched(launch), ["code", "--wait", str(path.resolve())])
+    check("and the config is neither parsed nor changed",
+          path.read_text(), "invalid TOML [")
 
-    def test_missing_config(self):
-        self.path.unlink()
-        with self.assertRaisesRegex(mdl.MdlError, "Run 'mdl init' first"):
-            mdl.cmd_config([])
-        self.launch.assert_not_called()
+with config() as (path, launch):
+    editor = (r"C:\Program Files\Editor\edit.exe" if os.name == "nt"
+              else "/my editor")
+    with patch.dict(os.environ, {"EDITOR": '"%s" --wait' % editor}):
+        mdl.cmd_config([])
+    check("an editor path with spaces, quoted, keeps its arguments",
+          launched(launch), [editor, "--wait", str(path.resolve())])
 
-    def test_path_works_before_init(self):
-        self.path.unlink()
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            mdl.cmd_config(["--path"])
-        self.assertEqual(out.getvalue().strip(), str(self.path.resolve()))
-        self.launch.assert_not_called()
+with config() as (path, launch):
+    mdl.cmd_config([])
+    check("with neither set, the platform's editor",
+          launched(launch),
+          ["notepad" if os.name == "nt" else "vi", str(path.resolve())])
 
-    def test_bad_arguments(self):
-        with self.assertRaisesRegex(mdl.MdlError, "usage: mdl config"):
-            mdl.cmd_config(["--unknown"])
-        self.launch.assert_not_called()
+with config(text=None) as (path, launch):
+    _, err, code = run(mdl.cmd_config, [])
+    check("no config yet: says to run mdl init, and opens nothing",
+          ("Run 'mdl init' first" in err, code, launch.called),
+          (True, 1, False))
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        mdl.cmd_config(["--path"])
+    check("--path works before init",
+          (out.getvalue().strip(), launch.called),
+          (str(path.resolve()), False))
 
-    def test_editor_errors(self):
-        self.launch.side_effect = FileNotFoundError("missing editor")
-        with self.assertRaisesRegex(mdl.MdlError, "cannot open config editor"):
-            mdl.cmd_config([])
-        self.launch.side_effect = None
-        self.launch.return_value.returncode = 7
-        with self.assertRaisesRegex(mdl.MdlError, "exited with status 7"):
-            mdl.cmd_config([])
+with config() as (path, launch):
+    _, err, code = run(mdl.cmd_config, ["--unknown"])
+    check("an unknown argument is a usage line, and opens nothing",
+          ("usage: mdl config" in err, code, launch.called),
+          (True, 1, False))
 
+with config() as (path, launch):
+    launch.side_effect = FileNotFoundError("missing editor")
+    _, err, code = run(mdl.cmd_config, [])
+    check("an editor that cannot start is one line",
+          ("cannot open config editor" in err, code), (True, 1))
+    launch.side_effect = None
+    launch.return_value.returncode = 7
+    _, err, code = run(mdl.cmd_config, [])
+    check("and one that fails says its status",
+          ("exited with status 7" in err, code), (True, 1))
 
-class DispatchTests(unittest.TestCase):
-    def test_path_honours_xdg_in_real_cli(self):
-        with tempfile.TemporaryDirectory(prefix="mdl config ") as tmp:
-            result = subprocess.run(
-                [sys.executable, mdl.__file__, "config", "--path"],
-                env=dict(os.environ, XDG_CONFIG_HOME=tmp),
-                capture_output=True, text=True)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(result.stdout.strip(),
-                             str((Path(tmp) / "mdl" / "models.toml").resolve()))
+with tempfile.TemporaryDirectory(prefix="mdl config ") as tmp:
+    result = subprocess.run(
+        [sys.executable, mdl.__file__, "config", "--path"],
+        env=dict(os.environ, XDG_CONFIG_HOME=tmp),
+        capture_output=True, text=True)
+    check("the real CLI's --path honours XDG_CONFIG_HOME",
+          (result.returncode, result.stdout.strip(), result.stderr),
+          (0, str((Path(tmp) / "mdl" / "models.toml").resolve()), ""))
 
-
-if __name__ == "__main__":
-    unittest.main()
+sys.exit(t.done())
