@@ -248,4 +248,29 @@ check("the state records what ran",
 run(mdl.cmd_stop, ["--all"])
 teardown(root)
 
+# ------------------------------------------- taking over a dead lock ----
+root, port = sandbox()
+lock = mdl.run_dir() / "race.lock"
+guard = mdl.run_dir() / "race.lock.takeover"
+held = mdl.file_lock(lock, "busy")
+lock.parent.mkdir(parents=True, exist_ok=True)
+lock.write_text(str(dead.pid))
+guard.touch()                                # another waiter is taking it
+check("a takeover under way is left to the waiter making it",
+      (held._take_over(dead.pid), lock.read_text()), (False, str(dead.pid)))
+os.utime(guard, (time.time() - 60, time.time() - 60))
+held._take_over(dead.pid)
+check("a guard a crash left behind is cleared", guard.exists(), False)
+lock.write_text(str(os.getpid()))            # a new holder won it meanwhile
+check("a lock taken since the dead pid was read is not removed",
+      (held._take_over(dead.pid), lock.read_text()), (False, str(os.getpid())))
+lock.write_text(str(dead.pid))
+check("one still held by the dead pid is removed, and the guard with it",
+      (held._take_over(dead.pid), lock.exists(), guard.exists()),
+      (True, False, False))
+lock.write_text(str(dead.pid))
+with mdl.file_lock(lock, "busy", tries=5):
+    check("and the lock is then taken", lock.read_text(), str(os.getpid()))
+teardown(root)
+
 sys.exit(t.done())

@@ -830,15 +830,48 @@ class file_lock:
                     holder = int(self.path.read_text() or 0)
                 except (OSError, ValueError):
                     holder = 0
-                if holder and not alive(holder):
-                    self.path.unlink(missing_ok=True)   # its launcher died
-                    continue
+                if holder and not alive(holder) and self._take_over(holder):
+                    continue                    # its holder died; try again
                 time.sleep(0.1)
                 continue
             with os.fdopen(fd, "w") as fh:
                 fh.write(str(os.getpid()))
             return self
         die(self.busy)
+
+    def _take_over(self, dead):
+        """Remove a lock left by `dead` - only while it is still that one.
+
+        Two waiters could both see the dead pid; the first removed the
+        lock and took a new one, and the second then removed that. So a
+        takeover is itself taken, with O_EXCL on a guard file, and the
+        lock is read again under it. A guard a crash left behind goes
+        once it is older than any takeover takes.
+        """
+        guard = self.path.with_name(self.path.name + ".takeover")
+        try:
+            fd = os.open(guard, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            try:
+                if time.time() - guard.stat().st_mtime > 10:
+                    guard.unlink(missing_ok=True)
+            except OSError:
+                pass
+            return False
+        os.close(fd)
+        try:
+            try:
+                now = int(self.path.read_text() or 0)
+            except FileNotFoundError:
+                return True                     # gone already: go and take it
+            except (OSError, ValueError):
+                return False
+            if now != dead:
+                return False                    # someone took it meanwhile
+            self.path.unlink(missing_ok=True)
+            return True
+        finally:
+            guard.unlink(missing_ok=True)
 
     def __exit__(self, *exc):
         self.path.unlink(missing_ok=True)

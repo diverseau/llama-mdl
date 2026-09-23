@@ -32,6 +32,10 @@ Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
   the calibration. Each write now takes a lock, re-reads the file and
   adds only what it learned. A probe that finds the file busy leaves it,
   and still answers.
+- Two mdl processes waiting on a lock whose holder had died could both
+  take it: the second removed the lock the first had just made. Taking
+  over a dead holder's lock is now done by one waiter at a time, and only
+  while the lock still names the dead pid.
 
 ## [0.7.1] - 2026-09-19
 
