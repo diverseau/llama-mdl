@@ -847,7 +847,7 @@ def main(args, out=None):
         main_rows, explore = choose(cands, qm)
     if o.get("new"):
         seen_path().parent.mkdir(parents=True, exist_ok=True)
-        seen_path().write_text(json.dumps({"seen": time.strftime(
+        mdl.write_atomic(seen_path(), json.dumps({"seen": time.strftime(
             "%Y-%m-%dT%H:%M:%S", time.gmtime())}))
     if "why" in o:
         node = match_model(o["why"], qm, locals_, models)

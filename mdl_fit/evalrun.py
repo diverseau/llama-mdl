@@ -941,20 +941,6 @@ def chars_per_token(client):
     return len(sample) / n if n else 4.0
 
 
-def sans_port(argv):
-    """A command without its --port: `mdl run x --port N` moves the
-    server, it does not change what it serves."""
-    out, skip = [], False
-    for a in argv:
-        if skip:
-            skip = False
-        elif a == "--port":
-            skip = True
-        else:
-            out.append(a)
-    return out
-
-
 def wait_ready(proc, port, name, log):
     import mdl
     deadline = time.monotonic() + mdl.ready_timeout()
@@ -1072,7 +1058,8 @@ def main(args, out=None):
         # B15: a server started before the config changed is not the
         # config: the record must describe what is answering
         ran = state.get("argv")
-        if ran is not None and sans_port(ran) != sans_port(argv):
+        if ran is not None and (manifest.sans_port(ran)
+                                != manifest.sans_port(argv)):
             die("%s is running with other settings than %s has now; "
                 "'mdl stop %s' and run again, so the result describes "
                 "what ran" % (name, mdl.CONFIG, name))

@@ -235,13 +235,12 @@ def inventory(repo, key, shards, revision="main", cache=True):
               for s in shards]
     inv = gguf.merge("hf:%s/%s" % (repo, key), pieces)
     if cache:
-        tmp = path.with_name("%s.%d.tmp" % (path.name, os.getpid()))
+        import mdl
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            tmp.write_text(inv.to_json(), encoding="utf-8")
-            os.replace(tmp, path)             # never a half-written cache
+            mdl.write_atomic(path, inv.to_json())   # never a half-written cache
         except OSError:
-            tmp.unlink(missing_ok=True)
+            pass
     return inv
 
 

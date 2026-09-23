@@ -16,7 +16,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import support                                   # noqa: E402
 
-from mdl_fit import evalrun, evalsuite           # noqa: E402
+from mdl_fit import evalrun, evalsuite, manifest  # noqa: E402
 
 t = support.Tally("test_eval")
 check = t.check
@@ -44,6 +44,27 @@ check("another seed gives other items",
       != [i.text() for i in by["reason"]], True)
 check("the seed is made once and kept", evalsuite.secret(),
       evalsuite.secret())
+seed_file = evalsuite.hw.config_dir() / "eval-seed"
+kept_seed = seed_file.read_text(encoding="utf-8")
+seed_file.unlink()
+got = []
+racers = [threading.Thread(target=lambda: got.append(evalsuite.secret()))
+          for _ in range(8)]
+for r in racers:
+    r.start()
+for r in racers:
+    r.join()
+check("first runs at once all get the one seed the file keeps",
+      (len(set(got)), got[0] + "\n"),
+      (1, seed_file.read_text(encoding="utf-8")))
+seed_file.write_text("")                    # made, not yet written
+threading.Timer(0.2, seed_file.write_text, ("from-the-other\n",)).start()
+check("one another mdl is still writing is waited for, not replaced",
+      evalsuite.secret(), "from-the-other")
+seed_file.write_text("")                    # cut short, and left so
+check("one left empty for good is made again",
+      len(evalsuite.secret()), 32)
+seed_file.write_text(kept_seed, encoding="utf-8")
 check("results name the item set, not the seed",
       len(evalsuite.seed_id(seed)), 8)
 # B10: the fingerprint names the task, not just its id and prompt
@@ -72,7 +93,7 @@ check("and another document behind the same name and size",
       variant(prompt=lambda cpt: "doc A") != variant(prompt=lambda cpt: "doc B"),
       True)
 check("a server moved with --port is the same server (B15)",
-      evalrun.sans_port(["ls", "-m", "a", "--port", "9", "-c", "4"]),
+      manifest.sans_port(["ls", "-m", "a", "--port", "9", "-c", "4"]),
       ["ls", "-m", "a", "-c", "4"])
 check("limit takes the first N of each suite",
       len(evalsuite.build(["code", "reason"], seed, limit=3)), 6)

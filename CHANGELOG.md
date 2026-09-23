@@ -36,6 +36,11 @@ Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
   take it: the second removed the lock the first had just made. Taking
   over a dead holder's lock is now done by one waiter at a time, and only
   while the lock still names the dead pid.
+- Two `mdl eval`s started at once on a fresh install could each make
+  their own eval seed, so one ran items no later run would ask again.
+  The seed is now made by whichever gets there first, and the other
+  waits for it. The `hf:` header cache and `mdl find --new`'s mark are
+  written whole or not at all, like the rest of mdl's files.
 
 ## [0.7.1] - 2026-09-19
 

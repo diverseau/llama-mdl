@@ -36,16 +36,22 @@ def file_id(path):
     return mdl.file_id(path)
 
 
-def shards(path):
-    """Every file of a model, in order: one, or all N of a split GGUF."""
-    p = Path(path)
-    m = gguf.SPLIT_RE.search(p.name)
-    if not m:
-        return [p]
-    total = int(m.group(2))
-    stem = p.name[:m.start()]
-    return [p.with_name("%s-%05d-of-%05d.gguf" % (stem, i, total))
-            for i in range(1, total + 1)]
+# Every file of a model, in order: one, or all N of a split GGUF.
+shards = gguf.shard_paths
+
+
+def sans_port(argv):
+    """A command without its --port: `mdl run x --port N` moves the
+    server, it does not change what it serves."""
+    out, skip = [], False
+    for a in argv:
+        if skip:
+            skip = False
+        elif a == "--port":
+            skip = True
+        else:
+            out.append(a)
+    return out
 
 
 def _cache_path():
@@ -218,8 +224,7 @@ def identity(man):
     compare on one machine already, and a driver update is not a new
     model. A file replaced under the running server is in it too, so
     that server never matches one that loaded the file now there."""
-    from . import evalrun
-    key = {"argv": evalrun.sans_port(man["argv"][1:]),
+    key = {"argv": sans_port(man["argv"][1:]),
            "build": man.get("build"), "binary": man.get("binary"),
            "model": [(f.get("name"), f.get("size"), f.get("hash"))
                      for f in man.get("model", [])],

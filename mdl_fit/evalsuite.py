@@ -24,9 +24,11 @@ import datetime
 import hashlib
 import json
 import math
+import os
 import random
 import re
 import secrets
+import time
 import tomllib
 from pathlib import Path
 
@@ -84,15 +86,27 @@ class Item:
 def secret():
     """This install's eval seed, made on first use."""
     path = hw.config_dir() / "eval-seed"
-    try:
-        s = path.read_text(encoding="utf-8").strip()
-        if s:
-            return s
-    except OSError:
-        pass
-    s = secrets.token_hex(16)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(s + "\n", encoding="utf-8")
+    for _ in range(20):
+        try:
+            s = path.read_text(encoding="utf-8").strip()
+            if s:
+                return s
+        except FileNotFoundError:
+            pass
+        s = secrets.token_hex(16)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            # two first runs at once must not each make one: both would
+            # build items from their own, and the file keep only one
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            time.sleep(0.05)            # made, and maybe not written yet
+            continue
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(s + "\n")
+        return s
+    import mdl                          # still empty: one cut short
+    mdl.write_atomic(path, s + "\n")
     return s
 
 
