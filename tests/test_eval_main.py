@@ -108,6 +108,14 @@ check("a second eval of the same items on that server is refused, "
 check("while the first one finishes and saves", (code, len(rec["items"])),
       (0, 3))
 
+rec, out, err, code = main("--port", str(support.free_port()))
+check("--port for a model already running elsewhere is refused, not "
+      "ignored", ("already running on port %d" % port in err, code,
+                  len(err.splitlines())), (True, 1, 1))
+rec, out, err, code = main("--port", str(port), "--json")
+check("--port naming the port it is on is fine", (code, len(rec["items"])),
+      (0, 3))
+
 cfg = mdl.CONFIG.read_text(encoding="utf-8")
 mdl.CONFIG.write_text(cfg.replace("ctx = 4096", "ctx = 8192"),
                       encoding="utf-8")

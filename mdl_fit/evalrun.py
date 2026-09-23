@@ -1055,6 +1055,12 @@ def main(args, out=None):
     started, ran, served_as = False, argv, None
     if state:
         port = state["port"]
+        if asked_port is not None and asked_port != port:
+            # it used to go unsaid: the eval ran against the server that
+            # was up, on its own port, whatever --port asked for
+            die("%s is already running on port %d; --port only places a "
+                "server eval starts. Leave it out to use that one, or "
+                "'mdl stop %s' first" % (name, port, name))
         # B15: a server started before the config changed is not the
         # config: the record must describe what is answering
         ran = state.get("argv")

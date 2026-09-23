@@ -20,6 +20,9 @@ Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
   still loading, both found the port free - a server takes seconds to
   bind it - and the second died at load. A server still loading now
   holds its port, and launches onto one port take turns.
+- `mdl eval NAME --port N` with NAME already running on another port
+  ignored `--port` and said nothing. It is refused, saying which port the
+  server is on.
 
 ## [0.8.0] - 2026-09-23
 
