@@ -857,6 +857,13 @@ class EditScreen(ModalScreen):
             self.notify("flash_attn must be on, off, or empty for the "
                         "build's default", severity="error")
             return None
+        # the rules `mdl run` holds the config to: a save the form took
+        # but run refused left a models.toml nothing would start from
+        try:
+            mdl.check_cfg(self.model_name, cfg)
+        except mdl.MdlError as e:
+            self.notify(str(e), severity="error")
+            return None
         return cfg
 
     def on_button_pressed(self, _):

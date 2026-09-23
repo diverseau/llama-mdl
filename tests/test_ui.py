@@ -595,6 +595,22 @@ async def main():
               ('ngl must be a whole number, "all" or "auto"', "all"))
         await pilot.press("escape")
         await pilot.pause()
+        # what the form took but `mdl run` refused: checked before saving,
+        # and the modal stays open to fix it
+        for field, value, words in (
+                ("port", "70000", "'port' must be a number from 1 to 65535"),
+                ("parallel", "0", "'parallel' must be a count, 1 or more"),
+                ("ctx", "-5", "'ctx' must be a token count"),
+                ("kv_type", "q8 0", "'kv_type' must be a cache type"),
+                ("args", "--port 9", "'--port' in args would override")):
+            before = table_of("minus")
+            await edit("minus", **{field: value})
+            check("%s %s is refused before it is saved" % (field, value),
+                  (words in said[-1], table_of("minus"),
+                   isinstance(app.screen, mdl_ui.EditScreen)),
+                  (True, before, True))
+            await pilot.press("escape")
+            await pilot.pause()
         _, _, code = support.run(mdl.check_cfg, "unset", table_of("unset"))
         check("and what it saved still passes check_cfg", code, 0)
     teardown(root)

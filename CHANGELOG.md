@@ -11,6 +11,11 @@ Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
   other's, and the second save failed. Each save has a temp file of its
   own, and on Windows a rename that lands at the same instant as another
   is tried again rather than refused.
+- `mdl ui`'s edit modal saved values `mdl run` then refused - a port
+  over 65535, `parallel = 0`, a negative `ctx`, a cache type with a
+  space, `--port` in args - leaving a config nothing would start from.
+  They are checked as `mdl run` checks them, and the modal stays open to
+  fix them.
 
 ## [0.8.0] - 2026-09-23
 
