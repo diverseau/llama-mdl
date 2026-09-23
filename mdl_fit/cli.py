@@ -90,6 +90,10 @@ def parse(args):
         else:
             pos.append(a)
             i += 1
+    # checked here, not where it is used: that is after a fit that can
+    # take a minute, and int() there ended in a traceback, not a line
+    if "apply" in opts and not re.fullmatch(r"[1-9]\d*", opts["apply"]):
+        die("--apply takes the number of a pick or a fix, e.g. --apply 1")
     if opts.get("dry-run") and not (opts.get("apply") or opts.get("write")):
         die("--dry-run needs --apply N or --write NAME")
     if opts.get("dry-run") and (opts.get("verify") or (
@@ -876,8 +880,8 @@ def cmd_verify(target, o, out):
 # ----------------------------------------------------------------- hf --
 
 def cmd_hf(spec, o, out):
-    repo, selector = remote.parse_spec(spec)
     try:
+        repo, selector = remote.parse_spec(spec)
         files = remote.list_files(repo)
         groups = remote.select(remote.gguf_groups(files), selector)
     except remote.RemoteError as e:
@@ -956,17 +960,17 @@ def cmd_inspect(args, out):
         die("usage: mdl fit inspect <model.gguf | hf:org/repo:quant>")
     spec = args[0]
     if spec.startswith("hf:"):
-        repo, sel = remote.parse_spec(spec)
         try:
+            repo, sel = remote.parse_spec(spec)
             groups = remote.select(remote.gguf_groups(
                 remote.list_files(repo)), sel)
-        except remote.RemoteError as e:
+            if len(groups) != 1:
+                die("name one quant: %s" % ", ".join(sorted(
+                    Path(k).name for k in groups)))
+            key, shards = next(iter(groups.items()))
+            inv = remote.inventory(repo, key, shards)
+        except (remote.RemoteError, gguf.NotGGUF) as e:
             die(str(e))
-        if len(groups) != 1:
-            die("name one quant: %s" % ", ".join(sorted(
-                Path(k).name for k in groups)))
-        key, shards = next(iter(groups.items()))
-        inv = remote.inventory(repo, key, shards)
     else:
         path = Path(spec)
         if not path.is_file():

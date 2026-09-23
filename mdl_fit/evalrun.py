@@ -996,6 +996,9 @@ def main(args, out=None):
 
     from . import cli
     name = pos[0]
+    # before anything is started: int() at the spawn was a traceback
+    asked_port = mdl.check_port(o["port"], "--port: ") if "port" in o \
+        else None
     models, binary = mdl.load_config()
     if name not in models:
         die("no model named %r in %s" % (name, mdl.CONFIG))
@@ -1084,8 +1087,7 @@ def main(args, out=None):
     hold = contextlib.ExitStack()
     try:
         if not state:
-            proc, log, port = mdl.spawn(
-                name, models, binary, int(o["port"]) if "port" in o else None)
+            proc, log, port = mdl.spawn(name, models, binary, asked_port)
             # B14: ours from the moment it exists - a Ctrl-C while it
             # loads must stop it too, not only one during the run
             started = True

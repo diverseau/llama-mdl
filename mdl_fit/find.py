@@ -784,6 +784,10 @@ def parse(args):
             i += 1
         else:
             die("unknown argument %s\n%s" % (a, USAGE))
+    if "top" in o:
+        if not re.fullmatch(r"[1-9]\d*", o["top"]):
+            die("--top takes a number of models, 1 or more")
+        o["top"] = int(o["top"])
     return o
 
 

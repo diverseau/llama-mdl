@@ -2,6 +2,16 @@
 
 Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- A mistyped value ended in a traceback instead of one line: an `hf:`
+  spec that is not `org/repo` (`mdl fit`, `mdl fit inspect`), and a
+  number that is not one (`mdl fit --apply`, `mdl eval --port`,
+  `mdl find --top`). `mdl eval --port` is also checked for a port
+  number, and the error names the flag rather than the config.
+
 ## [0.7.1] - 2026-09-19
 
 Fixes from a peer review of 0.7.0's manifest, eval resume and profiles.

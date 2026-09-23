@@ -274,4 +274,33 @@ finally:
 check("a cp1252 pipe gets '?' for what it cannot encode, not a traceback",
       got.strip(), "Base ? post-train · ?")
 
+# Hard rule 4, through the real entry point: a value the user typed wrong
+# is one line on stderr and exit 1. Each of these was a traceback - an
+# hf: spec the parser refused, and int() on an option's value.
+import subprocess  # noqa: E402
+import tempfile  # noqa: E402
+
+home = Path(tempfile.mkdtemp(prefix="mdl-cli-errors-"))
+env = dict(os.environ, XDG_CONFIG_HOME=str(home / "c"),
+           XDG_STATE_HOME=str(home / "s"), XDG_CACHE_HOME=str(home / "k"),
+           MDL_FIT_HOME=str(home / "f"), PYTHONIOENCODING="utf-8")
+for args, words in (
+        (["fit", "hf:bad"], "expected hf:org/repo"),
+        (["fit", "inspect", "hf:bad"], "expected hf:org/repo"),
+        (["fit", "inspect", "hf:a/b/c"], "expected hf:org/repo"),
+        (["fit", "demo", "--apply", "abc"], "--apply takes the number"),
+        (["fit", "demo", "--apply", "0"], "--apply takes the number"),
+        (["eval", "demo", "--port", "abc"], "--port: port must be"),
+        (["eval", "demo", "--port", "99999"], "--port: port must be"),
+        (["find", "--top", "abc"], "--top takes a number"),
+        (["find", "--top", "0"], "--top takes a number")):
+    p = subprocess.run([sys.executable, str(support.ROOT / "mdl.py"), *args],
+                       capture_output=True, env=env, encoding="utf-8",
+                       errors="replace", timeout=60)
+    lines = p.stderr.strip().splitlines()
+    check("mdl %s: one line, exit 1" % " ".join(args),
+          (p.returncode, len(lines), bool(lines) and lines[0].startswith(
+              "mdl: ") and words in lines[0]), (1, 1, True))
+_sh.rmtree(home, ignore_errors=True)
+
 sys.exit(t.done())
