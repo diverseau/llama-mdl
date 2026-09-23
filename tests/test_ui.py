@@ -536,6 +536,69 @@ async def main():
               text.replace("[demo]", "[renamed]"))
     teardown(root)
 
+    # opening the modal and saving changes nothing: flash_attn has three
+    # states (a save used to drop false, which is -fa off, for the build's
+    # default), and ngl takes "all" and "auto" as the config does
+    fake = str(support.FAKE).replace(BACKSLASH, "/")
+    root, port = sandbox(extra=(
+        '\n[off]\nmodel = "%s"\nngl = "all"\nflash_attn = false\nport = 9991\n'
+        '\n[unset]\nmodel = "%s"\nngl = "auto"\nport = 9992\n'
+        '\n[minus]\nmodel = "%s"\nngl = -1\nport = 9993\n' % ((fake,) * 3)))
+    app = MdlApp(fx="off")
+    said = []
+    real_notify = app.notify
+    app.notify = lambda msg, **kw: (said.append(str(msg)),
+                                    real_notify(msg, **kw))
+
+    def table_of(name):
+        return tomllib.loads(mdl.CONFIG.read_text(encoding="utf-8"))[name]
+
+    async def edit(name, **fields):
+        table = app.query_one("#models", DataTable)
+        row = next(r for r in range(table.row_count)
+                   if table.ordered_rows[r].key.value == name)
+        table.move_cursor(row=row)
+        await pilot.pause()
+        await pilot.press("e")
+        await pilot.pause()
+        for field, value in fields.items():
+            app.screen.query_one("#f-" + field, Input).value = value
+        app.screen._apply()
+        await pilot.pause()
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        for name in ("demo", "off", "unset", "minus"):
+            before = table_of(name)
+            await edit(name)
+            check("open and save leaves [%s] as it was" % name,
+                  table_of(name), before)
+        await edit("unset", flash_attn="off")
+        check("off writes flash_attn = false", table_of("unset").get(
+            "flash_attn"), False)
+        await edit("unset", flash_attn="on")
+        check("on writes flash_attn = true", table_of("unset").get(
+            "flash_attn"), True)
+        await edit("unset", flash_attn="")
+        check("empty removes it", "flash_attn" in table_of("unset"), False)
+        await edit("unset", flash_attn="maybe")
+        check("anything else is refused, not saved",
+              (said[-1].startswith("flash_attn must be"),
+               "flash_attn" in table_of("unset")), (True, False))
+        await pilot.press("escape")
+        await pilot.pause()
+        await edit("minus", ngl="ALL")
+        check("ngl all is taken", table_of("minus")["ngl"], "all")
+        await edit("minus", ngl="most")
+        check("a word it does not know is refused",
+              (said[-1], table_of("minus")["ngl"]),
+              ('ngl must be a whole number, "all" or "auto"', "all"))
+        await pilot.press("escape")
+        await pilot.pause()
+        _, _, code = support.run(mdl.check_cfg, "unset", table_of("unset"))
+        check("and what it saved still passes check_cfg", code, 0)
+    teardown(root)
+
     # --- the system clipboard tool itself ---------------------------------
     import os
     import tempfile

@@ -128,7 +128,7 @@ share one.
 | `ngl` | `-ngl` | |
 | `n_cpu_moe` | `--n-cpu-moe` | |
 | `ctx` | `-c` | |
-| `flash_attn` | `-fa on` | Only emitted when `true`. |
+| `flash_attn` | `-fa on` / `-fa off` | Left out, the build's default applies. |
 | `kv_type` | `--cache-type-k` and `--cache-type-v` | Both get the same value. |
 | `parallel` | `-np` | |
 | `port` | `--port` | Defaults to 8080. |

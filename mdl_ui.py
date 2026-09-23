@@ -758,6 +758,11 @@ class HelpScreen(ModalScreen):
         yield Static(body, id="help-box")
 
 
+FLASH_SHOWN = {True: "on", False: "off"}
+FLASH_TYPED = {"on": True, "true": True, "yes": True, "1": True,
+               "off": False, "false": False, "no": False, "0": False}
+
+
 class EditScreen(ModalScreen):
     """Edit one model's params and save them to the config."""
 
@@ -794,10 +799,15 @@ class EditScreen(ModalScreen):
                 yield Input(value=str(self.cfg.get("mmproj", "")),
                             id="f-mmproj", placeholder="path to mmproj-*.gguf",
                             classes="edit-input")
+            # Three states, as in the config: false is -fa off, and unset
+            # is whatever the build defaults to. Shown as "off" when unset,
+            # a save used to turn one into the other either way.
             with Horizontal(classes="edit-row"):
                 yield Label(f"{'flash_attn':<11}", classes="edit-label")
-                yield Input(value="on" if self.cfg.get("flash_attn") else "off",
-                            id="f-flash_attn", classes="edit-input")
+                yield Input(value=FLASH_SHOWN.get(self.cfg.get("flash_attn"),
+                                                  ""),
+                            id="f-flash_attn", placeholder="unset",
+                            classes="edit-input")
             # Everything llama-server takes that mdl has no key for. Better
             # one row here than a form that chases llama.cpp's flag list.
             with Horizontal(classes="edit-row"):
@@ -819,11 +829,15 @@ class EditScreen(ModalScreen):
                 continue
             if f in self.TEXT:
                 cfg[f] = raw.replace(BACKSLASH, "/") if f == "mmproj" else raw
+            elif f == "ngl" and raw.lower() in ("all", "auto"):
+                cfg[f] = raw.lower()     # what llama.cpp and the config take
             else:
                 try:
                     cfg[f] = int(raw)
                 except ValueError:
-                    self.notify(f"{f} must be a whole number", severity="error")
+                    self.notify(f"{f} must be a whole number"
+                                + (', "all" or "auto"' if f == "ngl" else ""),
+                                severity="error")
                     return None
         raw = self.query_one("#f-args", Input).value.strip()
         if not raw:
@@ -840,10 +854,14 @@ class EditScreen(ModalScreen):
                 self.notify("args: %s" % e, severity="error")
                 return None
         fa = self.query_one("#f-flash_attn", Input).value.strip().lower()
-        if fa in ("on", "true", "yes", "1"):
-            cfg["flash_attn"] = True
-        else:
+        if not fa:
             cfg.pop("flash_attn", None)
+        elif fa in FLASH_TYPED:
+            cfg["flash_attn"] = FLASH_TYPED[fa]
+        else:
+            self.notify("flash_attn must be on, off, or empty for the "
+                        "build's default", severity="error")
+            return None
         return cfg
 
     def on_button_pressed(self, _):

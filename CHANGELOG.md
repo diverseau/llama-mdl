@@ -14,6 +14,14 @@ Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
 - Saving from `mdl ui`'s edit modal took the dashboard down with a
   traceback when the model's table had been renamed or removed on disk
   while it was open. The save is refused with a message.
+- Saving from `mdl ui`'s edit modal changed the config beyond the field
+  that was edited. `flash_attn = false` was dropped, so the server
+  started at the build's default instead of `-fa off`; the field now has
+  three states (on, off, and empty for unset) and shows empty when the
+  key is not there. A model with `ngl = "all"` or `"auto"` could not be
+  saved at all; both are taken, as the config takes them.
+- The README said `flash_attn = false` was never passed on. It is,
+  as `-fa off`.
 
 ## [0.7.1] - 2026-09-19
 
