@@ -3740,20 +3740,47 @@ def load_custom(folder):
     case = false                 # contains/exact: match case too
     test = '''assert "x" in reply'''   # for python: `reply` is the answer
     """
-    items = []
+    items, seen = [], {}
     for f in sorted(Path(folder).glob("*.toml")) if Path(folder).is_dir() \
             else []:
         try:
             data = tomllib.loads(f.read_text(encoding="utf-8"))
         except (OSError, tomllib.TOMLDecodeError) as e:
             raise ValueError("%s: %s" % (f, e)) from e
-        for i, t in enumerate(data.get("task", [])):
-            if "prompt" not in t:
-                raise ValueError("%s: task %d has no prompt" % (f, i + 1))
-            item = Item("custom", "custom-%s-%s" % (f.stem, t.get("id", i)),
-                        t["prompt"], _custom_grade(t, f), t.get("system"))
-            item.domain = t.get("domain", "general")
-            item.max_tokens = int(t.get("max_tokens", CAP["custom"]))
+        tasks = data.get("task", [])
+        if not isinstance(tasks, list):
+            raise ValueError("%s: tasks are [[task]] tables" % f)
+        for i, t in enumerate(tasks):
+            # every mistake is found here, before a run spends an hour on
+            # the tasks ahead of it: a bad regex used to be a traceback
+            # at its item, and an unknown domain a hole in the report
+            if not isinstance(t, dict):
+                raise ValueError("%s: task %d is not a table" % (f, i + 1))
+            where = "%s: task %s" % (f, t.get("id", i + 1))
+            if not isinstance(t.get("prompt"), str) or not t["prompt"].strip():
+                raise ValueError("%s has no prompt" % where)
+            if t.get("system") is not None and not isinstance(t["system"],
+                                                              str):
+                raise ValueError("%s: system must be text" % where)
+            domain = t.get("domain", "general")
+            if domain not in set(DOMAIN.values()):
+                raise ValueError("%s: domain %r is not one of %s" % (
+                    where, domain, ", ".join(sorted(set(DOMAIN.values())))))
+            cap = t.get("max_tokens", CAP["custom"])
+            if isinstance(cap, bool) or not isinstance(cap, int) or cap < 1:
+                raise ValueError("%s: max_tokens must be a number, 1 or "
+                                 "more" % where)
+            iid = "custom-%s-%s" % (f.stem, t.get("id", i))
+            if iid in seen:
+                # results, checkpoints and the fingerprint go by the id:
+                # two tasks sharing one would pass for each other
+                raise ValueError("%s: id %r is used twice in this file" % (
+                    where, t.get("id", i)))
+            seen[iid] = True
+            item = Item("custom", iid, t["prompt"], _custom_grade(t, where),
+                        t.get("system"))
+            item.domain = domain
+            item.max_tokens = cap
             items.append(item)
     return items
 
@@ -3765,6 +3792,14 @@ def _custom_grade(t, f):
         raise ValueError("%s: unknown check %r" % (f, check))
     if check == "python" and not t.get("test"):
         raise ValueError("%s: a python check needs a test" % f)
+    if check != "python" and str(want) == "":
+        # an empty "contains" passes every reply
+        raise ValueError("%s: a %s check needs an expect" % (f, check))
+    if check == "regex":
+        try:
+            re.compile(str(want), re.S)
+        except re.error as e:
+            raise ValueError("%s: expect is not a regex: %s" % (f, e)) from e
 
     def fold(s):
         return s if case else s.casefold()

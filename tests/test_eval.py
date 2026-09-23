@@ -907,6 +907,37 @@ except ValueError as e:
     raised = str(e)
 check("a task with no prompt is refused, with the file named",
       raised is not None and "bad.toml" in raised, True)
+for label, text, words in (
+        ("a regex that does not compile",
+         'check = "regex"\nexpect = "(unclosed"', "expect is not a regex"),
+        ("a domain the report has no row for",
+         'expect = "x"\ndomain = "poetry"', "domain 'poetry' is not one of"),
+        ("a contains with nothing to find", 'check = "contains"',
+         "a contains check needs an expect"),
+        ("a max_tokens that is not a count", 'expect = "x"\nmax_tokens = 0',
+         "max_tokens must be a number"),
+        ("a system prompt that is not text", 'expect = "x"\nsystem = 3',
+         "system must be text")):
+    (cdir / "bad.toml").write_text(
+        '[[task]]\nid = "t1"\nprompt = "Q?"\n%s\n' % text, encoding="utf-8")
+    try:
+        evalsuite.build(["custom"], seed, custom_dir=cdir)
+        raised = ""
+    except ValueError as e:
+        raised = str(e)
+    check("%s is refused at load, naming the file and task" % label,
+          (words in raised, "bad.toml: task t1" in raised), (True, True))
+(cdir / "bad.toml").write_text(
+    '[[task]]\nid = "t"\nprompt = "Q?"\nexpect = "a"\n'
+    '[[task]]\nid = "t"\nprompt = "R?"\nexpect = "b"\n', encoding="utf-8")
+try:
+    evalsuite.build(["custom"], seed, custom_dir=cdir)
+    raised = ""
+except ValueError as e:
+    raised = str(e)
+check("two tasks sharing an id are refused: results go by the id",
+      "id 't' is used twice" in raised, True)
+(cdir / "bad.toml").unlink()
 
 # ============================================================= client ===
 

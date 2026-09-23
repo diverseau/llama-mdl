@@ -376,7 +376,10 @@ documents at 32k, 64k and 128k, those beyond the configured context
 skipped), instruct (20 checkable format rules) and reason (20
 exact-answer problems). Add your own as `[[task]]` entries in
 `~/.config/mdl/evals/*.toml`, checked by `contains`, `regex`, `exact`
-or a Python snippet.
+or a Python snippet. A task that cannot run - no prompt, a regex that
+does not compile, a domain the report has no row for, an id used twice -
+is refused when the suite is built, naming the file and the task, not
+found an hour into the run.
 
 Three of every five items are the harder tier, and the report scores
 the tiers separately. A suite everything passes ranks nothing, so the

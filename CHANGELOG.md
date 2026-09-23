@@ -31,6 +31,12 @@ Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
   booked with it.
 - Every `mdl fit`, `find` and `eval` rewrote `hw.json` with the build it
   had just read from it. It is written only when something is new.
+- A custom eval task with a regex that does not compile ended the run in
+  a traceback when its item came up, and one with an unknown domain was
+  scored into no row of the report. Tasks are checked when the suite is
+  built - prompt, domain, regex, an `expect` for text checks,
+  `max_tokens`, and ids unique within a file - with the file and task
+  named.
 
 ## [0.8.0] - 2026-09-23
 
