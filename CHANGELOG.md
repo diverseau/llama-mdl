@@ -2,7 +2,11 @@
 
 Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
 
-## [Unreleased]
+## [0.9.0] - 2026-09-23
+
+`mdl lab`, which measures variants of a config against each other, and
+fixes to state that grew without bound, to a port two launches could
+both take, and to checks that let through what `mdl run` then refused.
 
 ### Added
 
