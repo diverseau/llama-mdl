@@ -339,6 +339,10 @@ CHECKS = {
     "n_cpu_moe": (lambda v: _is_count(v), "a count, 0 or more"),
     "ctx": (lambda v: _is_count(v), "a token count, 0 or more"),
     "parallel": (lambda v: _is_count(v, 1), "a count, 1 or more"),
+    # a number, not a string: a string reached the socket code from
+    # spawn() however it had been checked
+    "port": (lambda v: _is_count(v, 1) and v <= 65535,
+             "a number from 1 to 65535"),
     "flash_attn": (lambda v: isinstance(v, bool), "true or false"),
     "kv_type": (lambda v: isinstance(v, str) and re.fullmatch(
         r"[A-Za-z0-9_]+", v) is not None, "a cache type such as q8_0"),
@@ -365,12 +369,6 @@ def check_cfg(name, cfg):
     for key, (ok, what) in CHECKS.items():
         if key in cfg and not ok(cfg[key]):
             die(f"model '{name}': '{key}' must be {what}")
-    if "port" in cfg:
-        # the config's own port must already be a number: a string would
-        # reach the socket code from spawn() however it was checked here
-        port = cfg["port"]
-        if not _is_count(port, 1) or port > 65535:
-            die(f"model '{name}': 'port' must be a number from 1 to 65535")
     for a in cfg.get("args", []):
         flag = a.split("=", 1)[0]
         if flag in OWNED:
@@ -987,11 +985,7 @@ def cmd_run(args):
     models, binary = load_config()
     if name not in models:
         die(f"no model named '{name}' in {CONFIG}")
-    running = read_state(name)
-    if running:
-        die(f"'{name}' is already running (pid {running['pid']}, "
-            f"port {running['port']}); run 'mdl stop {name}' first")
-
+    # spawn() says if it is already running, under the launch lock
     proc, log, port = spawn(name, models, binary, port)
     print(f"starting {name} (pid {proc.pid}), log {log}", flush=True)
     tail_until_ready(proc, log, name, port)
