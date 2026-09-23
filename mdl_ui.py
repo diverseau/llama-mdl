@@ -1694,7 +1694,10 @@ class MdlApp(App):
                 return
             try:
                 write_params(name, cfg)
-            except (OSError, ValueError) as e:
+            # MdlError is how the writer refuses: the table renamed or
+            # removed on disk while the dashboard had it open. Uncaught,
+            # it took the whole dashboard down with a traceback.
+            except (OSError, ValueError, mdl.MdlError) as e:
                 self.notify("could not save: %s" % e, severity="error")
                 return
             self._load_config()

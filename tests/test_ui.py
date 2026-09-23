@@ -510,6 +510,32 @@ async def main():
             mdl_ui.system_clipboard = real
     teardown(root)
 
+    # --- saving from the edit modal ---------------------------------------
+    root, port = sandbox()
+    app = MdlApp(fx="off")
+    said = []
+    real_notify = app.notify
+    app.notify = lambda msg, **kw: (said.append(str(msg)),
+                                    real_notify(msg, **kw))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        # the table renamed on disk while the dashboard has it open: the
+        # writer refuses, and that is a message, not a crash
+        await pilot.press("e")
+        await pilot.pause()
+        text = mdl.CONFIG.read_text(encoding="utf-8")
+        mdl.CONFIG.write_text(text.replace("[demo]", "[renamed]"),
+                              encoding="utf-8")
+        app.screen._apply()
+        await pilot.pause()
+        check("a refused save is reported", bool(said) and said[-1].startswith(
+            "could not save: no [demo] table"), True)
+        check("and the dashboard is still up", app.is_running, True)
+        check("and the config is left as it was on disk",
+              mdl.CONFIG.read_text(encoding="utf-8"),
+              text.replace("[demo]", "[renamed]"))
+    teardown(root)
+
     # --- the system clipboard tool itself ---------------------------------
     import os
     import tempfile

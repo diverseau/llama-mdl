@@ -11,6 +11,9 @@ Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
   number that is not one (`mdl fit --apply`, `mdl eval --port`,
   `mdl find --top`). `mdl eval --port` is also checked for a port
   number, and the error names the flag rather than the config.
+- Saving from `mdl ui`'s edit modal took the dashboard down with a
+  traceback when the model's table had been renamed or removed on disk
+  while it was open. The save is refused with a message.
 
 ## [0.7.1] - 2026-09-19
 
