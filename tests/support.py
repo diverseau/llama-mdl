@@ -7,6 +7,7 @@ on purpose, and doing that to a real one would be unforgivable.
 import os
 import shutil
 import socket
+import struct
 import sys
 import tempfile
 from pathlib import Path
@@ -16,6 +17,7 @@ FAKE = Path(__file__).resolve().parent / "fake_llama_server.py"
 sys.path.insert(0, str(ROOT))
 
 import mdl  # noqa: E402
+from mdl_fit import gguf  # noqa: E402
 
 
 class Tally:
@@ -101,3 +103,97 @@ def run(fn, *args):
         err.write("mdl: " + str(e) + "\n")
         code = 1
     return out.getvalue(), err.getvalue(), code
+
+
+# ------------------------------------------------------- a GGUF writer --
+
+def _val(v):
+    """(type id, packed bytes) for a metadata value."""
+    if isinstance(v, bool):
+        return 7, struct.pack("<?", v)
+    if isinstance(v, int):
+        return 4, struct.pack("<I", v)
+    if isinstance(v, float):
+        return 6, struct.pack("<f", v)
+    if isinstance(v, str):
+        b = v.encode()
+        return 8, struct.pack("<Q", len(b)) + b
+    if isinstance(v, list):
+        etype = _val(v[0])[0] if v else 4
+        body = b"".join(_val(x)[1] for x in v)
+        return 9, struct.pack("<IQ", etype, len(v)) + body
+    raise TypeError(v)
+
+
+def write_gguf(path, meta, tensors, align=32):
+    """tensors: [(name, dims, ggml_type)]; data is zeros, laid out the way
+    llama.cpp's writer does it (each tensor padded to the alignment)."""
+    head = [b"GGUF", struct.pack("<IQQ", 3, len(tensors), len(meta))]
+    for k, v in meta.items():
+        kb = k.encode()
+        vt, vb = _val(v)
+        head.append(struct.pack("<Q", len(kb)) + kb + struct.pack("<I", vt)
+                    + vb)
+    offset, sizes = 0, []
+    for name, dims, ty in tensors:
+        n = 1
+        for d in dims:
+            n *= d
+        size = gguf.type_bytes(ty, n)
+        nb = name.encode()
+        head.append(struct.pack("<Q", len(nb)) + nb
+                    + struct.pack("<I", len(dims))
+                    + b"".join(struct.pack("<Q", d) for d in dims)
+                    + struct.pack("<IQ", ty, offset))
+        sizes.append(size)
+        offset += -(-size // align) * align
+    raw = b"".join(head)
+    raw += bytes(-(-len(raw) // align) * align - len(raw))
+    with open(path, "wb") as fh:
+        fh.write(raw)
+        fh.write(bytes(offset))
+    return path
+
+
+F32, F16, Q8_0, Q4_K = 0, 1, 8, 12
+
+
+def llama(path, n_layer=4, embd=256, heads=4, kv_heads=2, head=64, ff=512,
+          vocab=1000, tied=False, arch="llama", extra_meta=None,
+          layer_extra=None, ctx=8192, experts=0, used=0):
+    """A small model of any of the shapes the engine knows about."""
+    meta = {"general.architecture": arch, "general.name": "t",
+            "%s.block_count" % arch: n_layer,
+            "%s.context_length" % arch: ctx,
+            "%s.embedding_length" % arch: embd,
+            "%s.attention.head_count" % arch: heads,
+            "%s.attention.head_count_kv" % arch: kv_heads,
+            "tokenizer.ggml.tokens": ["t%d" % i for i in range(vocab)]}
+    if experts:
+        meta["%s.expert_count" % arch] = experts
+        meta["%s.expert_used_count" % arch] = used
+    meta.update(extra_meta or {})
+    ts = [("token_embd.weight", [embd, vocab], Q8_0),
+          ("output_norm.weight", [embd], F32)]
+    if not tied:
+        ts.append(("output.weight", [embd, vocab], Q8_0))
+    for il in range(n_layer):
+        b = "blk.%d." % il
+        ts += [(b + "attn_norm.weight", [embd], F32),
+               (b + "attn_q.weight", [embd, heads * head], Q8_0),
+               (b + "attn_k.weight", [embd, kv_heads * head], Q8_0),
+               (b + "attn_v.weight", [embd, kv_heads * head], Q8_0),
+               (b + "attn_output.weight", [heads * head, embd], Q8_0),
+               (b + "ffn_norm.weight", [embd], F32)]
+        if experts:
+            ts += [(b + "ffn_gate_inp.weight", [embd, experts], F32),
+                   (b + "ffn_gate_exps.weight", [embd, ff, experts], Q4_K),
+                   (b + "ffn_up_exps.weight", [embd, ff, experts], Q4_K),
+                   (b + "ffn_down_exps.weight", [ff, embd, experts], Q4_K),
+                   (b + "ffn_up_shexp.weight", [embd, ff], Q8_0)]
+        else:
+            ts += [(b + "ffn_gate.weight", [embd, ff], Q8_0),
+                   (b + "ffn_up.weight", [embd, ff], Q8_0),
+                   (b + "ffn_down.weight", [ff, embd], Q8_0)]
+        ts += (layer_extra or (lambda il: []))(il)
+    return write_gguf(path, meta, ts)
