@@ -472,15 +472,20 @@ def probe(binary="llama-server", quick=False, now=False):
                            "Sysmem Fallback' for llama-server.exe, or an "
                            "overflow runs at 3 t/s instead of failing")
     m = Machine(**kw)
+    # only what hw.json does not have yet: a build read from it, or found
+    # again unchanged, used to rewrite the file on every fit, find and eval
+    new_build = bool(build) and (
+        saved.get("builds", {}).get(bkey) != build
+        or saved.get("backends", {}).get(bkey) != m.backend)
 
     def book(now):
         # only what this probe learned, onto the file as it is now
-        if build:
+        if new_build:
             now.setdefault("builds", {})[bkey] = build
             now.setdefault("backends", {})[bkey] = m.backend
         if booked:          # one sample per boot, however many probes race
             usage.record_boot(now.setdefault("idle", {}), snap, base)
-    if build or booked:
+    if new_build or booked:
         try:
             update(book, busy_ok=True)
         except OSError:

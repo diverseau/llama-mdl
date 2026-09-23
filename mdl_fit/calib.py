@@ -33,15 +33,77 @@ def signature(inv):
     return "%s|%d" % (Path(str(inv.source)).name, inv.file_size)
 
 
+# Past this the file is compacted: every mdl run books a load log and
+# every eval a profile, and nothing ever took one out.
+MAX_BYTES = 2 << 20
+LOGS_KEPT = 20           # load logs per model file; failures are kept too
+
+
 def append(entry):
+    """Book one observation. Never raises: a fit, a run or an eval must
+    not fail because its bookkeeping could not be written."""
+    import mdl
     entry = dict(entry, at=time.strftime("%Y-%m-%dT%H:%M:%S"))
     path = calib_path()
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "a", encoding="utf-8") as fh:
-            fh.write(json.dumps(entry) + "\n")
-    except OSError:
+        # the lock keeps an append from landing while compact() has read
+        # the file and not yet replaced it, where it would be lost
+        with mdl.file_lock(path.with_name(path.name + ".lock"),
+                           "calib.jsonl is busy", tries=20):
+            with open(path, "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(entry) + "\n")
+            if path.stat().st_size > MAX_BYTES:
+                compact(path)
+    except (OSError, mdl.MdlError):
         pass
+
+
+def _keep_key(e):
+    """Entries with one key say the same thing; only the latest is read.
+    None: kept whatever else is there."""
+    kind = e.get("kind")
+    if kind == "profile":
+        return ("profile", e.get("key"))
+    if kind in ("oracle", "bench"):
+        return (kind, e.get("sig"), e.get("build"),
+                json.dumps(e.get("flags"), sort_keys=True))
+    return None
+
+
+def compact(path=None):
+    """Drop what nothing reads: an oracle or bench entry, or a profile,
+    superseded by a later one for the same configuration, and load logs
+    beyond the last LOGS_KEPT per model file (failures kept). Order is
+    kept, so the latest still wins. Called under append()'s lock."""
+    import mdl
+    path = path or calib_path()
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return 0
+    entries = []
+    for line in lines:
+        try:
+            e = json.loads(line)
+        except ValueError:
+            continue                    # a line a crash cut off
+        if isinstance(e, dict):
+            entries.append((line, e))
+    last, logs = {}, {}
+    for i, (_, e) in enumerate(entries):
+        key = _keep_key(e)
+        if key is not None:
+            last[key] = i
+        elif e.get("kind") == "log" and not e.get("failed"):
+            logs.setdefault(e.get("model"), []).append(i)
+    drop = {i for i, (_, e) in enumerate(entries)
+            if _keep_key(e) is not None and last[_keep_key(e)] != i}
+    for idx in logs.values():
+        drop.update(idx[:-LOGS_KEPT])
+    kept = [line for i, (line, _) in enumerate(entries) if i not in drop]
+    mdl.write_atomic(path, "".join(line + "\n" for line in kept))
+    return len(lines) - len(kept)
 
 
 def load(kind=None):
@@ -323,6 +385,12 @@ def passive(name, argv, log_path, build=None):
         if not (found["breakdown"] or found["failed"] or found["buffers"]):
             return None
         flags, _, model_path, _ = model.parse_argv(argv)
+        if build is None:
+            # the load log names its own build; nothing passed one, so
+            # these entries could never be told apart by build
+            from . import manifest
+            m = manifest.BUILD.search(text)
+            build = int(m.group(1)) if m else None
         entry = {"kind": "log", "name": name, "model": model_path,
                  "flags": flags.as_dict(), "build": build}
         entry.update(found)

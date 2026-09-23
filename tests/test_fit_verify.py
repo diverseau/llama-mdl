@@ -224,9 +224,70 @@ try:
     m = hw.probe(str(binary), quick=True)
     check("with no GPU at all it is a CPU machine, planned at idle",
           (m.backend, m.vram_total, m.plan), ("CPU", 0, "idle"))
+    writes, real_update = [], hw.update
+    hw.update = lambda change, busy_ok=False: (
+        writes.append(1), real_update(change, busy_ok))[1]
+    try:
+        hw.probe(str(binary), quick=True)
+        before = len(writes)
+        hw.probe(str(binary), quick=True)
+    finally:
+        hw.update = real_update
+    check("a probe that learns nothing new leaves hw.json alone",
+          len(writes) - before, 0)
 finally:
     hw.nvidia, hw.llama_devices = REAL["nvidia"], REAL["devices"]
     hw.usage.snapshot, hw.llama_build = REAL["snapshot"], REAL["build"]
     hw.sibling = REAL["sibling"]
+
+# ---------------------------------------------------------- calib.jsonl --
+calib.calib_path().unlink(missing_ok=True)
+flags = {"ctx": 4096, "ub": 512}
+for n in range(3):
+    calib.append({"kind": "profile", "key": "k1", "tg": {"0": n}})
+calib.append({"kind": "profile", "key": "k2", "tg": {"0": 9}})
+for n in range(2):
+    calib.append({"kind": "oracle", "sig": "s", "build": 1, "flags": flags,
+                  "actual": [n, 0, 0]})
+calib.append({"kind": "oracle", "sig": "s", "build": 2, "flags": flags,
+              "actual": [7, 0, 0]})
+for n in range(calib.LOGS_KEPT + 5):
+    calib.append({"kind": "log", "model": "a.gguf", "n": n})
+calib.append({"kind": "log", "model": "a.gguf", "failed": ["CUDA0", 1]})
+calib.append({"kind": "log", "model": "b.gguf", "n": 0})
+calib.append({"kind": "something-newer", "n": 1})
+before = calib.load()
+dropped = calib.compact()
+after = calib.load()
+check("compaction drops only what nothing reads",
+      (dropped, len(before) - len(after)), (2 + 1 + 5, 8))
+check("the latest profile per configuration is kept, in order",
+      [(e["key"], e["tg"]["0"]) for e in calib.load("profile")],
+      [("k1", 2), ("k2", 9)])
+check("an oracle per file, build and flags: the latest",
+      [e["actual"][0] for e in calib.load("oracle")], [1, 7])
+check("the last load logs per model, and every failure",
+      ([e["n"] for e in calib.load("log") if e["model"] == "a.gguf"
+        and "n" in e][:1], len(calib.seen_failures("a.gguf")),
+       sum(e["model"] == "b.gguf" for e in calib.load("log"))),
+      ([5], 1, 1))
+check("a kind it does not know is left alone",
+      [e["n"] for e in calib.load("something-newer")], [1])
+calib.MAX_BYTES, real_max = 1, calib.MAX_BYTES
+calib.append({"kind": "profile", "key": "k1", "tg": {"0": 3}})
+calib.MAX_BYTES = real_max
+check("an append past the size limit compacts",
+      [e["tg"]["0"] for e in calib.load("profile") if e["key"] == "k1"], [3])
+check("and leaves no temp file or lock behind",
+      sorted(p.name for p in calib.calib_path().parent.iterdir()
+             if p.name.startswith("calib.jsonl")), ["calib.jsonl"])
+
+log = TMP / "load.log"
+log.write_text("build: 6789 (abc1234) with cc for x86_64\n"
+               "load_tensors:   CUDA0 model buffer size =  1000.00 MiB\n",
+               encoding="utf-8")
+got = calib.passive("demo", ["srv", "-m", "a.gguf", "-c", "4096"], log)
+check("a load log's own build is booked with what it shows",
+      (got["build"], got["buffers"]["CUDA0"]["model"]), (6789, 1000 * MiB))
 
 sys.exit(t.done())

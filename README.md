@@ -302,6 +302,9 @@ flags would allocate on each device without allocating it, and `mdl fit`
 puts its picks in front of it before showing them. A `✓` next to a VRAM
 figure means the oracle agreed. What it gets wrong is stored against the
 file in `~/.config/mdl/calib.jsonl`, so the next fit starts from it.
+Past 2 MiB that file drops what nothing reads any more - an observation
+a later one of the same configuration replaced, and load logs beyond
+the last 20 per model - and keeps every failure.
 Speed is bytes over bandwidth per side, and the bandwidths are seeds
 until `mdl fit hw` has measured them; the confidence line says which.
 

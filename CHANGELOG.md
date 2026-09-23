@@ -23,6 +23,14 @@ Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
 - `mdl eval NAME --port N` with NAME already running on another port
   ignored `--port` and said nothing. It is refused, saying which port the
   server is on.
+- `calib.jsonl` grew by a line every `mdl run` and every eval, forever.
+  Past 2 MiB it is compacted to what is read: the latest observation per
+  configuration, the last 20 load logs per model, and every failure.
+- A load log booked by `mdl run` had no llama.cpp build, so it could not
+  be told from one made by another build. The build the log prints is
+  booked with it.
+- Every `mdl fit`, `find` and `eval` rewrote `hw.json` with the build it
+  had just read from it. It is written only when something is new.
 
 ## [0.8.0] - 2026-09-23
 
