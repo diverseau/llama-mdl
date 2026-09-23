@@ -383,12 +383,31 @@ def load_saved():
         return {}
 
 
-def save(data):
+def update(change, busy_ok=False):
+    """Apply change(saved) to hw.json and write it back: read, changed
+    and written under one lock, so each writer adds only what it knows.
+
+    Every fit, find and eval probes the machine and books its build, and
+    a probe used to write back the whole file as it had read it at the
+    start - over whatever a calibration measured in the meantime.
+    True if written. With busy_ok, a file another mdl holds is left for
+    it (False) rather than an error: a probe must not fail a fit on it.
+    """
+    import mdl
     path = hw_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp%d" % os.getpid())
-    tmp.write_text(json.dumps(data, indent=1), encoding="utf-8")
-    os.replace(tmp, path)
+    try:
+        with mdl.file_lock(path.with_name(path.name + ".lock"),
+                           "another mdl is writing %s; try again" % path,
+                           tries=10 if busy_ok else 50):
+            saved = load_saved()
+            change(saved)
+            mdl.write_atomic(path, json.dumps(saved, indent=1))
+    except mdl.MdlError:
+        if not busy_ok:
+            raise
+        return False
+    return True
 
 
 def probe(binary="llama-server", quick=False, now=False):
@@ -439,8 +458,6 @@ def probe(binary="llama-server", quick=False, now=False):
         if total:
             kw["ram_avail"] = max(avail or 0, total - base.ram)
     booked = usage.record_boot(idle, snap, base)
-    if booked:
-        saved["idle"] = idle
     kw["margin"] = int(saved.get("margin", DEFAULT_MARGIN))
     kw["margin_arch"] = {str(k): int(v) for k, v in (
         saved.get("margin_arch") or {}).items()
@@ -455,12 +472,17 @@ def probe(binary="llama-server", quick=False, now=False):
                            "Sysmem Fallback' for llama-server.exe, or an "
                            "overflow runs at 3 t/s instead of failing")
     m = Machine(**kw)
-    if build:
-        saved.setdefault("builds", {})[bkey] = build
-        saved.setdefault("backends", {})[bkey] = m.backend
+
+    def book(now):
+        # only what this probe learned, onto the file as it is now
+        if build:
+            now.setdefault("builds", {})[bkey] = build
+            now.setdefault("backends", {})[bkey] = m.backend
+        if booked:          # one sample per boot, however many probes race
+            usage.record_boot(now.setdefault("idle", {}), snap, base)
     if build or booked:
         try:
-            save(saved)
+            update(book, busy_ok=True)
         except OSError:
             pass
     return m
@@ -469,14 +491,14 @@ def probe(binary="llama-server", quick=False, now=False):
 def set_idle(**values):
     """Book what the machine holds at idle, in bytes ('vram', 'ram');
     with no values, forget it and go back to measuring."""
-    saved = load_saved()
-    if not values:
-        saved.pop("idle", None)
-    else:
+    def change(saved):
+        if not values:
+            saved.pop("idle", None)
+            return
         fixed = saved.setdefault("idle", {}).setdefault("set", {})
         fixed.update({k: int(v) for k, v in values.items() if v is not None})
         fixed["at"] = time.strftime("%Y-%m-%d %H:%M")
-    save(saved)
+    update(change)
 
 
 def _binary_key(binary):
@@ -498,6 +520,11 @@ def _guess_backend(binary):
 
 
 def record_bench(values):
-    saved = load_saved()
-    saved["bench"] = dict(values, at=time.strftime("%Y-%m-%d %H:%M"))
-    save(saved)
+    bench = dict(values, at=time.strftime("%Y-%m-%d %H:%M"))
+    update(lambda saved: saved.update(bench=bench))
+
+
+def raise_margin(arch, margin):
+    """Book a bigger VRAM margin for one arch; see Machine.for_arch."""
+    update(lambda saved: saved.setdefault("margin_arch", {}).update(
+        {arch: int(margin)}))

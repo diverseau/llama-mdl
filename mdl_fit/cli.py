@@ -834,15 +834,13 @@ def cmd_verify(target, o, out):
                 " ".join(calib.bench_argv(bench_bin, target.model_path,
                                           flags, n_prompt=0, n_gen=64))))
     if not got and not tg:
-        mach_saved = hw.load_saved()
-        margins = mach_saved.setdefault("margin_arch", {})
         # up from the margin this fit used: from the default, a machine
         # whose own margin is already higher booked one that changed nothing
-        margins[target.inv.arch] = ctx_obj.machine.margin + 256 * MiB
-        hw.save(mach_saved)
+        margin = ctx_obj.machine.margin + 256 * MiB
+        hw.raise_margin(target.inv.arch, margin)
         die("llama-bench ran out of memory. The margin for "
             "%s is now %d MiB; run mdl fit again" % (
-                target.inv.arch, margins[target.inv.arch] // MiB))
+                target.inv.arch, margin // MiB))
     p = perf.params(mach)
     pl = perf.Placement(ctx_obj.shape, flags)
     pred_tg = {d: 1 / perf.decode_time(pl, p, d) for d in depths}

@@ -13,6 +13,7 @@ import struct
 import sys
 import tempfile
 import threading
+import time
 import tomllib
 from pathlib import Path
 
@@ -28,6 +29,7 @@ check = t.check
 MiB, GiB = model.MiB, model.GiB
 TMP = Path(tempfile.mkdtemp(prefix="mdl-fit-test-"))
 os.environ["MDL_FIT_HOME"] = str(TMP / "home")   # never the real ~/.config
+REAL_PROBE = hw.probe          # the CLI tests below swap in a fixed machine
 
 
 # ------------------------------------------------------- a GGUF writer --
@@ -1015,5 +1017,57 @@ check("and fit says why the card looks smaller",
       (code, "1 MiB held back on the card for %s" % inv.arch in out),
       (0, True))
 teardown(root)
+
+# ------------------------------------------------ hw.json keeps each write --
+hw.hw_path().unlink(missing_ok=True)
+hw.record_bench({"bw_gpu": 1e9})
+hw.raise_margin("llama", 512 * MiB)
+hw.set_idle(vram=GiB)
+got = hw.load_saved()
+check("writers add to hw.json, not replace it",
+      (got["bench"]["bw_gpu"], got["margin_arch"], got["idle"]["set"]["vram"]),
+      (1e9, {"llama": 512 * MiB}, GiB))
+
+# A calibration that finishes while a fit is probing: the probe read the
+# file before it, and used to write that copy back over the bandwidths.
+fake_bin = TMP / "llama-server-for-probe"
+fake_bin.write_text("")
+saved_fns = (hw.nvidia, hw.llama_build, hw.usage.snapshot)
+
+
+def calibrated_meanwhile(*a, **k):
+    hw.record_bench({"bw_gpu": 7e11})
+    return hw.usage.Snapshot("linux", up=10 ** 6)
+
+
+hw.nvidia = lambda: []
+hw.llama_build = lambda binary: {"build": 4242}
+hw.usage.snapshot = calibrated_meanwhile
+try:
+    probed = REAL_PROBE(str(fake_bin), quick=True)
+    got = hw.load_saved()
+    check("a probe does not undo a calibration that finished meanwhile",
+          got["bench"]["bw_gpu"], 7e11)
+    check("and still books the build it found",
+          [b["build"] for b in got["builds"].values()], [4242])
+    check("the probe reads the margin --verify booked",
+          probed.margin_arch, {"llama": 512 * MiB})
+    hw.usage.snapshot = lambda *a, **k: hw.usage.Snapshot("linux", up=10 ** 6)
+    hw.hw_path().unlink()                  # so the probe has a build to book
+    lock = hw.hw_path().with_name("hw.json.lock")
+    lock.write_text(str(os.getpid()))             # held by a live process
+    try:
+        start = time.monotonic()
+        busy = REAL_PROBE(str(fake_bin), quick=True)
+        check("a probe that finds hw.json busy still answers, promptly",
+              (busy.build["build"], time.monotonic() - start < 5),
+              (4242, True))
+        _, err, code = run(hw.record_bench, {"bw_gpu": 1.0})
+        check("while a calibration waits, then says so in one line",
+              (code, len(err.splitlines())), (1, 1))
+    finally:
+        lock.unlink()
+finally:
+    hw.nvidia, hw.llama_build, hw.usage.snapshot = saved_fns
 
 sys.exit(t.done())

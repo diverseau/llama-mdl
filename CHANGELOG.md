@@ -27,6 +27,11 @@ Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
   Nothing read it back: the next fit made the same prediction. Fits now
   hold that margin back for that architecture and say so, and the margin
   grows from the one the fit used rather than from the default.
+- Every `mdl fit`, `find` and `eval` rewrote `hw.json` from the copy it
+  read when it started, so one running during `mdl fit hw` could undo
+  the calibration. Each write now takes a lock, re-reads the file and
+  adds only what it learned. A probe that finds the file busy leaves it,
+  and still answers.
 
 ## [0.7.1] - 2026-09-19
 
