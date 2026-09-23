@@ -4,6 +4,20 @@ Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `mdl lab`: the same prompt through variants of a model's config - a
+  `--set` sweep, several llama.cpp builds, or a suite file - each from a
+  config of its own, measured for time to first token, decode speed and
+  its floor, prefill, and the VRAM, RAM and CPU it cost, sampled against
+  the token count. `report`, `compare` (which says when two variants are
+  indistinguishable rather than ranking noise), `ls`, `export`, `apply`,
+  and `baseline set|diff [--fail]` to catch a regression after a new
+  build or config. Your `models.toml`, state and running servers are
+  never touched. See docs/mdl-lab.md.
+- `b` in `mdl ui` measures the selected config with `mdl lab` and records
+  it.
+
 ### Fixed
 
 - Two threads saving the same file at once - the dashboard's workers,

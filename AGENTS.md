@@ -15,16 +15,18 @@ from a config file, and works out what to run and how. Two halves:
   `config`, `logs`, `ui`. All of this is `mdl.py` alone.
 - **Deciding what to run** — `fit` (what a GGUF will do on this machine and
   with which flags), `eval` (score it on a private graded suite), `catalog`
-  and `find` (what is worth running at all). All of this is `mdl_fit/`.
+  and `find` (what is worth running at all), `lab` (measure variants of a
+  config against each other). All of this is `mdl_fit/`.
 
 ## Layout
 
 ```
 mdl.py            the whole CLI for running servers. Standard library only.
 mdl_ui.py         optional Textual dashboard (`mdl ui`). The only dependency.
-mdl_fit/          everything behind fit / eval / catalog / find
+mdl_fit/          everything behind fit / eval / catalog / find / lab
 tests/            run.py drives the suites; support.py + fake_llama_server.py
 docs/fit-plan.md  the design notes for mdl fit
+docs/mdl-lab.md   the design of mdl lab, and where the build departs from it
 ```
 
 Every `mdl_fit` module opens with a docstring saying what it is for. Read
@@ -42,7 +44,8 @@ places tensors, `perf` predicts speed, `search` enumerates configs,
 `calib` holds measured corrections, `explain`/`emit`/`cli` are presentation,
 `remote` reads headers of models you have not downloaded, `catalog` holds
 and queries the hub snapshot and `catalog_crawl` builds it,
-`quality`/`find` rank models, `evalsuite`/`evalrun` are the eval.
+`quality`/`find` rank models, `evalsuite`/`evalrun` are the eval, `lab`
+runs and records measured variants.
 
 ## Commands you will need
 
@@ -75,8 +78,10 @@ These are load-bearing. Breaking one passes review and fails in CI, or
 worse, silently.
 
 1. **`mdl.py` imports the standard library and nothing else, at module
-   level.** It reaches `mdl_fit` lazily, inside the four handlers that need
-   it, so the everyday commands load nothing extra. `pyproject` declares
+   level.** It reaches `mdl_fit` lazily, inside the handlers that need it
+   (`fit`, `eval`, `catalog`, `find`, `manifest`, `lab`, and the passive
+   calibration after a launch), so the everyday commands load nothing
+   extra. `pyproject` declares
    `dependencies = []`; only the `ui` extra has one.
 2. **`mdl_ui.py` is the only file allowed a dependency** (Textual, pinned
    `>=3,<9` — a tested floor, not a guess). The CLI must never import it

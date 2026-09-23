@@ -14,7 +14,8 @@ mdl passes:
     othermodel /props names a model file other than the -m it was given
 
 /props says what it loaded and its context, as llama-server does, and
-/tokenize counts four characters to a token.
+/tokenize counts four characters to a token. A chat request with
+ignore_eos streams max_tokens chunks, as mdl lab asks for.
 """
 import http.server
 import json
@@ -75,9 +76,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if self.path != "/v1/chat/completions":
             self.send_error(404)
             return
+        req = json.loads(raw or b"{}")
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.end_headers()
+        if req.get("ignore_eos"):              # run to max_tokens, as lab asks
+            n = int(req.get("max_tokens") or 16)
+            self._stream([{"content": "w "} for _ in range(n)], 0.004,
+                         {"prompt_n": len(json.dumps(req["messages"])) // 4,
+                          "prompt_per_second": 900.0})
+            return
         pause = 0.02
         if MODE == "slowchat":
             pause = 0.1
@@ -94,11 +102,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
                       + [{"content": c} for c in words])
         self._stream(deltas, pause)
 
-    def _stream(self, deltas, pause):
+    def _stream(self, deltas, pause, timings=None):
         for i, delta in enumerate(deltas):
             chunk = {"choices": [{"delta": delta}]}
             if i == len(deltas) - 1:
-                chunk["timings"] = {"predicted_per_second": 42.5}
+                chunk["timings"] = dict(timings or {},
+                                        predicted_per_second=42.5)
             try:
                 self.wfile.write(b"data: " + json.dumps(chunk).encode()
                                  + b"\n\n")

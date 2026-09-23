@@ -654,6 +654,39 @@ async def main():
                 else:
                     os.environ[k] = v
 
+    # --- b: a measured run through mdl lab ---------------------------------
+    from mdl_fit import lab
+    lab.BASELINE_S = 0.2
+    real_gpu = lab.gpu_now
+    lab.gpu_now = lambda: (None, None, None, None)     # no card's noise here
+    root, port = sandbox()
+    app = MdlApp(fx="off")
+    said = []
+    real_notify = app.notify
+    app.notify = lambda msg, **kw: (said.append(str(msg)),
+                                    real_notify(msg, **kw))
+    try:
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await pilot.press("b")
+            for _ in range(900):
+                await pilot.pause(0.1)
+                if any("mdl lab report" in m or "not measured" in m
+                       for m in said):
+                    break
+            done = [m for m in said if "mdl lab report" in m]
+            check("b measures the selected config and says what it did",
+                  (bool(done), bool(done) and "t/s, first token" in done[0]),
+                  (True, True))
+            check("from a config of its own: nothing is left running, and "
+                  "the dashboard is still up",
+                  (mdl.read_states(), app.is_running), ({}, True))
+            check("and it is recorded with the other lab runs",
+                  len([r for r in lab.load() if not r.get("warmup")]), 1)
+    finally:
+        lab.gpu_now = real_gpu
+        teardown(root)
+
     # --- the placement pane, per build --------------------------------------
     # It modelled every model on the first backend booked for any build,
     # CUDA if none was: a Vulkan or Metal machine was drawn as CUDA, and a

@@ -192,6 +192,7 @@ mdl fit ...      What a GGUF will do on this machine, and the flags for it.
 mdl eval <name>  Score a model on a private, auto-graded suite.
 mdl catalog ...  The hub's models, fine-tunes and GGUF quants, offline.
 mdl find         The best model this machine can run, and how to run it.
+mdl lab ...      The same prompt through variants of a config, measured.
 mdl manifest <name>
                  What <name> is running as: its command line, llama.cpp
                  build, model files (size and hash per shard) and machine,
@@ -568,6 +569,58 @@ in the catalog, and `mdl catalog search` finds models by name. Explicit
 unbudgeted lineage traversal for targeted exploration; it does not use the
 mixed-seed checkpoint engine.
 
+## Measuring configs: `mdl lab`
+
+`mdl fit` predicts and `mdl eval` scores; `mdl lab` measures. It runs the
+same prompt through each variant of a model's config, one at a time, and
+keeps what each did: time to first token, decode speed and how steady it
+was, prefill, and the VRAM, RAM and CPU it cost - sampled against the
+token count, so "usage 500 tokens in" is a column, not a guess.
+
+```
+mdl lab run qwen27b --set ngl=56,51,45 --set ctx=32k,64k --dry-run
+mdl lab run qwen27b --set ngl=56,51,45 --set ctx=32k,64k --depth 0,16k
+mdl lab report                   the last run: one row per variant
+mdl lab compare qwen27b/ngl56/ctx32768 qwen27b/ngl51/ctx65536
+mdl lab apply qwen27b/ngl51/ctx65536    its models.toml table, printed
+mdl lab baseline set             pin the last run
+mdl lab baseline diff --fail     a later run against it; exit 1 if it regressed
+```
+
+A `--set` with a list sweeps it, and every combination is a variant;
+`--server a,b` runs each on more than one llama.cpp build. A suite file in
+`~/.config/mdl/lab/<name>.toml` holds the same as `[suite]` options and
+`[[variant]]` tables (`base`, `label`, `set`, `server`), for
+`mdl lab run --suite <name>`. `--dry-run` prints the matrix and a time
+estimate from `mdl fit`'s predictions before an hour goes into it.
+
+What makes the numbers comparable:
+
+- Each variant runs from a config written for it alone, in a temp dir.
+  `models.toml`, your state and your logs are never touched, and a server
+  of yours on the port is never stopped - the run refuses instead.
+- Sampling is the workload's (`--seed`, `--temp`), sent with every
+  request, so a preset that pins `--temp` in its args is measured on the
+  same terms. Replies run to `--max-tokens` and the prompt cache is off,
+  so every repetition prefills.
+- One warmup repetition is not counted (`--warmup`); the rest (`--reps`,
+  3) are a median with its spread, and `compare` calls two variants
+  indistinguishable when their spreads overlap rather than ranking noise.
+- Decode's floor and peak are over a one-second window, the first 2% of
+  tokens left out: a single slow gap is a hiccup, not a speed.
+- A variant that would leave under 2.5 G of RAM free is skipped, not
+  paged to disk; VRAM that does not come back to its baseline after a
+  stop ends the run, since the rest would not compare. A run across
+  builds says it is one.
+
+VRAM, GPU load, clocks and temperature come from `nvidia-smi` - a whole
+card's figure, not one process's, which Windows does not keep. Without
+`nvidia-smi` the VRAM column is what the server's load log claims,
+marked `(log)`. "t/s per G" is decode speed over the VRAM the model
+itself took - what earns a place on a small card. `b` in the dashboard measures the selected config the
+same way, with one repetition. The design, and what is left of it, is in
+[docs/mdl-lab.md](docs/mdl-lab.md).
+
 ## The UI
 
 `mdl ui` (or just `mdl`) opens a dashboard over the same config and the same
@@ -589,6 +642,7 @@ sparkline, busy slots, and a colour-coded log tail.
  e            edit ngl / ctx / kv_type / port, saved to models.toml
  c            copy the llama-server command
  p            prompt the running model without leaving the UI
+ b            measure the selected config with mdl lab, and record it
  l            focus the log, / filters it
  g            reload the config
  ?            help
@@ -637,6 +691,7 @@ one-off.
 ~/.local/state/mdl/<name>.log    server stdout+stderr, rotated on each run
 ~/.local/state/mdl/<name>.log.1  the previous run, and .2 before that
 ~/.local/state/mdl/ui-marks.json which models the UI has seen start or fail
+~/.local/state/mdl/lab/          mdl lab's records, and the samples behind them
 ```
 
 `$XDG_CONFIG_HOME` and `$XDG_STATE_HOME` are honoured if set. On Windows the

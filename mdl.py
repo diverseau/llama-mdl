@@ -54,7 +54,7 @@ USAGE = ("usage: mdl {init|config [--path|--undo|--history]|"
          "doctor [--json] [name]|run <name> [--port N]|"
          "stop [<name>|--all]|ps [--json]|logs [-f] [name]|ui [--no-fx]|"
          "fit <gguf|hf:repo|name> [--help]|eval <name> [--help]|"
-         "find [--help]|manifest <name>|"
+         "find [--help]|manifest <name>|lab {run|report|compare} [--help]|"
          "catalog {pull|build|tree|search|stats}} [--version]")
 
 # The model path mdl init leaves behind. check knows to treat it as a
@@ -1032,6 +1032,11 @@ def cmd_manifest(args):
     manifest.main(args)
 
 
+def cmd_lab(args):
+    from mdl_fit import lab
+    lab.main(args)
+
+
 def file_id(path):
     """{path, size, mtime} for a file, or {path, missing}."""
     try:
@@ -1626,7 +1631,7 @@ COMMANDS = {"init": cmd_init, "config": cmd_config,
             "run": cmd_run, "stop": cmd_stop, "ps": cmd_ps, "list": cmd_list,
             "logs": cmd_logs, "fit": cmd_fit, "eval": cmd_eval,
             "catalog": cmd_catalog, "find": cmd_find,
-            "manifest": cmd_manifest}
+            "manifest": cmd_manifest, "lab": cmd_lab}
 
 
 def _dispatch():

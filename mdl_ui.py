@@ -739,6 +739,7 @@ class HelpScreen(ModalScreen):
         ("c", "copy the llama-server command"),
         ("y", "copy the whole log"),
         ("p", "prompt the running model"),
+        ("b", "measure the selected config (mdl lab), and record it"),
         ("l", "focus the log pane"),
         ("/", "filter the log"),
         ("g", "reload models.toml and refresh telemetry"),
@@ -1246,6 +1247,7 @@ class MdlApp(App):
         Binding("c", "copy", "copy cmd"),
         Binding("y", "copy_log", "copy log"),
         Binding("p", "prompt", "prompt"),
+        Binding("b", "bench", "measure"),
         Binding("l", "focus_log", "logs"),
         Binding("slash", "filter", "filter"),
         Binding("g", "refresh", "refresh"),
@@ -1650,6 +1652,54 @@ class MdlApp(App):
 
     def action_help(self):
         self.push_screen(HelpScreen())
+
+    def action_bench(self):
+        """A measured run of the selected config through mdl lab: one
+        warmup and one repetition of its default workload, from a config
+        of its own, recorded with the rest for mdl lab report. A server of
+        yours on its port is left alone, and lab says so."""
+        name = self._selected()
+        if not name:
+            return
+        if getattr(self, "_benching", None):
+            self.notify("already measuring " + self._benching,
+                        severity="warning")
+            return
+        self._benching = name
+        self.status_line = "measuring %s with mdl lab..." % name
+        self._do_bench(name)
+
+    @work(thread=True, group="lab")
+    def _do_bench(self, name):
+        import io
+
+        from mdl_fit import lab
+        try:
+            run_id = lab.main(["run", name, "--reps", "1", "--warmup", "1",
+                               "--cooldown", "0"], io.StringIO())
+            rows = lab.report({"names": [run_id], "format": "json"},
+                              io.StringIO())
+            if rows:
+                r = rows[0]
+                msg = ("%s: %s t/s, first token %ss, VRAM %s. "
+                       "mdl lab report %s" % (
+                           name, lab.cell("decode", r).split(" ")[0],
+                           lab.cell("ttft", r), lab.cell("vram_peak", r),
+                           run_id))
+                self.call_from_thread(self.notify, msg, timeout=20)
+            else:
+                skipped = [x.get("skipped") for x in lab.load()
+                           if x.get("run") == run_id and x.get("skipped")]
+                self.call_from_thread(
+                    self.notify, "%s was not measured: %s" % (
+                        name, skipped[0] if skipped else "nothing ran"),
+                    severity="warning", timeout=15)
+        except (mdl.MdlError, OSError) as e:
+            self.call_from_thread(self.notify, str(e), severity="error",
+                                  timeout=15)
+        finally:
+            self._benching = None
+            self.call_from_thread(setattr, self, "status_line", "")
 
     def action_refresh(self):
         self._load_config()
