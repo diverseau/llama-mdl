@@ -16,6 +16,7 @@ game or a browser full of tabs open during the scan is taken back off
 (see usage.py). --now plans for the machine as it is this minute.
 """
 
+import copy
 import ctypes
 import json
 import os
@@ -271,6 +272,9 @@ class Machine:
         self.vram_total = kw.get("vram_total", 0)
         self.vram_free = kw.get("vram_free", 0)
         self.margin = kw.get("margin", DEFAULT_MARGIN)
+        # {arch: bytes}, raised by `mdl fit --verify` when a config it
+        # predicted to fit ran out of memory; see for_arch()
+        self.margin_arch = dict(kw.get("margin_arch") or {})
         self.ram_total = kw.get("ram_total", 0)
         self.ram_avail = kw.get("ram_avail", 0)
         self.os_headroom = kw.get("os_headroom", OS_HEADROOM)
@@ -295,6 +299,18 @@ class Machine:
     @property
     def vram_usable(self):
         return max(0, self.vram_free - self.margin)
+
+    def for_arch(self, arch):
+        """This machine as a fit of `arch` sees it: with the margin that
+        `mdl fit --verify` raised for that arch after llama-bench ran out
+        of memory. It used to book the margin and say so, and nothing
+        read it back - the next fit made the same prediction."""
+        margin = self.margin_arch.get(arch)
+        if not isinstance(margin, int) or margin <= self.margin:
+            return self
+        out = copy.copy(self)
+        out.margin = margin
+        return out
 
     @property
     def ram_usable(self):
@@ -426,6 +442,9 @@ def probe(binary="llama-server", quick=False, now=False):
     if booked:
         saved["idle"] = idle
     kw["margin"] = int(saved.get("margin", DEFAULT_MARGIN))
+    kw["margin_arch"] = {str(k): int(v) for k, v in (
+        saved.get("margin_arch") or {}).items()
+        if isinstance(v, (int, float)) and not isinstance(v, bool)}
     bench = saved.get("bench", {})
     if bench.get("build") and build and bench.get("build") != build.get("build"):
         kw["notes"].append("calibrated on build %s, running %s; speeds may "

@@ -417,9 +417,10 @@ def kv_hint(ctx_obj, o, target, result, mach):
 
 
 def fit_one(target, o, out):
-    mach = machine_for(target, o)
-    opts = with_threads(options(o, target), mach)
-    ctx_obj = search.Context(target.inv, mach)
+    probed = machine_for(target, o)
+    opts = with_threads(options(o, target), probed)
+    ctx_obj = search.Context(target.inv, probed)
+    mach = ctx_obj.machine          # what the search used: the arch's margin
     fit_bin = None if o.get("no-oracle") else calib.env_fit_bin(target.binary)
     current = None
     if target.flags:
@@ -436,6 +437,10 @@ def fit_one(target, o, out):
     w("machine   %s\n" % mach.summary())
     for note in machine_notes(mach) + target.notes + target.inv.warnings:
         w("note      %s\n" % note)
+    if mach is not probed:
+        w("note      %d MiB held back on the card for %s: llama-bench ran "
+          "out of memory on a config predicted to fit (mdl fit --verify)\n"
+          % (mach.margin // MiB, target.inv.arch))
     w("profile   %s  (%s)\n\n" % (opts.profile, opts.blurb))
     if current is not None:
         w("now       %s · ctx %s · kv %s · %s · ub %d · VRAM %s G%s · %s\n" % (
@@ -831,8 +836,9 @@ def cmd_verify(target, o, out):
     if not got and not tg:
         mach_saved = hw.load_saved()
         margins = mach_saved.setdefault("margin_arch", {})
-        margins[target.inv.arch] = margins.get(target.inv.arch,
-                                               hw.DEFAULT_MARGIN) + 256 * MiB
+        # up from the margin this fit used: from the default, a machine
+        # whose own margin is already higher booked one that changed nothing
+        margins[target.inv.arch] = ctx_obj.machine.margin + 256 * MiB
         hw.save(mach_saved)
         die("llama-bench ran out of memory. The margin for "
             "%s is now %d MiB; run mdl fit again" % (
@@ -941,8 +947,8 @@ def cmd_hf(spec, o, out):
         mark = " ★" if key == best_key else (" ✗ floors" if res.relaxed
                                              else "")
         w("  %-40s %-7s %-5.2f %-18s %-12s %-14s %.0f s%s\n" % (
-            name, size, inv.bpw, cfg, "%s / %s" % (g(f.gpu),
-                                                   g(mach.vram_usable)),
+            name, size, inv.bpw, cfg, "%s / %s" % (
+                g(f.gpu), g(res.ctx.machine.vram_usable)),
             "%.0f / %.0f t/s" % (f.speed.decode0, f.speed.decode_d),
             f.speed.s_turn, mark))
     if best_key:

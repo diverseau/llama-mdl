@@ -337,7 +337,9 @@ taken back off. The idle figure is, best first:
 When a pick needs more VRAM than is free this minute, it names the apps
 to close; `--now` plans for the machine as it is instead. The card keeps
 a 256 MiB margin; a config inside the free VRAM but eating the margin is
-"fits, tight". RAM has a hard limit, the total less 3 G for the system:
+"fits, tight". When `--verify` runs out of memory on a config predicted
+to fit, that architecture's margin grows by 256 MiB and later fits of it
+say so. RAM has a hard limit, the total less 3 G for the system:
 past what is free at idle the OS pages idle programs out, which is a
 note, not a failure, but a model whose CPU-side weights do not fit under
 the limit would page from disk on every token. A busy CPU is noted, and

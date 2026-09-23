@@ -22,6 +22,11 @@ Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
   saved at all; both are taken, as the config takes them.
 - The README said `flash_attn = false` was never passed on. It is,
   as `-fa off`.
+- `mdl fit --verify`, on running out of memory, booked a bigger margin
+  for the model's architecture and said the next fit would use it.
+  Nothing read it back: the next fit made the same prediction. Fits now
+  hold that margin back for that architecture and say so, and the margin
+  grows from the one the fit used rather than from the default.
 
 ## [0.7.1] - 2026-09-19
 

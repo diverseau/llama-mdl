@@ -983,6 +983,37 @@ for dry_run in (True, False):
           (code, len(err.splitlines())), (1, 1))
     check("refused plan leaves no files changed", config_snapshot(), before)
 check("parse errors match for preview and write", errors[0], errors[1])
+
+# ------------------------------------------ --verify's margin, read back --
+# --verify books a bigger margin for an arch whose load ran out of memory
+# and says the next fit uses it; nothing used to read it back.
+roomy = machine(vram=8 * GiB)
+roomy.margin_arch = {inv.arch: 3 * GiB, "some-other-arch": 5 * GiB}
+held = search.Context(inv, roomy)
+big = model.Memory()
+big.gpu_weights = 6 * GiB
+check("an arch's booked margin is the one its fit uses",
+      (held.machine.vram_usable, held.fits(big)), (5 * GiB, False))
+check("the machine itself, and a fit without a booked margin, are unchanged",
+      (roomy.vram_usable,
+       search.Context(inv, machine(vram=8 * GiB)).fits(big)), (8 * GiB, True))
+small = machine(vram=8 * GiB)
+small.margin, small.margin_arch = GiB, {inv.arch: GiB // 2}
+check("a booked margin below the machine's own changes nothing",
+      search.Context(inv, small).machine is small, True)
+
+
+def held_back(*a, **k):
+    m = machine(vram=int(0.02 * GiB), ram=GiB)
+    m.margin_arch = {inv.arch: MiB}
+    return m
+
+
+hw.probe = held_back
+out, err, code = run(mdl.cmd_fit, base)
+check("and fit says why the card looks smaller",
+      (code, "1 MiB held back on the card for %s" % inv.arch in out),
+      (0, True))
 teardown(root)
 
 sys.exit(t.done())

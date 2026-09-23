@@ -86,7 +86,8 @@ class Context:
     def __init__(self, inv, machine, residuals=None, build=None):
         self.inv = inv
         self.shape = model.Shape(inv)
-        self.machine = machine
+        # with the margin --verify booked for this arch, if it has one
+        self.machine = machine.for_arch(inv.arch)
         self.build = build or (machine.build or {}).get("build")
         self.res = residuals if residuals is not None else calib.Residuals(
             build=self.build)
