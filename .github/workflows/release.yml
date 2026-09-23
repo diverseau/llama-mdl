@@ -41,6 +41,10 @@ jobs:
   publish:
     name: publish to PyPI
     needs: build
+    # a manual run builds and checks; only a tag publishes. Dispatched
+    # from a branch, the tag check above is skipped and nothing ties
+    # what is uploaded to a version anyone chose to release
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
