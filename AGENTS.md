@@ -3,7 +3,7 @@
 Working notes for coding agents in the `mdl` repo. This is the canonical
 file; `CLAUDE.md` points here and adds only Claude Code specifics.
 
-Written against **0.7.1**. Where a fact is likely to drift, this says how to
+Written against **0.8.0**. Where a fact is likely to drift, this says how to
 re-derive it instead of quoting it.
 
 ## What this is
@@ -111,13 +111,54 @@ Pushing a `v*` tag publishes to PyPI. There is no token: PyPI trusts the
 workflow via OIDC.
 
 ```sh
-# bump VERSION in mdl.py and add a CHANGELOG.md entry, commit, push main, then
-git tag -a v0.7.1 -m "0.7.1" && git push origin v0.7.1
+# bump VERSION in mdl.py and add a CHANGELOG.md entry, commit, push main,
+# wait for CI to pass, then
+git tag -a v0.8.0 -m "0.8.0" && git push origin v0.8.0
 ```
 
-- Versions are SemVer, counted from the last release: a new feature bumps
-  the minor (0.7.0 -> 0.8.0), a release that only fixes bumps the patch
-  (0.7.0 -> 0.7.1), and a breaking change bumps the major.
+### Versions
+
+[Semantic Versioning 2.0.0](https://semver.org/): `MAJOR.MINOR.PATCH`,
+counted from the last release, never from the last development build.
+Bump `VERSION` once per release, in the release commit - not per change
+(0.6.7 to 0.6.20 were numbered a patch at a time by mistake and never
+shipped).
+
+- **PATCH** (0.8.0 -> 0.8.1): backward-compatible bug fixes, and nothing
+  else. Every change makes mdl do what it already claimed to do.
+- **MINOR** (0.8.1 -> 0.9.0, PATCH resets to 0): new backward-compatible
+  functionality - a command, a flag, a config key, a field in `--json`
+  output - or existing behaviour a user can see doing something new or
+  different, or something marked deprecated.
+- **MAJOR** (0.9.0 -> 1.0.0, MINOR and PATCH reset to 0): an incompatible
+  change to the public API.
+
+Classify by what a user can now do or see, not by why it was done. A
+"fix" that lets the dashboard set a value it could not, or makes
+`mdl fit` hold back memory it did not and print a line saying so, is
+new behaviour: MINOR. The release takes the highest bump any of its
+changes needs - one feature among twenty fixes is MINOR.
+
+The public API is what users and their scripts rely on: the commands and
+their flags, `models.toml`'s keys and meaning, `--json` output, the exit
+codes, the files mdl reads that people write (`models.toml`, the custom
+eval tasks), and `mdl` on PATH as the command. Internal functions, test
+helpers, messages meant for people, the layout of state and cache files,
+and CI are not.
+
+**While at 0.y.z** (initial development, SemVer item 4) the public API
+may change at any time: a breaking change to it bumps MINOR, not MAJOR,
+and its changelog entry starts with **Breaking:** (0.3.0 did this for
+`mdl ps --json`). 1.0.0 is not a version bump; it declares the public API
+stable, and only the maintainer makes that call. From 1.0.0 on, a breaking
+change bumps MAJOR.
+
+The changelog's sections name the bump: **Added**, **Changed**,
+**Deprecated** or **Removed** mean at least MINOR; a release with only
+**Fixed** and **Security** is a PATCH.
+
+### Publishing
+
 - The tag must equal `mdl.VERSION` or the build job fails on purpose. The
   version lives only in `mdl.py`; `pyproject` reads it from there.
 - **This is irreversible.** PyPI will not accept a re-upload of a version, so

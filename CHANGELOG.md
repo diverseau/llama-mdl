@@ -2,7 +2,28 @@
 
 Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
 
-## [Unreleased]
+## [0.8.0] - 2026-09-23
+
+From an audit of the whole project: what the dashboard's edit modal can
+set, what `mdl fit` holds back after `--verify`, races between mdl
+processes sharing a file, and the tests that were missing around them.
+
+### Changed
+
+- `mdl ui`'s edit modal sets `flash_attn` to on, off, or empty for the
+  build's default, and shows empty when the key is not there. It used to
+  offer only on and off, and dropped `flash_attn = false` on save, so
+  the server started at the build's default instead of `-fa off`. It
+  also takes `ngl = "all"` and `"auto"`, as the config does; a model
+  with either could not be saved from it at all.
+- `mdl fit` holds back, for a model's architecture, the bigger margin
+  `mdl fit --verify` booked when that architecture ran out of memory,
+  and says so ("N MiB held back on the card for ARCH"). `--verify` said
+  the next fit would use it, but nothing read it back: the next fit made
+  the same prediction. A second out-of-memory run grows the margin from
+  the one the fit used, not from the default again.
+- A manual run of the release workflow builds and checks the package
+  but no longer publishes it; only a `v*` tag does.
 
 ### Removed
 
@@ -20,19 +41,8 @@ Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
 - Saving from `mdl ui`'s edit modal took the dashboard down with a
   traceback when the model's table had been renamed or removed on disk
   while it was open. The save is refused with a message.
-- Saving from `mdl ui`'s edit modal changed the config beyond the field
-  that was edited. `flash_attn = false` was dropped, so the server
-  started at the build's default instead of `-fa off`; the field now has
-  three states (on, off, and empty for unset) and shows empty when the
-  key is not there. A model with `ngl = "all"` or `"auto"` could not be
-  saved at all; both are taken, as the config takes them.
 - The README said `flash_attn = false` was never passed on. It is,
   as `-fa off`.
-- `mdl fit --verify`, on running out of memory, booked a bigger margin
-  for the model's architecture and said the next fit would use it.
-  Nothing read it back: the next fit made the same prediction. Fits now
-  hold that margin back for that architecture and say so, and the margin
-  grows from the one the fit used rather than from the default.
 - Every `mdl fit`, `find` and `eval` rewrote `hw.json` from the copy it
   read when it started, so one running during `mdl fit hw` could undo
   the calibration. Each write now takes a lock, re-reads the file and
