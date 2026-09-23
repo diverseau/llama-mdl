@@ -11,6 +11,10 @@ mdl passes:
     tags       stream reasoning as inline <think> tags, not its own field
     slowchat   stream a long reply slowly, so an interrupt has something
                to interrupt
+    othermodel /props names a model file other than the -m it was given
+
+/props says what it loaded and its context, as llama-server does, and
+/tokenize counts four characters to a token.
 """
 import http.server
 import json
@@ -23,11 +27,15 @@ import time
 MODE = os.environ.get("MDL_FAKE_MODE", "")
 
 
-def port_from_argv():
+def flag(name, default=None):
     for i, a in enumerate(sys.argv):
-        if a == "--port" and i + 1 < len(sys.argv):
-            return int(sys.argv[i + 1])
-    return 8080
+        if a == name and i + 1 < len(sys.argv):
+            return sys.argv[i + 1]
+    return default
+
+
+def port_from_argv():
+    return int(flag("--port", 8080))
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -36,6 +44,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             body = b'{"status":"ok"}'
         elif self.path == "/metrics":
             body = b"llamacpp:kv_cache_usage_ratio 0.25\n"
+        elif self.path == "/props":
+            loaded = flag("-m", "")
+            if MODE == "othermodel":
+                loaded = os.path.join(os.path.dirname(loaded), "other.gguf")
+            body = json.dumps({"model_path": loaded,
+                               "default_generation_settings": {
+                                   "n_ctx": int(flag("-c", 4096))}}).encode()
         else:
             self.send_error(503)
             return
@@ -47,7 +62,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self):
         """Stream a reply the way llama-server does, chunk per token."""
-        self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        raw = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        if self.path == "/tokenize":
+            text = json.loads(raw or b"{}").get("content", "")
+            body = json.dumps({"tokens": list(range(len(text) // 4))}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if self.path != "/v1/chat/completions":
             self.send_error(404)
             return

@@ -253,6 +253,57 @@ check("the state records what ran",
 run(mdl.cmd_stop, ["--all"])
 teardown(root)
 
+# ------------------------------------------- stop_one, step by step ----
+# The kill path, with the process table stood in for: what it signals,
+# when it escalates, and what it reports when a server will not go.
+root, port = sandbox()
+KILL = getattr(mdl.signal, "SIGKILL", mdl.signal.SIGTERM)
+
+
+def stop_with(alive_after, port_held=False, refuse=False):
+    """stop_one on a made-up server that stays up until the signals in
+    `alive_after` are spent. (result, signals sent, stderr, state kept)."""
+    sent = []
+    state = {"name": "demo", "pid": 999999, "port": port}
+    mdl.run_dir().mkdir(parents=True, exist_ok=True)
+    mdl.state_path("demo").write_text(json.dumps(state))
+
+    def terminate(pid, sig, st):
+        if refuse:
+            raise PermissionError("not permitted")
+        sent.append(sig)
+
+    saved = (mdl.terminate, mdl.running, mdl.port_busy, mdl.time.sleep)
+    mdl.terminate = terminate
+    mdl.running = lambda st: len(sent) < alive_after
+    mdl.port_busy = lambda p: port_held
+    mdl.time.sleep = lambda s: None
+    got = {}
+    try:
+        out, err, _ = run(lambda: got.update(ok=mdl.stop_one("demo", state)))
+    finally:
+        mdl.terminate, mdl.running, mdl.port_busy, mdl.time.sleep = saved
+    return got.get("ok"), sent, err, mdl.state_path("demo").exists()
+
+
+ok, sent, err, kept = stop_with(1)
+check("a server that goes on SIGTERM is not sent SIGKILL",
+      (ok, sent, kept), (True, [mdl.signal.SIGTERM], False))
+ok, sent, err, kept = stop_with(2)
+check("one that ignores SIGTERM is killed, and counts as stopped",
+      (ok, sent, kept), (True, [mdl.signal.SIGTERM, KILL], False))
+ok, sent, err, kept = stop_with(99)
+check("one that survives both is reported, and stays listed",
+      (ok, "would not die" in err, kept), (False, True, True))
+ok, sent, err, kept = stop_with(1, port_held=True)
+check("one gone while its port is still held says so",
+      (ok, "port %d is still held" % port in err, kept), (False, True, False))
+ok, sent, err, kept = stop_with(1, refuse=True)
+check("one that cannot be signalled is reported, and stays listed",
+      (ok, "cannot signal demo" in err, sent, kept), (False, True, [], True))
+mdl.state_path("demo").unlink(missing_ok=True)
+teardown(root)
+
 # ------------------------------------------- taking over a dead lock ----
 root, port = sandbox()
 lock = mdl.run_dir() / "race.lock"

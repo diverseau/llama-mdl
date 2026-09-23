@@ -160,6 +160,18 @@ check("without --resume, an interrupted run is noted and started over",
       ("an interrupted run of these items has 1 done" in out,
        len(seen[-1]["todo"]), checkpoints()), (True, 3, []))
 
+# --------------------------------------- a server serving another file --
+# /props names what the server loaded; a result must describe that file
+os.environ["MDL_FAKE_MODE"] = "othermodel"
+calls = len(seen)
+rec, out, err, code = main()
+del os.environ["MDL_FAKE_MODE"]
+check("a server that reports another model file is refused before an item",
+      ("is serving other.gguf, not Tiny-Q8_0.gguf" in err, code,
+       len(seen) - calls), (True, 1, 0))
+check("and the server it started for that is stopped",
+      (mdl.read_state("demo"), mdl.port_busy(port)), (None, False))
+
 # ------------------------------------------- an interrupt while loading --
 real_wait = evalrun.wait_ready
 

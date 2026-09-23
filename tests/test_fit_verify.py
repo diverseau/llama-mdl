@@ -253,6 +253,160 @@ finally:
     hw.usage.snapshot, hw.llama_build = REAL["snapshot"], REAL["build"]
     hw.sibling = REAL["sibling"]
 
+# --------------------------------------------------------- verify_picks --
+# The picks go in front of the oracle before they are shown; what it
+# says does not fit sends the search round again, at most `rounds` times.
+from mdl_fit import cli, gguf, search  # noqa: E402
+
+inv = gguf.load(dense)
+card = fixed()
+opts = cli.options({})
+said = {"n": 0, "over": 0}         # oracle calls; how many say "too big"
+real_check, real_solve = search.calib.check, search.solve
+solves = []
+
+
+def oracle(fit_bin, inv_, shape, flags, build, max_alloc=None):
+    said["n"] += 1
+    if said["mode"] == "silent":
+        return None
+    big = said["mode"] == "always" or (said["mode"] == "once"
+                                       and len(solves) == 0)
+    if big:
+        said["over"] += 1
+    return {"actual": [20 * GiB if big else MiB, 0, 0]}
+
+
+def counted(ctx_obj, opts_):
+    solves.append(1)
+    return real_solve(ctx_obj, opts_)
+
+
+def verify(mode, fit_bin="llama-fit-params", source=None):
+    said.update(n=0, over=0, mode=mode)
+    solves.clear()
+    ctx_obj = search.Context(inv, card)
+    first = real_solve(ctx_obj, opts)
+    if source:
+        ctx_obj.inv.source = source
+    search.calib.check, search.solve = oracle, counted
+    try:
+        got = search.verify_picks(ctx_obj, opts, first, fit_bin)
+    finally:
+        search.calib.check, search.solve = real_check, real_solve
+        ctx_obj.inv.source = str(dense)
+    return first, got
+
+
+first, got = verify("agree", fit_bin=None)
+check("with no oracle binary the picks are shown as they are",
+      (got is first, said["n"]), (True, 0))
+first, got = verify("agree", source="hf:org/repo/x.gguf")
+check("nor for a model read from the hub: there is no file to load",
+      (got is first, said["n"]), (True, 0))
+first, got = verify("silent")
+check("a build with no oracle is asked once, and the picks kept",
+      (got is first, said["n"], [p.oracle for p in got.picks]),
+      (True, 1, [None] * len(got.picks)))
+first, got = verify("agree")
+check("picks the oracle agrees with are kept, each checked, no re-search",
+      (got is first, len(solves), all(p.oracle for p in got.picks),
+       said["n"] == len(got.picks) > 0), (True, 0, True, True))
+first, got = verify("once")
+check("picks it says do not fit send the search round again",
+      (len(solves), said["over"] > 0, all(p.oracle for p in got.picks)),
+      (1, True, True))
+first, got = verify("always")
+check("at most `rounds` times, with the last round's picks still checked",
+      (len(solves), all(p.oracle for p in got.picks)), (2, True))
+
+# ----------------------------------------------------- process listing --
+# What decides "idle": every process, its RAM, and the VRAM it holds.
+from types import SimpleNamespace as NS  # noqa: E402
+
+from mdl_fit import usage  # noqa: E402
+
+procs, _ = usage.processes(quick=True)
+me = next((p for p in procs if p.pid == os.getpid()), None)
+# (whether it counts as the system's depends on how the tests are run:
+# a CI runner can be a service, so that is left to the parsers below)
+check("this machine's listing has this process, its parent and its RAM",
+      (me is not None, me and me.ppid == os.getppid(), me and me.ram > 0),
+      (True, True, True))
+
+real = (usage.os, usage.sys, usage.shutil, usage._run, usage._procs_linux,
+        usage._procs_windows)
+TP = ('"(PDH-CSV 4.0)","\\\\PC\\GPU Process Memory(pid_2_luid_0x0_0x1'
+      '_phys_0)\\Dedicated Usage"\r\n"09/11/2026 20:34:31.203","2097152.0"\r\n')
+NV = ("| Processes:                                         |\n"
+      "|    0   N/A  N/A         1      C   python            100MiB |\n")
+try:
+    usage._procs_windows = lambda: [usage.Proc(1, 0, "a"), usage.Proc(2, 0, "b")]
+    usage._procs_linux = lambda quick: [usage.Proc(1, 0, "a", vram=5),
+                                        usage.Proc(2, 0, "b")]
+    usage._run = lambda argv, timeout=10: TP if argv[0] == "typeperf" else NV
+    usage.shutil = NS(which=lambda name: "/usr/bin/" + name)
+    usage.os, usage.sys = NS(name="nt"), NS(platform="win32")
+    got, have = usage.processes()
+    check("Windows: VRAM per process from the GPU counters",
+          ([p.vram for p in got], have), ([0, 2 << 20], True))
+    got, have = usage.processes(quick=True)
+    check("and a quick listing does not wait for them",
+          ([p.vram for p in got], have), ([0, 0], False))
+    usage.os, usage.sys = NS(name="posix"), NS(platform="linux")
+    got, have = usage.processes()
+    check("Linux: the DRM figure, plus nvidia-smi's for its own processes",
+          ([p.vram for p in got], have), ([5 + 100 * MiB, 0], True))
+
+    def broken(quick):
+        raise OSError("/proc is gone")
+    usage._procs_linux = broken
+    check("a listing that fails is empty, not a traceback",
+          usage.processes(), ([], False))
+finally:
+    (usage.os, usage.sys, usage.shutil, usage._run, usage._procs_linux,
+     usage._procs_windows) = real
+
+PS = ("  1     0     0   1024 /sbin/launchd\n"
+      "  50    1   501   2048 /Applications/Steam.app/Contents/MacOS/steam\n"
+      "  51    1   501    512 /System/Library/CoreServices/Dock\n"
+      "  52    1     0    256 /usr/sbin/cfprefsd\n"
+      "  garbled line\n")
+had_uid = hasattr(os, "getuid")
+real_uid, real_run = getattr(os, "getuid", None), usage._run
+os.getuid, usage._run = (lambda: 501), (lambda argv, timeout=10: PS)
+try:
+    mac = usage._procs_mac()
+finally:
+    usage._run = real_run
+    if had_uid:
+        os.getuid = real_uid
+    else:
+        del os.getuid
+check("macOS: ps rows, RAM in bytes, and the system's own marked as such",
+      [(p.pid, p.ppid, p.ram, p.system) for p in mac],
+      [(1, 0, 1024 * 1024, True), (50, 1, 2048 * 1024, False),
+       (51, 1, 512 * 1024, True), (52, 1, 256 * 1024, True)])
+
+proc_dir = TMP / "proc" / "4242"
+(proc_dir / "fd").mkdir(parents=True)
+(proc_dir / "fdinfo").mkdir()
+for fd, text in (("3", "drm-client-id: 7\ndrm-memory-vram: 1024 KiB\n"),
+                 ("4", "drm-client-id: 7\ndrm-memory-vram: 1024 KiB\n"),
+                 ("5", "drm-client-id: 8\ndrm-total-vram0: 2 MiB\n"),
+                 ("6", "not a gpu\n")):
+    (proc_dir / "fd" / fd).write_text("")
+    (proc_dir / "fdinfo" / fd).write_text(text)
+real_readlink = usage.os.readlink
+usage.os.readlink = lambda p: ("/dev/dri/renderD128" if Path(p).name != "6"
+                               else "/dev/null")
+try:
+    held = usage._drm_vram(proc_dir)
+finally:
+    usage.os.readlink = real_readlink
+check("DRM fdinfo: VRAM per client, a client's second fd not counted twice",
+      held, 1024 * 1024 + 2 * MiB)
+
 # ---------------------------------------------------------- calib.jsonl --
 calib.calib_path().unlink(missing_ok=True)
 flags = {"ctx": 4096, "ub": 512}
