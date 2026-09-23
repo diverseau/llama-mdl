@@ -3,7 +3,9 @@
 models.toml is hand-edited and lives in nobody's git. Every one of these
 kills a write at the worst moment and checks the config survived it.
 """
+import os
 import sys
+import threading
 import tomllib
 from pathlib import Path
 
@@ -57,6 +59,36 @@ mdl.write_atomic(mdl.CONFIG, before + "\n# added\n")
 check("a good write does land",
       mdl.CONFIG.read_text(encoding="utf-8").endswith("# added\n"), True)
 check("and cleans up after itself", strays(root), [])
+
+# Threads in one process shared a temp name (the pid): each removed the
+# other's temp file, and the second rename failed. The dashboard and
+# mdl find both write from worker threads.
+shared = root / "config" / "shared.json"
+failures, bodies = [], ["%d" % i * 2000 for i in range(8)]
+
+
+def hammer(body):
+    for _ in range(25):
+        try:
+            mdl.write_atomic(shared, body)
+        except OSError as e:
+            failures.append(e)
+
+
+workers = [threading.Thread(target=hammer, args=(b,)) for b in bodies]
+for w in workers:
+    w.start()
+for w in workers:
+    w.join()
+check("threads writing one file at once all succeed", failures, [])
+check("and it holds one whole write, not a mix",
+      shared.read_text(encoding="utf-8") in bodies, True)
+check("leaving no temp file behind", strays(root), [])
+if os.name != "nt":
+    umask = os.umask(0)
+    os.umask(umask)
+    check("a written file keeps the usual permissions, not a temp file's",
+          shared.stat().st_mode & 0o777, 0o666 & ~umask)
 
 mdl.write_atomic(mdl.CONFIG, "[fresh]\n", keep_backup=True)
 bak = mdl.CONFIG.with_name(mdl.CONFIG.name + ".bak")

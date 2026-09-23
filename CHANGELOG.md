@@ -2,6 +2,16 @@
 
 Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- Two threads saving the same file at once - the dashboard's workers,
+  `mdl find`'s header fetches - shared one temp file: one removed the
+  other's, and the second save failed. Each save has a temp file of its
+  own, and on Windows a rename that lands at the same instant as another
+  is tried again rather than refused.
+
 ## [0.8.0] - 2026-09-23
 
 From an audit of the whole project: what the dashboard's edit modal can

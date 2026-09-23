@@ -729,6 +729,25 @@ def terminate(pid, sig, state=None):
         os.kill(pid, sig)                # not a group leader after all
 
 
+def _sibling_tmp(path, tag=""):
+    """A temp name beside `path` that no other writer has. The pid alone
+    was shared by threads: two saving one file at once each removed the
+    other's temp file, and the second rename failed."""
+    return path.with_name("%s%s.tmp%d-%s" % (path.name, tag, os.getpid(),
+                                              os.urandom(4).hex()))
+
+
+def _replace(src, dst):
+    """os.replace, waiting out Windows refusing a rename onto a file
+    another rename is replacing that instant (Access is denied)."""
+    for wait in (0.01, 0.02, 0.05, 0.1, 0.2, 0.5) if os.name == "nt" else ():
+        try:
+            return os.replace(src, dst)
+        except PermissionError:
+            time.sleep(wait)
+    return os.replace(src, dst)
+
+
 def write_atomic(path, text, keep_backup=False):
     """Replace a file in one step, never leaving it half written.
 
@@ -746,21 +765,22 @@ def write_atomic(path, text, keep_backup=False):
             else:
                 backups[i].unlink(missing_ok=True)
         # Never move the current config: a failed rotation leaves it intact.
-        tmp_backup = path.with_name(path.name + ".bak.tmp%d" % os.getpid())
+        tmp_backup = _sibling_tmp(path, ".bak")
         try:
             shutil.copy2(path, tmp_backup)
             os.replace(tmp_backup, backups[0])
         finally:
             tmp_backup.unlink(missing_ok=True)
-    tmp = path.with_name(path.name + ".tmp%d" % os.getpid())
+    tmp = _sibling_tmp(path)
     try:
-        mode = "wb" if isinstance(text, bytes) else "w"
+        # "x": a name another writer already holds is an error, never shared
+        mode = "xb" if isinstance(text, bytes) else "x"
         kwargs = {} if isinstance(text, bytes) else {"encoding": "utf-8"}
         with open(tmp, mode, **kwargs) as fh:
             fh.write(text)
             fh.flush()
             os.fsync(fh.fileno())    # the rename is no use if the data is not down
-        os.replace(tmp, path)
+        _replace(tmp, path)
     finally:
         tmp.unlink(missing_ok=True)  # nothing half-written left lying about
 
