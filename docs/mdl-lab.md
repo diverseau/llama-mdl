@@ -369,6 +369,13 @@ for a week, then decide whether 3–6 survive contact.
   against; `timings_per_token` is not requested.
 - **Every repetition prefills**: requests send `cache_prompt: false`, and
   `ignore_eos` so each reply runs to `--max-tokens`.
+- **Depth can be a share of each variant's context** (`--depth 50%`,
+  `100%` or `full`), and the default is `0,100%`, not `0`: a fixed token
+  depth means something different to an 8k variant and a 64k one. 100%
+  is the context less the prompt, the reply and 64 tokens for the chat
+  template; the prompt is counted with the server's own `/tokenize` and
+  trimmed until it fits. The per-slot context (`/props`) is the one
+  filled, since `-np` splits it.
 
 **Built:** `run` (names by `--set` sweeps by `--server`, or `--suite`),
 `--prompt`, `--depth`, `--reps`, `--warmup`, `--max-tokens`, `--at`,

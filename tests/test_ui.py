@@ -675,14 +675,16 @@ async def main():
                        for m in said):
                     break
             done = [m for m in said if "mdl lab report" in m]
-            check("b measures the selected config and says what it did",
-                  (bool(done), bool(done) and "t/s, first token" in done[0]),
-                  (True, True))
+            check("b measures the selected config, empty and full, and "
+                  "says what it did",
+                  (bool(done), bool(done) and "t/s at depth 0," in done[0],
+                   bool(done) and "t/s at depth 100% (" in done[0]),
+                  (True, True, True))
             check("from a config of its own: nothing is left running, and "
                   "the dashboard is still up",
                   (mdl.read_states(), app.is_running), ({}, True))
             check("and it is recorded with the other lab runs",
-                  len([r for r in lab.load() if not r.get("warmup")]), 1)
+                  len([r for r in lab.load() if not r.get("warmup")]), 2)
     finally:
         lab.gpu_now = real_gpu
         teardown(root)

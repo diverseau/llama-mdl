@@ -2,6 +2,24 @@
 
 Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+
+- `mdl lab` measures each variant with its context full as well as
+  empty (`--depth 0,100%` by default). It measured an empty context
+  only, so a longer context could not show what it cost where it
+  matters, late in a long task. `--depth` takes shares of each variant's
+  own context (`50%`, `100%`, `full`) beside token counts, the prompt
+  sized with the server's own tokenizer. `b` in `mdl ui` reports both.
+
+### Fixed
+
+- `mdl lab compare` pooled every depth a variant ran at into one figure,
+  so an empty-context run and a deep one were averaged together and the
+  spread called any two configs indistinguishable. It compares depth by
+  depth. The report orders its rows by depth, and `baseline diff` too.
+
 ## [0.9.0] - 2026-09-23
 
 `mdl lab`, which measures variants of a config against each other, and

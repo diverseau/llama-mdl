@@ -1680,13 +1680,15 @@ class MdlApp(App):
             rows = lab.report({"names": [run_id], "format": "json"},
                               io.StringIO())
             if rows:
-                r = rows[0]
-                msg = ("%s: %s t/s, first token %ss, VRAM %s. "
-                       "mdl lab report %s" % (
-                           name, lab.cell("decode", r).split(" ")[0],
-                           lab.cell("ttft", r), lab.cell("vram_peak", r),
-                           run_id))
-                self.call_from_thread(self.notify, msg, timeout=20)
+                # a row per depth: empty, and the context full
+                msg = "%s: %s; VRAM %s. mdl lab report %s" % (
+                    name, "; ".join(
+                        "%s t/s at depth %s, first token %ss" % (
+                            lab.cell("decode", r).split(" ")[0],
+                            lab.cell("depth", r), lab.cell("ttft", r))
+                        for r in rows),
+                    lab.cell("vram_peak", rows[-1]), run_id)
+                self.call_from_thread(self.notify, msg, timeout=30)
             else:
                 skipped = [x.get("skipped") for x in lab.load()
                            if x.get("run") == run_id and x.get("skipped")]

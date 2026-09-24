@@ -75,7 +75,20 @@ check("the matrix is every name by every combination, labelled by it",
       [v.label for v in lab.matrix(o)],
       ["m/ngl45/ctx8192", "m/ngl38/ctx8192", "n/ngl45/ctx8192",
        "n/ngl38/ctx8192"])
+check("a depth is tokens, or a share of each variant's context",
+      lab.parse(["m", "--depth", "0,8k,50%,full"])["depths"],
+      [0, 8192, "50%", "100%"])
+check("and by default it is both ends: empty, and full",
+      lab.workload(lab.parse(["m"]))["depths"], [0, "100%"])
+w = {"max_tokens": 512}
+check("100% leaves just the prompt, the reply and the template's room",
+      (lab.resolve_depth("100%", 8192, w, 100),
+       lab.resolve_depth("50%", 8192, w, 100),
+       lab.resolve_depth(4096, 8192, w, 100)),
+      (8192 - 512 - 100 - lab.TEMPLATE_SLACK,
+       (8192 - 512 - 100 - lab.TEMPLATE_SLACK) // 2, 4096))
 for bad, words in ((["--depth", "lots"], "--depth takes a number"),
+                   (["--depth", "150%"], "a share from 0% to 100%"),
                    (["--reps"], "--reps needs a value"),
                    (["--frobnicate"], "unknown option --frobnicate")):
     _, err, code = run(lab.parse, bad)
@@ -108,7 +121,7 @@ def lab_main(*args):
 
 
 ARGS = ["--reps", "2", "--warmup", "1", "--max-tokens", "64",
-        "--cooldown", "0", "--interval", "0.2", "--at", "20"]
+        "--cooldown", "0", "--interval", "0.2", "--at", "20", "--depth", "0"]
 _, out, err, code = lab_main("run", "demo", "--set", "ctx=4096,8192",
                              "--dry-run", *ARGS)
 check("a dry run shows the matrix, the loads and the requests, and starts "
@@ -187,6 +200,43 @@ check("a decode shorter than the interval is sampled at its start, at the "
                              if x["phase"] == "decode"},
        (rec["metrics"]["at"]["20"] or {}).get("vram"),
        rec["metrics"]["vram"]["peak"]), (0, True, 1 * GiB, 1 * GiB))
+
+# ---------------------------------------------------- depth as a share --
+run_id, out, err, code = lab_main("run", "demo", "--set", "ctx=2048,4096",
+                                  "--depth", "0,100%", "--reps", "2",
+                                  "--warmup", "0", "--max-tokens", "64",
+                                  "--cooldown", "0", "--interval", "0.2")
+mine = [r for r in lab.load() if r["run"] == run_id]
+full = [r for r in mine if r["workload"]["depth"] == "100%"]
+check("100% fills each variant's own context, not one number for all",
+      (code, sorted({r["workload"]["ctx"] for r in full}),
+       all(r["workload"]["prompt_tokens"] + 64 <= r["workload"]["ctx"]
+           - lab.TEMPLATE_SLACK for r in full),
+       all(r["workload"]["prompt_tokens"] > 0.9 * (r["workload"]["ctx"] - 64
+                                                   - lab.TEMPLATE_SLACK)
+           for r in full)),
+      (0, [2048, 4096], True, True))
+check("and says what it came to",
+      "depth 100%: a" in out and "-token prompt, the reply ending at" in out,
+      True)
+check("the prefill is the prompt the share asked for",
+      all(r["metrics"]["prefill"]["tokens"] >= r["workload"]["prompt_tokens"]
+          for r in full), True)
+rows, out, err, code = lab_main("report", run_id)
+check("the report has a row per depth, a share showing its tokens",
+      ([(r["variant"], r["depth"]) for r in rows], "100% (" in out),
+      ([("demo/ctx2048", 0), ("demo/ctx2048", "100%"),
+        ("demo/ctx4096", 0), ("demo/ctx4096", "100%")], True))
+_, out, err, code = lab_main("compare", "demo/ctx2048", "demo/ctx4096",
+                             "--run", run_id)
+check("compare sets the two side by side depth by depth, never pooled",
+      (code, out.count("\ndepth "), "depth 0\n" in out,
+       "depth 100%\n" in out), (0, 2, True, True))
+_, out, err, code = lab_main("run", "demo", "--depth", "8k", "--reps", "1",
+                             "--warmup", "0", "--max-tokens", "64",
+                             "--cooldown", "0", "--interval", "0.2")
+check("an absolute depth the context cannot hold is skipped, and says so",
+      ("do not fit its 4k context; skipped" in out, code), (True, 0))
 
 # --------------------------------------------------------------- suites --
 suites = hw.config_dir() / "lab"

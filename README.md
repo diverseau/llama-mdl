@@ -579,13 +579,22 @@ token count, so "usage 500 tokens in" is a column, not a guess.
 
 ```
 mdl lab run qwen27b --set ngl=56,51,45 --set ctx=32k,64k --dry-run
-mdl lab run qwen27b --set ngl=56,51,45 --set ctx=32k,64k --depth 0,16k
-mdl lab report                   the last run: one row per variant
+mdl lab run qwen27b --set ngl=56,51,45 --set ctx=32k,64k
+mdl lab report                   the last run: a row per variant and depth
 mdl lab compare qwen27b/ngl56/ctx32768 qwen27b/ngl51/ctx65536
 mdl lab apply qwen27b/ngl51/ctx65536    its models.toml table, printed
 mdl lab baseline set             pin the last run
 mdl lab baseline diff --fail     a later run against it; exit 1 if it regressed
 ```
+
+Each variant is measured twice over by default: with an empty context,
+and with its context full - the prompt filled to just short of the top,
+so the reply ends there, as it does late in a long task. That is where
+configs part ways; a benchmark at depth 0 picks the one that degrades in
+use. `--depth` takes tokens (`8k`) or shares of each variant's own
+context (`0,50%,100%`), so a 32k variant and a 64k one are each filled
+to their own top; the report shows what a share came to in tokens, and
+`compare` sets two variants side by side depth by depth.
 
 A `--set` with a list sweeps it, and every combination is a variant;
 `--server a,b` runs each on more than one llama.cpp build. A suite file in

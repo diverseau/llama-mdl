@@ -62,6 +62,10 @@ VRAM_SLACK = 512 * MiB          # what "back to baseline" allows after a stop
 WINDOW = 1.0                    # seconds: the sliding window a rate is over
 SKIP = 0.02                     # share of tokens left out of floor and peak
 BASELINE_S = 3.0                # seconds of idle sampled before a variant
+DEPTHS = [0, "100%"]            # empty, and full: where configs part ways
+# tokens left free at the top of a "full" context for the chat template's
+# wrapping, which /tokenize does not count: a choice, with room to spare
+TEMPLATE_SLACK = 64
 
 DEFAULT_PROMPT = (
     "Write a practical, detailed guide to keeping a small vegetable garden "
@@ -84,7 +88,10 @@ run options:
                        every combination is a variant)
   --server PATH[,...]  llama-server builds to run each variant on
   --prompt FILE|-      the workload (default: a long-form writing prompt)
-  --depth 0,8k,32k     context filled before the prompt (default 0)
+  --depth 0,50%,100%   context filled before the prompt: tokens (8k), or
+                       a share of each variant's own context, where 100%
+                       (or full) leaves just room for the reply
+                       (default 0,100%: empty, and full)
   --max-tokens N       reply length, run to the end (default 512)
   --reps N             measured repetitions (default 3)
   --warmup N           repetitions run first and not counted (default 1)
@@ -127,6 +134,39 @@ def number(text, what):
     if n < 0:
         die("%s cannot be negative" % what)
     return n
+
+
+def depth_spec(text, what="--depth"):
+    """A depth: tokens (8k is 8192), or a share of the variant's context,
+    kept as text ("50%") and resolved when the server says how much it
+    has. "full" is 100%."""
+    t = str(text).strip().lower()
+    if t == "full":
+        return "100%"
+    if t.endswith("%"):
+        try:
+            p = float(t[:-1])
+        except ValueError:
+            die("%s takes tokens or a share like 50%%, not %r" % (what, text))
+        if not 0 <= p <= 100:
+            die("%s takes a share from 0%% to 100%%, not %r" % (what, text))
+        return "%g%%" % p if p else 0
+    return number(text, what)
+
+
+def resolve_depth(spec, ctx, w, prompt_tokens):
+    """Tokens of filler for a depth: a share is of the room left once the
+    prompt, the reply and the template's wrapping are counted, so 100%
+    ends the reply at the top of the context."""
+    if not isinstance(spec, str):
+        return spec
+    room = ctx - w["max_tokens"] - prompt_tokens - TEMPLATE_SLACK
+    return max(0, int(room * float(spec[:-1]) / 100))
+
+
+def _dkey(d):
+    """Order depths: token counts, then shares."""
+    return (1, float(d[:-1]), "") if isinstance(d, str) else (0, d or 0, "")
 
 
 def value(text):
@@ -185,7 +225,7 @@ def parse(args):
             elif a == "--server":
                 o["servers"] += split_values(v)
             elif a == "--depth":
-                o["depths"] = [number(x, "--depth") for x in split_values(v)]
+                o["depths"] = [depth_spec(x) for x in split_values(v)]
             elif a in INT_OPTS:
                 o[INT_OPTS[a]] = number(v, a)
             elif a in FLOAT_OPTS:
@@ -265,9 +305,9 @@ def load_suite(name, o):
         if key in head and key not in o:
             o[key] = head[key]
     if "depth" in head and "depths" not in o:
-        o["depths"] = [number(d, "depth") for d in head["depth"]] \
-            if isinstance(head["depth"], list) else [number(head["depth"],
-                                                           "depth")]
+        o["depths"] = [depth_spec(d, "depth") for d in head["depth"]] \
+            if isinstance(head["depth"], list) else [depth_spec(head["depth"],
+                                                                "depth")]
     variants = []
     for i, v in enumerate(data.get("variant", [])):
         if not isinstance(v, dict) or not v.get("base"):
@@ -314,7 +354,7 @@ def workload(o):
     w = {"prompt": text, "prompt_sha": hashlib.sha256(
              text.encode()).hexdigest()[:12],
          "max_tokens": o.get("max_tokens", 512), "seed": o.get("seed", 42),
-         "temp": o.get("temp", 0.0), "depths": o.get("depths", [0]),
+         "temp": o.get("temp", 0.0), "depths": o.get("depths", DEPTHS),
          "reps": o.get("reps", 3), "warmup": o.get("warmup", 1),
          "at": o.get("at", 500), "cooldown": o.get("cooldown", 10.0),
          "interval": o.get("interval", 1.0), "ignore_eos": True}
@@ -760,6 +800,25 @@ def prompt_for(w, depth, cpt, rng):
             "aside: %s" % (fill, w["prompt"]))
 
 
+def fit_prompt(w, spec, depth, cpt, seed, client, ctx):
+    """The prompt behind `depth` tokens of filler, counted by the server's
+    own tokenizer: (text, tokens), or (None, tokens) when an absolute depth
+    does not fit the context. A share that comes out over - the filler is
+    sized from an average - is trimmed until it fits."""
+    limit = ctx - w["max_tokens"] - TEMPLATE_SLACK if ctx else None
+    for _ in range(5):
+        text = prompt_for(w, depth, cpt, random.Random(seed))
+        n = client.tokens(text)
+        if n is None:
+            n = int(len(text) / cpt)
+        if limit is None or n <= limit:
+            return text, n
+        if not isinstance(spec, str) or depth <= 0:
+            return None, n
+        depth = max(0, depth - (n - limit) - 16)
+    return None, n
+
+
 def host_needed(variant, cfg, binary):
     """RAM the variant's weights and cache will hold off the GPU, from
     mdl fit's placement, or None when the model cannot be read."""
@@ -822,7 +881,16 @@ def run(variants, w, out, suite=None):
 
 
 def _k(n):
+    if isinstance(n, str):
+        return n
     return "%dk" % (n // 1024) if n and n % 1024 == 0 else str(n)
+
+
+def _kt(n):
+    """A token count to read, not to type back: 31.2k."""
+    if not isinstance(n, (int, float)):
+        return "-"
+    return "%.1fk" % (n / 1024) if n >= 1024 else str(int(n))
 
 
 def _skip_record(run_id, suite, v, cfg, w, why, build=None):
@@ -832,9 +900,12 @@ def _skip_record(run_id, suite, v, cfg, w, why, build=None):
             "workload": _work_record(w, None), "skipped": why}
 
 
-def _work_record(w, depth):
+def _work_record(w, depth, tokens=None, ctx=None):
+    """`depth` is as asked - 8192, or "100%" - so a share compares across
+    variants whose contexts differ; `prompt_tokens` is what it came to."""
     return {k: w[k] for k in ("prompt_sha", "max_tokens", "seed", "temp",
-                              "ignore_eos", "at")} | {"depth": depth}
+                              "ignore_eos", "at")} | {
+        "depth": depth, "prompt_tokens": tokens, "ctx": ctx}
 
 
 def run_variant(run_id, suite, v, models, binary, top, w, out):
@@ -862,22 +933,36 @@ def run_variant(run_id, suite, v, models, binary, top, w, out):
         port = state["port"]
         sampler = Sampler(state["pid"], w["interval"])
         sampler.start()
-        cpt = evalrun.chars_per_token(evalrun.Client(port, timeout=60))
-        ctx = (evalrun.Client(port, timeout=30).props().get(
-            "default_generation_settings") or {}).get("n_ctx") or env.cfg.get(
-            "ctx")
-        rng = random.Random(w["seed"])
-        for depth in w["depths"]:
-            text = prompt_for(w, depth, cpt, rng)
-            if ctx and len(text) / cpt + w["max_tokens"] > ctx:
-                wr("  depth %s: does not fit its %s context; skipped\n"
-                   % (_k(depth), _k(ctx)))
+        client = evalrun.Client(port, timeout=60)
+        cpt = evalrun.chars_per_token(client)
+        # per slot: with parallel > 1 the server splits its context, and a
+        # request can fill only its own share of it
+        ctx = (client.props().get("default_generation_settings")
+               or {}).get("n_ctx") or (env.cfg.get("ctx") or 0) // max(
+                   1, env.cfg.get("parallel") or 1) or None
+        bare = client.tokens(w["prompt"]) or int(len(w["prompt"]) / cpt)
+        for i, spec in enumerate(w["depths"]):
+            if isinstance(spec, str) and not ctx:
+                wr("  depth %s: the server did not say its context; "
+                   "skipped\n" % spec)
                 continue
+            depth = resolve_depth(spec, ctx, w, bare)
+            text, used = fit_prompt(w, spec, depth, cpt, w["seed"] + i,
+                                    client, ctx)
+            if text is None:
+                wr("  depth %s: %s tokens and a %d-token reply do not fit "
+                   "its %s context; skipped\n" % (
+                       _k(spec), _kt(used), w["max_tokens"], _k(ctx)))
+                continue
+            if isinstance(spec, str):
+                wr("  depth %s: a %s-token prompt, the reply ending at "
+                   "%s of %s\n" % (spec, _kt(used), _kt(
+                       used + w["max_tokens"]), _kt(ctx)))
             for rep in range(w["warmup"] + w["reps"]):
                 warm = rep < w["warmup"]
                 seed = w["seed"] + max(0, rep - w["warmup"])
                 first = len(sampler.samples)
-                sampler.rep, sampler.depth, sampler.tok = rep, depth, 0
+                sampler.rep, sampler.depth, sampler.tok = rep, spec, 0
                 sampler.phase = "prefill"
 
                 def on_token(n, s=sampler, at=w["at"]):
@@ -889,7 +974,7 @@ def run_variant(run_id, suite, v, models, binary, top, w, out):
                     arrivals, timings = stream(port, text, w, seed, on_token)
                 except (OSError, http.client.HTTPException) as e:
                     wr("  depth %s rep %d: the request failed: %s\n"
-                       % (_k(depth), rep + 1, e))
+                       % (_k(spec), rep + 1, e))
                     continue
                 finally:
                     if sampler.phase == "decode":
@@ -902,7 +987,8 @@ def run_variant(run_id, suite, v, models, binary, top, w, out):
                        "suite": suite, "at": time.strftime("%Y-%m-%dT%H:%M:%S"),
                        "variant": v.as_dict(), "config": env.cfg,
                        "argv": argv, "build": build,
-                       "workload": _work_record(w, depth), "rep": rep,
+                       "workload": _work_record(w, spec, used, ctx),
+                       "rep": rep,
                        "warmup": warm, "metrics": m, "flags": flags,
                        "vram_claimed": claimed_vram(log),
                        "baseline": base,
@@ -911,7 +997,7 @@ def run_variant(run_id, suite, v, models, binary, top, w, out):
                 append(rec, taken)
                 recorded += 0 if warm else 1
                 wr("  depth %-5s %s  %4d tok  %6s t/s  ttft %5ss  VRAM %s\n" % (
-                    _k(depth), "warmup  " if warm else "rep %d/%d" % (
+                    _k(spec), "warmup  " if warm else "rep %d/%d" % (
                         rep - w["warmup"] + 1, w["reps"]),
                     m.get("tokens", 0), _fmt(m["decode"]["avg"], 1),
                     _fmt(m.get("ttft"), 2), _gb(m["vram"]["peak"])))
@@ -1005,7 +1091,9 @@ def estimate(v, cfg, binary, w):
             gguf.NotGGUF, gguf.Truncated):
         return None
     total = 0.0
-    for depth in w["depths"]:
+    ctx = (cfg.get("ctx") or 4096) // max(1, cfg.get("parallel") or 1)
+    for spec in w["depths"]:
+        depth = resolve_depth(spec, ctx, w, int(len(w["prompt"]) / 4))
         sp = perf.speed(shape, flags, mach, depth=max(depth, 1))
         dec = sp.decode_d if depth else sp.decode0
         if not dec or not sp.prefill:
@@ -1079,7 +1167,10 @@ def row(label, depth, recs, at):
     at_rss = [s["rss"] for s in at_vals if s.get("rss") is not None]
     b = recs[0].get("build") or {}
     flags = sorted({f for r in recs for f in r.get("flags", [])})
+    toks = [(r.get("workload") or {}).get("prompt_tokens") for r in recs]
+    toks = [t for t in toks if t]
     return {"variant": label, "depth": depth, "reps": len(recs),
+            "prompt_tokens": statistics.median(toks) if toks else None,
             "build": "%s %s" % (b.get("backend") or "?", b.get("build") or "?"),
             "decode": dec, "decode_sd": sd,
             "p05": _med(recs, "decode", "p05")[0],
@@ -1112,6 +1203,8 @@ def cell(key, r):
     if key == "decode":
         return "-" if v is None else "%.1f ±%.1f" % (v, r["decode_sd"] or 0)
     if key == "depth":
+        if isinstance(v, str) and r.get("prompt_tokens"):
+            return "%s (%s)" % (v, _kt(r["prompt_tokens"]))
         return _k(v) if v is not None else "-"
     if key in ("vram_peak", "vram_delta", "rss_peak", "at_vram", "at_rss"):
         if v is None and key == "vram_peak" and r.get("vram_claimed"):
@@ -1134,7 +1227,8 @@ def report(o, out):
     at = o.get("at") or next((r["workload"].get("at") for r in recs
                               if r.get("workload")), 500)
     rows = [row(label, depth, rs, at) for (label, depth), rs in
-            groups(recs).items()]
+            sorted(groups(recs).items(),
+                   key=lambda kv: (kv[0][0], _dkey(kv[0][1])))]
     fmt = o.get("format", "table")
     if fmt == "json":
         wr(json.dumps({"run": run_id, "at": at, "rows": rows}, indent=1)
@@ -1202,22 +1296,42 @@ def compare(o, out):
                     r["variant"]["label"] for r in recs}))))
         sides.append((name, got))
     (a, ra), (b, rb) = sides
-    wr("%s  vs  %s\n\n" % (a, b))
-    for what, path, better in (("decode t/s", ("decode", "avg"), max),
-                               ("floor t/s", ("decode", "floor"), max),
-                               ("ttft s", ("ttft",), min),
-                               ("prefill t/s", ("prefill", "tps"), max),
-                               ("VRAM peak", ("vram", "peak"), min),
-                               ("RSS peak", ("ram", "peak_rss"), min)):
-        va, vb = _vals(ra, path), _vals(rb, path)
-        if not va or not vb:
-            continue
-        ma, mb = statistics.mean(va), statistics.mean(vb)
-        big = what.startswith(("VRAM", "RSS"))
-        show = _gb if big else (lambda x: _fmt(x, 2))
-        wr("%-12s %10s  %10s  %+6.1f%%  %s\n" % (
-            what, show(ma), show(mb), (mb / ma - 1) * 100 if ma else 0,
-            verdict(va, vb, a, b, better)))
+    wr("%s  vs  %s\n" % (a, b))
+
+    def by_depth(recs):
+        out = {}
+        for r in recs:
+            out.setdefault(r["workload"].get("depth"), []).append(r)
+        return out
+    da, db = by_depth(ra), by_depth(rb)
+    both = sorted(set(da) & set(db), key=_dkey)
+    if not both and len(da) == 1 and len(db) == 1:
+        both = [None]           # two records named: set side by side as asked
+    if not both:
+        die("%s and %s share no depth: %s against %s" % (
+            a, b, ",".join(_k(d) for d in sorted(da, key=_dkey)),
+            ",".join(_k(d) for d in sorted(db, key=_dkey))))
+    for depth in both:
+        # an empty context and a full one are different workloads: pooled,
+        # their spread would call any two configs indistinguishable
+        xa = da[depth] if depth is not None else ra
+        xb = db[depth] if depth is not None else rb
+        wr("\ndepth %s\n" % (_k(depth) if depth is not None else "as run"))
+        for what, path, better in (("decode t/s", ("decode", "avg"), max),
+                                   ("floor t/s", ("decode", "floor"), max),
+                                   ("ttft s", ("ttft",), min),
+                                   ("prefill t/s", ("prefill", "tps"), max),
+                                   ("VRAM peak", ("vram", "peak"), min),
+                                   ("RSS peak", ("ram", "peak_rss"), min)):
+            va, vb = _vals(xa, path), _vals(xb, path)
+            if not va or not vb:
+                continue
+            ma, mb = statistics.mean(va), statistics.mean(vb)
+            big = what.startswith(("VRAM", "RSS"))
+            show = _gb if big else (lambda x: _fmt(x, 2))
+            wr("%-12s %10s  %10s  %+6.1f%%  %s\n" % (
+                what, show(ma), show(mb), (mb / ma - 1) * 100 if ma else 0,
+                verdict(va, vb, a, b, better)))
     ba = (ra[0].get("build") or {}).get("build")
     bb = (rb[0].get("build") or {}).get("build")
     if ba != bb:
@@ -1345,7 +1459,7 @@ def baseline_cmd(o, out):
     now, then = groups(recs), groups(base_recs)
     wr("%s  against baseline %s\n\n" % (run_id, base))
     worse = []
-    for key in sorted(now, key=str):
+    for key in sorted(now, key=lambda k: (k[0], _dkey(k[1]))):
         if key not in then:
             wr("%-32s depth %-5s new: not in the baseline\n" % (
                 key[0], _k(key[1])))
@@ -1364,7 +1478,7 @@ def baseline_cmd(o, out):
                 (mb / ma - 1) * 100 if ma else 0, call))
             if call == "baseline better":
                 worse.append("%s %s" % (key[0], what_))
-    gone = sorted(set(then) - set(now), key=str)
+    gone = sorted(set(then) - set(now), key=lambda k: (k[0], _dkey(k[1])))
     for key in gone:
         wr("%-32s depth %-5s not run this time\n" % (key[0], _k(key[1])))
     wr("\n%s\n" % ("regressed: " + "; ".join(worse) if worse
