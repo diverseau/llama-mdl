@@ -739,7 +739,7 @@ class HelpScreen(ModalScreen):
         ("c", "copy the llama-server command"),
         ("y", "copy the whole log"),
         ("p", "prompt the running model"),
-        ("b", "measure the selected config (mdl lab), and record it"),
+        ("b", "measure the selected config (mdl lab); b again stops it"),
         ("l", "focus the log pane"),
         ("/", "filter the log"),
         ("g", "reload models.toml and refresh telemetry"),
@@ -1658,17 +1658,42 @@ class MdlApp(App):
         """A measured run of the selected config through mdl lab: one
         warmup and one repetition of its default workload, from a config
         of its own, recorded with the rest for mdl lab report. A server of
-        yours on its port is left alone, and lab says so."""
+        yours on its port is left alone, and lab says so. Pressed while
+        one runs, it stops that one: its server down, its temp files gone,
+        what it measured kept."""
+        running = getattr(self, "_benching", None)
+        if running:
+            if self._bench_stop.is_set():
+                self.notify("already stopping " + running, severity="warning")
+                return
+            self._bench_stop.set()
+            self.status_line = "stopping the measurement of %s..." % running
+            self.notify("stopping the measurement of " + running)
+            return
         name = self._selected()
         if not name:
             return
-        if getattr(self, "_benching", None):
-            self.notify("already measuring " + self._benching,
-                        severity="warning")
-            return
-        self._benching = name
-        self.status_line = "measuring %s with mdl lab..." % name
-        self._do_bench(name)
+        from mdl_fit import lab
+        self._benching, self._bench_stop = name, lab.Stop()
+        self.status_line = "measuring %s with mdl lab (b stops it)..." % name
+        self._do_bench(name, self._bench_stop)
+
+    async def action_quit(self):
+        # a measurement is stopped rather than left to finish behind a
+        # closed dashboard: the process waits for its thread either way,
+        # and this way that is seconds, with its server taken down
+        stop = getattr(self, "_bench_stop", None)
+        if getattr(self, "_benching", None) and stop is not None:
+            stop.set()
+        self.exit()
+
+    def _later(self, fn, *args, **kw):
+        """call_from_thread, when there is still an app to call: a worker
+        finishing after quit has nothing to tell."""
+        try:
+            self.call_from_thread(fn, *args, **kw)
+        except RuntimeError:
+            pass
 
     def _follow(self, path, title):
         """Point the log pane at a file of our own, from its start."""
@@ -1678,7 +1703,7 @@ class MdlApp(App):
         log.border_title = title
 
     @work(thread=True, group="lab")
-    def _do_bench(self, name):
+    def _do_bench(self, name, stop=None):
         import io
 
         from mdl_fit import lab
@@ -1695,13 +1720,20 @@ class MdlApp(App):
         path = logs / ("b-%s.log" % time.strftime("%Y%m%d-%H%M%S"))
         try:
             with open(path, "w", encoding="utf-8", buffering=1) as fh:
-                self.call_from_thread(self._follow, path,
-                                      "log · mdl lab " + name)
+                self._later(self._follow, path, "log · mdl lab " + name)
                 run_id = lab.main(["run", name, "--reps", "1", "--warmup",
-                                   "1", "--cooldown", "0"], fh)
+                                   "1", "--cooldown", "0"], fh, stop=stop)
+            got = [r for r in lab.load() if r.get("run") == run_id
+                   and not r.get("warmup") and not r.get("skipped")]
             rows = lab.report({"names": [run_id], "format": "json"},
-                              io.StringIO())
-            if rows:
+                              io.StringIO()) if got else []
+            if stop is not None and stop.is_set():
+                self._later(self.notify, "stopped measuring %s; %d "
+                            "repetition%s kept%s" % (
+                                name, len(got), "" if len(got) == 1 else "s",
+                                ". mdl lab report " + run_id if got else ""),
+                            severity="warning", timeout=15)
+            elif rows:
                 # a row per depth: empty, and the context full
                 msg = "%s: %s; VRAM %s, RAM %s. mdl lab report %s" % (
                     name, "; ".join(
@@ -1711,20 +1743,19 @@ class MdlApp(App):
                         for r in rows),
                     lab.cell("vram_peak", rows[-1]),
                     lab.cell("rss_peak", rows[-1]), run_id)
-                self.call_from_thread(self.notify, msg, timeout=30)
+                self._later(self.notify, msg, timeout=30)
             else:
                 skipped = [x.get("skipped") for x in lab.load()
                            if x.get("run") == run_id and x.get("skipped")]
-                self.call_from_thread(
+                self._later(
                     self.notify, "%s was not measured: %s" % (
                         name, skipped[0] if skipped else "nothing ran"),
                     severity="warning", timeout=15)
         except (mdl.MdlError, OSError) as e:
-            self.call_from_thread(self.notify, str(e), severity="error",
-                                  timeout=15)
+            self._later(self.notify, str(e), severity="error", timeout=15)
         finally:
             self._benching = None
-            self.call_from_thread(setattr, self, "status_line", "")
+            self._later(setattr, self, "status_line", "")
 
     def action_refresh(self):
         self._load_config()
@@ -1952,4 +1983,10 @@ class FilterScreen(ModalScreen):
 
 
 def run_ui(fx=None, fx_period_override=None):
-    MdlApp(fx, fx_period_override).run()
+    app = MdlApp(fx, fx_period_override)
+    app.run()
+    if getattr(app, "_benching", None):
+        # quit mid-measurement: its thread takes its server down before
+        # the process can exit, and a silent pause would look like a hang
+        print("mdl: stopping the mdl lab measurement of %s..."
+              % app._benching, file=sys.stderr, flush=True)

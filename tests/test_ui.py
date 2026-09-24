@@ -661,6 +661,8 @@ async def main():
     lab.gpu_now = lambda: (None, None, None, None)     # no card's noise here
     real_clean = lab.clean_machine
     lab.clean_machine = lambda binary: None
+    real_ram = lab.hw.ram
+    lab.hw.ram = lambda: (real_ram()[0], 8 << 30)  # a busy machine skips none
     root, port = sandbox()
     app = MdlApp(fx="off")
     said = []
@@ -698,9 +700,56 @@ async def main():
                               "[4/4] depth 100%" in log.as_text(),
                               "mdl lab" in str(log.border_title)),
                   (True, True, True, True))
+
+        # a load that would take a minute: b again stops it, not waits it
+        os.environ["MDL_FAKE_MODE"], os.environ["MDL_FAKE_LOAD_S"] = "slow", "60"
+        app = MdlApp(fx="off")
+        said = []
+        real_notify = app.notify
+        app.notify = lambda msg, **kw: (said.append(str(msg)),
+                                        real_notify(msg, **kw))
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await pilot.press("b")
+            await pilot.pause(1.5)
+            started = app._benching
+            t0 = time.monotonic()
+            await pilot.press("b")
+            for _ in range(300):
+                await pilot.pause(0.1)
+                if not app._benching:
+                    break
+            took = time.monotonic() - t0
+            stopped = [m for m in said if m.startswith("stopped measuring")]
+            check("b while a measurement runs stops it, without waiting out "
+                  "its load", (started, app._benching, took < 30,
+                               bool(stopped)), ("demo", None, True, True))
+            check("its server down, nothing left running, the dashboard up",
+                  (mdl.port_busy(port), mdl.read_states(), app.is_running),
+                  (False, {}, True))
+
+        # quitting mid-measurement stops it too, rather than leaving the
+        # process to wait out the run behind a closed dashboard
+        app = MdlApp(fx="off")
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await pilot.press("b")
+            await pilot.pause(1.5)
+            stop = app._bench_stop
+            await pilot.press("q")
+        for _ in range(300):
+            if not app._benching:
+                break
+            await asyncio.sleep(0.1)
+        check("quitting mid-measurement stops it, and takes its server down",
+              (stop.is_set(), app._benching, mdl.port_busy(port)),
+              (True, None, False))
     finally:
+        os.environ.pop("MDL_FAKE_MODE", None)
+        os.environ.pop("MDL_FAKE_LOAD_S", None)
         lab.gpu_now = real_gpu
         lab.clean_machine = real_clean
+        lab.hw.ram = real_ram
         teardown(root)
 
     # --- the placement pane, per build --------------------------------------

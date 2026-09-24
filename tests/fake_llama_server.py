@@ -145,7 +145,8 @@ def main():
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
     print("load_tensors: offloaded 33/33 layers to GPU", flush=True)
     if MODE == "slow":
-        time.sleep(3.0)
+        # $MDL_FAKE_LOAD_S makes it a long one: a load a stop must not wait
+        time.sleep(float(os.environ.get("MDL_FAKE_LOAD_S", "3.0")))
     server = http.server.HTTPServer(("127.0.0.1", port_from_argv()), Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     print("main: server is listening on http://127.0.0.1:%d" % port_from_argv(),

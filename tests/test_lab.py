@@ -8,8 +8,10 @@ real card's other users can move them; RAM and CPU are this machine's.
 import io
 import json
 import os
+import shutil
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -30,6 +32,17 @@ real_clean = lab.clean_machine
 CLEAN = {"ram_total": 32 * GiB, "ram_idle": 6 * GiB, "ram_how": "set",
          "vram_total": 16 * GiB, "vram_idle": 1 * GiB, "vram_how": "set"}
 lab.clean_machine = lambda binary: dict(CLEAN)
+real_hw_ram = lab.hw.ram
+
+
+def roomy():
+    """The machine's RAM, with room enough free: the fake needs none, and a
+    busy machine must not have every variant skipped for want of it."""
+    total, avail = real_hw_ram()
+    return total, max(avail or 0, 8 * GiB)
+
+
+lab.hw.ram = roomy
 
 # ------------------------------------------------------------- metrics --
 steady = [0.5 + i * 0.02 for i in range(200)]          # 50 t/s, 4 s long
@@ -356,6 +369,109 @@ check("VRAM that does not come back stops the run: the rest would not "
       "compare", ("did not return to its baseline" in err, code,
                   mdl.read_states()), (True, 1, {}))
 
+# ------------------------------------------------------------- stopping --
+import threading  # noqa: E402
+
+
+def lab_thread(*args):
+    """lab.main on a thread, as mdl ui runs it: (thread, out, got, stop)."""
+    stop, out, got = lab.Stop(), io.StringIO(), {}
+
+    def go():
+        try:
+            got["r"] = lab.main(list(args), out, stop=stop)
+        except BaseException as e:      # noqa: BLE001 - the test reads it
+            got["e"] = e
+    th = threading.Thread(target=go, daemon=True)
+    th.start()
+    return th, out, got, stop
+
+
+def lab_temps():
+    return {p.name for p in Path(tempfile.gettempdir()).glob("mdl-lab-*")}
+
+
+temps = lab_temps()
+real_stream, streaming = lab.stream, threading.Event()
+
+
+def watched(port, text, w, seed, on_token, **kw):
+    def tok(n):
+        streaming.set()
+        on_token(n)
+    return real_stream(port, text, w, seed, tok, **kw)
+
+
+lab.stream = watched
+try:
+    th, out, got, stop = lab_thread("run", "demo", "--set", "ctx=32k",
+                                    "--depth", "0", "--reps", "1", "--warmup",
+                                    "0", "--max-tokens", "20000", "--cooldown",
+                                    "0", "--interval", "0.5")
+    streaming.wait(60)                  # 20000 tokens is 80 s of stream
+    time.sleep(0.5)
+    t0 = time.monotonic()
+    stop.set()
+    th.join(60)
+    took = time.monotonic() - t0
+finally:
+    lab.stream = real_stream
+check("a stop ends a run mid-reply, without waiting out the reply",
+      (streaming.is_set(), th.is_alive(), took < 20, "e" in got,
+       "lab      stopped after 0 repetitions" in out.getvalue()),
+      (True, False, True, False, True))
+check("and takes its server down and its temp files with it",
+      (mdl.port_busy(port), lab_temps() - temps), (False, set()))
+check("what it returns is the run, for mdl lab report", got.get("r", "")
+      .startswith("run-"), True)
+
+os.environ["MDL_FAKE_MODE"], os.environ["MDL_FAKE_LOAD_S"] = "slow", "60"
+try:
+    th, out, got, stop = lab_thread("run", "demo", "--depth", "0", "--reps",
+                                    "1", "--warmup", "0", "--cooldown", "0")
+    state = None
+    for _ in range(300):
+        found = list(Path(tempfile.gettempdir()).glob(
+            "mdl-lab-*/state/mdl/run/demo.json"))
+        if found:
+            try:
+                state = json.loads(found[0].read_text(encoding="utf-8"))
+                break
+            except (OSError, ValueError):
+                pass
+        time.sleep(0.1)
+    t0 = time.monotonic()
+    stop.set()
+    th.join(60)
+    took = time.monotonic() - t0
+finally:
+    del os.environ["MDL_FAKE_MODE"], os.environ["MDL_FAKE_LOAD_S"]
+check("a stop during a load does not wait the load out",
+      (state is not None, th.is_alive(), took < 30,
+       "stopped after 0" in out.getvalue()), (True, False, True, True))
+check("and the server it was loading is not left behind",
+      (bool(state) and mdl.running(state), lab_temps() - temps),
+      (False, set()))
+
+real_stream = lab.stream
+
+
+def ctrl_c(*a, **kw):
+    raise KeyboardInterrupt
+
+
+lab.stream = ctrl_c
+try:
+    rid, out, err, code = lab_main("run", "demo", "--depth", "0", "--reps",
+                                   "1", "--warmup", "0", "--cooldown", "0")
+except KeyboardInterrupt:
+    code = "ctrl-c"
+finally:
+    lab.stream = real_stream
+check("Ctrl-C in a terminal run is still Ctrl-C, after the same clean stop",
+      (code, mdl.port_busy(port), lab_temps() - temps),
+      ("ctrl-c", False, set()))
+
 # ------------------------------------------------------------- baseline --
 _, out, err, code = lab_main("baseline", "diff")
 check("a diff with nothing pinned says how to pin one",
@@ -409,5 +525,7 @@ check("and over what the load log claimed when no card figure is there",
       lab.row("x", 0, [rec], 20)["per_gb"], 5.0)
 
 lab.clean_machine = real_clean
+lab.hw.ram = real_hw_ram
 teardown(root)
+shutil.rmtree(TMP, ignore_errors=True)
 sys.exit(t.done())

@@ -44,6 +44,7 @@ import os
 import random
 import re
 import shutil
+import socket
 import statistics
 import subprocess
 import sys
@@ -112,6 +113,51 @@ and server. Records: <state>/lab/records.jsonl.
 def die(msg):
     import mdl
     mdl.die(msg)
+
+
+class Cancelled(Exception):
+    """The run was stopped from outside - `b` again in mdl ui, or quitting
+    it. What was measured before is kept."""
+
+
+class Stop:
+    """A cancel for a run on another thread. Setting it also shuts the
+    socket a reply is streaming on, so a stop does not wait out a long
+    prefill or the rest of a reply; a load in progress is killed at its
+    next half-second poll."""
+
+    def __init__(self):
+        self._event = threading.Event()
+        self._lock = threading.Lock()
+        self._sock = None
+
+    def set(self):
+        self._event.set()
+        with self._lock:
+            sock = self._sock
+        if sock is not None:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+
+    def is_set(self):
+        return self._event.is_set()
+
+    def check(self):
+        if self._event.is_set():
+            raise Cancelled()
+
+    def sleep(self, seconds):
+        if self._event.wait(seconds):
+            raise Cancelled()
+
+    def watch(self, sock):
+        """The socket to shut. The socket, not its connection: a reply
+        over HTTP/1.0 takes the socket off the connection as it starts,
+        leaving `conn.sock` None while the reply still reads from it."""
+        with self._lock:
+            self._sock = sock
 
 
 def lab_dir():
@@ -513,7 +559,7 @@ def baseline(seconds=None, interval=1.0):
 
 # -------------------------------------------------------------- client --
 
-def stream(port, text, w, seed, on_token, timeout=900):
+def stream(port, text, w, seed, on_token, timeout=900, stop=None):
     """One streamed reply: (arrival times from the request, in seconds,
     one per chunk that carried text; the server's timings, or {})."""
     body = {"messages": [{"role": "user", "content": text}], "stream": True,
@@ -526,6 +572,10 @@ def stream(port, text, w, seed, on_token, timeout=900):
     arrivals, timings = [], {}
     try:
         t0 = time.perf_counter()
+        conn.connect()
+        if stop is not None:
+            stop.watch(conn.sock)
+            stop.check()        # set before the socket was there to shut
         conn.request("POST", "/v1/chat/completions", json.dumps(body),
                      {"Content-Type": "application/json"})
         resp = conn.getresponse()
@@ -551,8 +601,17 @@ def stream(port, text, w, seed, on_token, timeout=900):
                 on_token(len(arrivals))
             if isinstance(chunk.get("timings"), dict):
                 timings = chunk["timings"]
+    except (OSError, http.client.HTTPException):
+        # a socket shut by a stop is the stop, not a failed request
+        if stop is not None:
+            stop.check()
+        raise
     finally:
+        if stop is not None:
+            stop.watch(None)
         conn.close()
+    if stop is not None:
+        stop.check()
     return arrivals, timings
 
 
@@ -763,12 +822,33 @@ class Env:
                               text=True, errors="replace", timeout=timeout,
                               creationflags=hw.NO_WINDOW)
 
-    def start(self):
+    def start(self, stop=None):
+        """`mdl run` in the variant's own dirs, polled so a stop - or a
+        Ctrl-C, which a windowless child on Windows never sees - does not
+        wait out a load. What it started is `stop`'s to take down."""
         import mdl
-        p = self.mdl("run", self.variant.base,
-                     timeout=mdl.ready_timeout() + 120)
-        if p.returncode != 0:
-            why = (p.stderr.strip().splitlines() or ["exit %d" % p.returncode])
+        proc = subprocess.Popen(
+            [sys.executable, str(Path(mdl.__file__)), "run",
+             self.variant.base], env=self.env, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True, errors="replace",
+            creationflags=hw.NO_WINDOW)
+        deadline = time.monotonic() + mdl.ready_timeout() + 120
+        try:
+            while True:
+                try:
+                    _, err = proc.communicate(timeout=0.5)
+                    break
+                except subprocess.TimeoutExpired:
+                    if stop is not None:
+                        stop.check()
+                    if time.monotonic() > deadline:
+                        raise RuntimeError("not ready in time") from None
+        except BaseException:
+            proc.kill()
+            proc.communicate()
+            raise
+        if proc.returncode != 0:
+            why = (err.strip().splitlines() or ["exit %d" % proc.returncode])
             raise RuntimeError(why[-1].removeprefix("mdl: "))
         return json.loads((self.state / "run" / (
             self.variant.base + ".json")).read_text(encoding="utf-8"))
@@ -876,7 +956,7 @@ def clean_machine(binary):
             "vram_idle": idle.vram, "vram_how": idle.vram_how}
 
 
-def run(variants, w, out, suite=None):
+def run(variants, w, out, suite=None, stop=None):
     import mdl
     wr = out.write
     models, binary = mdl.load_config()
@@ -903,10 +983,36 @@ def run(variants, w, out, suite=None):
         ",".join(_k(d) for d in w["depths"]), w["reps"],
         "" if w["reps"] == 1 else "s", w["warmup"]))
     out.flush()
+    stop = stop or Stop()
+    done = skipped = 0
+    try:
+        done, skipped = _run_all(run_id, suite, variants, models, binary, top,
+                                 w, out, clean, progress, per, stop)
+    except (Cancelled, KeyboardInterrupt) as e:
+        done = sum(1 for r in load() if r.get("run") == run_id
+                   and not r.get("warmup") and not r.get("skipped"))
+        wr("\nlab      %s after %d repetition%s; what was measured is kept; "
+           "mdl lab report %s\n" % (
+               "stopped" if isinstance(e, Cancelled) else "interrupted",
+               done, "" if done == 1 else "s", run_id))
+        out.flush()
+        if isinstance(e, KeyboardInterrupt):
+            raise
+        return run_id
+    wr("\nlab      %d repetitions recorded, %d variant%s skipped; "
+       "mdl lab report %s\n" % (done, skipped, "" if skipped == 1 else "s",
+                                run_id))
+    return run_id
+
+
+def _run_all(run_id, suite, variants, models, binary, top, w, out, clean,
+             progress, per, stop):
+    wr = out.write
     done = skipped = 0
     for vi, v in enumerate(variants):
+        stop.check()
         if vi:
-            time.sleep(w["cooldown"])
+            stop.sleep(w["cooldown"])
         cfg = v.config(models)
         need = host_needed(v, cfg, binary)
         _, avail = hw.ram()
@@ -918,17 +1024,14 @@ def run(variants, w, out, suite=None):
             progress["n"] = (vi + 1) * per
             continue
         got = run_variant(run_id, suite, v, models, binary, top, w, out,
-                          clean, progress)
+                          clean, progress, stop)
         # a variant or depth skipped counts as done, so what is left is
         # what will actually run
         progress["n"] = (vi + 1) * per
         done += got
         if got == 0:
             skipped += 1
-    wr("\nlab      %d repetitions recorded, %d variant%s skipped; "
-       "mdl lab report %s\n" % (done, skipped, "" if skipped == 1 else "s",
-                                run_id))
-    return run_id
+    return done, skipped
 
 
 def _k(n):
@@ -960,19 +1063,21 @@ def _work_record(w, depth, tokens=None, ctx=None):
 
 
 def run_variant(run_id, suite, v, models, binary, top, w, out, clean=None,
-                progress=None):
+                progress=None, stop=None):
     """Start, measure every depth and repetition, stop. The number of
     repetitions recorded (0 if the variant could not run)."""
     from . import evalrun
     wr = out.write
+    stop = stop or Stop()
     env = Env(v, models, binary, top)
     base = baseline()
+    stop.check()
     sampler, recorded, stopped = None, 0, False
     try:
         wr("\n%s\n" % v.label)
         out.flush()
         try:
-            state = env.start()
+            state = env.start(stop)
         except (RuntimeError, OSError, subprocess.SubprocessError,
                 ValueError) as e:
             wr("  failed to start: %s\n" % e)
@@ -1011,6 +1116,7 @@ def run_variant(run_id, suite, v, models, binary, top, w, out, clean=None,
                    "%s of %s\n" % (spec, _kt(used), _kt(
                        used + w["max_tokens"]), _kt(ctx)))
             for rep in range(w["warmup"] + w["reps"]):
+                stop.check()
                 warm = rep < w["warmup"]
                 seed = w["seed"] + max(0, rep - w["warmup"])
                 first = len(sampler.samples)
@@ -1023,7 +1129,8 @@ def run_variant(run_id, suite, v, models, binary, top, w, out, clean=None,
                     if first_tok or n == at:
                         s.poke()        # decode's start, and the @N token
                 try:
-                    arrivals, timings = stream(port, text, w, seed, on_token)
+                    arrivals, timings = stream(port, text, w, seed, on_token,
+                                               stop=stop)
                 except (OSError, http.client.HTTPException) as e:
                     wr("  depth %s rep %d: the request failed: %s\n"
                        % (_k(spec), rep + 1, e))
@@ -1075,8 +1182,9 @@ def run_variant(run_id, suite, v, models, binary, top, w, out, clean=None,
                     "the card, so the rest would not be comparable"
                     % (v.label, _gb(gpu_now()[0]), _gb(base["vram"])))
         return recorded
-    except KeyboardInterrupt:
-        wr("\ninterrupted; what was measured is kept\n")
+    except (KeyboardInterrupt, Cancelled):
+        wr("\n  stopping %s\n" % v.label)
+        out.flush()
         raise
     finally:
         if sampler:
@@ -1594,7 +1702,8 @@ def baseline_cmd(o, out):
 
 # ---------------------------------------------------------------- main --
 
-def main(args, out=None):
+def main(args, out=None, stop=None):
+    """`stop`, a Stop, lets another thread end a run: mdl ui's `b`."""
     out = out or sys.stdout
     if not args or args[0] in ("-h", "--help"):
         out.write(USAGE)
@@ -1619,7 +1728,7 @@ def main(args, out=None):
         w = workload(o)
         if o.get("dry_run"):
             return dry_run(variants, w, out)
-        return run(variants, w, out, o.get("suite"))
+        return run(variants, w, out, o.get("suite"), stop)
     if sub == "report":
         return report(o, out)
     if sub == "compare":

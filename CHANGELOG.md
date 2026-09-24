@@ -2,6 +2,26 @@
 
 Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- `b` in `mdl ui`, pressed while a measurement runs, stops it at once -
+  mid-reply or mid-load, without waiting out a full context's prefill.
+  Its server is stopped, its temp files removed, and what it measured is
+  kept.
+
+### Fixed
+
+- Quitting `mdl ui` during a `b` measurement closed the dashboard but
+  left the process waiting out the whole run behind it, looking hung;
+  a second Ctrl-C there could leave the lab's server running where
+  `mdl ps` cannot see it. Quitting stops the measurement first, and says
+  so.
+- `mdl lab run` stopped with Ctrl-C says how many repetitions it kept and
+  names the run for `mdl lab report`. A load in progress is stopped too:
+  on Windows the lab's `mdl run` has no console to be sent Ctrl-C.
+
 ## [0.10.0] - 2026-09-24
 
 `mdl lab` measures a full context as well as an empty one, compares

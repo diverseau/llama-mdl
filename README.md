@@ -644,7 +644,10 @@ and `timings_disagree` when the server's rate and the stream's differ.
 
 `b` in the dashboard measures the selected config the same way, with one
 repetition, empty and full; the log pane follows the run request by
-request, with what is left. The design, and what is left of it, is in
+request, with what is left. `b` again stops it - at once, mid-reply or
+mid-load - as does quitting; Ctrl-C does the same to `mdl lab run`. Its
+server is stopped, its temp files removed, and what it measured is kept.
+The design, and what is left of it, is in
 [docs/mdl-lab.md](docs/mdl-lab.md).
 
 ## The UI
@@ -668,7 +671,7 @@ sparkline, busy slots, and a colour-coded log tail.
  e            edit ngl / ctx / kv_type / port, saved to models.toml
  c            copy the llama-server command
  p            prompt the running model without leaving the UI
- b            measure the selected config with mdl lab, and record it
+ b            measure the selected config with mdl lab; b again stops it
  l            focus the log, / filters it
  g            reload the config
  ?            help
