@@ -82,9 +82,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         if req.get("ignore_eos"):              # run to max_tokens, as lab asks
             n = int(req.get("max_tokens") or 16)
+            # a rate no stream here comes near, however slow the runner:
+            # 42.5 is what a macOS CI runner's stretched sleeps can land
+            # on, and then lab has no disagreement to flag
             self._stream([{"content": "w "} for _ in range(n)], 0.004,
                          {"prompt_n": len(json.dumps(req["messages"])) // 4,
-                          "prompt_per_second": 900.0})
+                          "prompt_per_second": 900.0,
+                          "predicted_per_second": 10000.0})
             return
         pause = 0.02
         if MODE == "slowchat":
@@ -106,8 +110,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         for i, delta in enumerate(deltas):
             chunk = {"choices": [{"delta": delta}]}
             if i == len(deltas) - 1:
-                chunk["timings"] = dict(timings or {},
-                                        predicted_per_second=42.5)
+                chunk["timings"] = dict({"predicted_per_second": 42.5},
+                                        **(timings or {}))
             try:
                 self.wfile.write(b"data: " + json.dumps(chunk).encode()
                                  + b"\n\n")
