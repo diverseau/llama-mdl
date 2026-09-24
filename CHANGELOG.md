@@ -2,7 +2,12 @@
 
 Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
 
-## [Unreleased]
+## [0.10.0] - 2026-09-24
+
+`mdl lab` measures a full context as well as an empty one, compares
+depth by depth, and says what a config leaves free on the machine at
+idle, whether a model was still getting up to speed, and how far along
+a run is - in the dashboard's log pane too.
 
 ### Added
 
