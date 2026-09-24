@@ -659,6 +659,8 @@ async def main():
     lab.BASELINE_S = 0.2
     real_gpu = lab.gpu_now
     lab.gpu_now = lambda: (None, None, None, None)     # no card's noise here
+    real_clean = lab.clean_machine
+    lab.clean_machine = lambda binary: None
     root, port = sandbox()
     app = MdlApp(fx="off")
     said = []
@@ -685,8 +687,20 @@ async def main():
                   (mdl.read_states(), app.is_running), ({}, True))
             check("and it is recorded with the other lab runs",
                   len([r for r in lab.load() if not r.get("warmup")]), 2)
+            log = app.query_one("#log")
+            for _ in range(50):
+                if "[4/4]" in log.as_text():
+                    break
+                await pilot.pause(0.1)
+            check("the log pane follows the lab as it runs, request by "
+                  "request", ("lab      run-" in log.as_text(),
+                              "[1/4, ~" in log.as_text(),
+                              "[4/4] depth 100%" in log.as_text(),
+                              "mdl lab" in str(log.border_title)),
+                  (True, True, True, True))
     finally:
         lab.gpu_now = real_gpu
+        lab.clean_machine = real_clean
         teardown(root)
 
     # --- the placement pane, per build --------------------------------------

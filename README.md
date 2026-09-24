@@ -626,8 +626,25 @@ VRAM, GPU load, clocks and temperature come from `nvidia-smi` - a whole
 card's figure, not one process's, which Windows does not keep. Without
 `nvidia-smi` the VRAM column is what the server's load log claims,
 marked `(log)`. "t/s per G" is decode speed over the VRAM the model
-itself took - what earns a place on a small card. `b` in the dashboard measures the selected config the
-same way, with one repetition. The design, and what is left of it, is in
+itself took - what earns a place on a small card.
+
+RAM is the machine's rise over its level before the load, which is what
+a model with its experts in RAM (`n_cpu_moe`) really costs; RSS is the
+server's own. "RAM free idle" and "VRAM free idle" are what a config
+leaves on the machine as you sit down to it: its total, less what the
+OS and the programs that start with it hold - measured the way `mdl fit`
+plans for the idle machine, not counting the browser and the rest you
+opened since - less what the model took. Below zero, it does not fit.
+
+The flags column says what to distrust: `warming_up` or `slowing` when
+the last third of a reply ran more than 10% off its first,
+`rep_drift` when each repetition was faster than the last (the warmup
+was not enough), `clock_drop` when the card throttled, `high_variance`,
+and `timings_disagree` when the server's rate and the stream's differ.
+
+`b` in the dashboard measures the selected config the same way, with one
+repetition, empty and full; the log pane follows the run request by
+request, with what is left. The design, and what is left of it, is in
 [docs/mdl-lab.md](docs/mdl-lab.md).
 
 ## The UI

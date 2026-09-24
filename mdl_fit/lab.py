@@ -63,6 +63,8 @@ WINDOW = 1.0                    # seconds: the sliding window a rate is over
 SKIP = 0.02                     # share of tokens left out of floor and peak
 BASELINE_S = 3.0                # seconds of idle sampled before a variant
 DEPTHS = [0, "100%"]            # empty, and full: where configs part ways
+TREND = 0.10                    # the last third of a reply against the first
+DRIFT = 0.05                    # rep over rep, first to last
 # tokens left free at the top of a "full" context for the chat template's
 # wrapping, which /tokenize does not count: a choice, with room to spare
 TEMPLATE_SLACK = 64
@@ -590,6 +592,13 @@ def _r(x, n=2):
     return round(x, n) if isinstance(x, (int, float)) else None
 
 
+def _rate(seg):
+    """Tokens per second across a run of arrivals."""
+    if len(seg) < 2 or seg[-1] <= seg[0]:
+        return None
+    return (len(seg) - 1) / (seg[-1] - seg[0])
+
+
 def rep_metrics(arrivals, timings, samples, at, base):
     """What one repetition did, from its token arrivals, the server's own
     timings, and the samples taken while it ran."""
@@ -621,6 +630,19 @@ def rep_metrics(arrivals, timings, samples, at, base):
     if rates and len(rates) > 1 and m["decode"]["cv"] and \
             m["decode"]["cv"] > 0.15:
         flags.append("high_variance")
+    # a model that gathers speed as it goes: the last third of the reply
+    # against the first, the first tokens left out as the floor's are
+    k = int(n * SKIP)
+    if n - k >= 30:
+        third = (n - k) // 3
+        ra = _rate(arrivals[k:k + third])
+        rb = _rate(arrivals[n - third:])
+        if ra and rb:
+            m["decode"]["trend"] = _r(rb / ra - 1, 3)
+            if rb / ra - 1 > TREND:
+                flags.append("warming_up")
+            elif rb / ra - 1 < -TREND:
+                flags.append("slowing")
     dec = [s for s in samples if s["phase"] == "decode"]
     vram = [s["vram"] for s in dec if s["vram"] is not None]
     rss = [s["rss"] for s in dec if s["rss"] is not None]
@@ -641,8 +663,11 @@ def rep_metrics(arrivals, timings, samples, at, base):
     m["gpu"] = {"util_mean": _r(statistics.mean(util), 1) if util else None,
                 "temp_peak": max(temp) if temp else None,
                 "clock_min": min(clocks) if clocks else None}
-    if clocks and min(clocks) < 0.85 * statistics.median(clocks):
-        # a card that throttled is a slow run, not a slow config
+    top = clocks.index(max(clocks)) if clocks else 0
+    if clocks and min(clocks[top:]) < 0.85 * clocks[top]:
+        # a card that throttled is a slow run, not a slow config. Only a
+        # fall from its peak: the first decode sample can catch the clock
+        # still climbing out of idle, and that is not a throttle
         flags.append("clock_drop")
     m["at"] = {str(at): snapshot_at(samples, at)}
     return m, flags
@@ -834,6 +859,23 @@ def host_needed(variant, cfg, binary):
         return None
 
 
+def clean_machine(binary):
+    """What the machine holds at idle - the OS and what starts with it,
+    not the browser and the rest opened since boot - as mdl fit plans
+    for it, so a report can say what a config leaves free on a machine
+    you sat down to. None when it cannot be told."""
+    try:
+        mach = hw.probe(binary, quick=True)
+    except Exception:       # noqa: BLE001 - a report column, not a stop
+        return None
+    idle = mach.idle
+    if idle is None:
+        return None
+    return {"ram_total": mach.ram_total or None, "ram_idle": idle.ram,
+            "ram_how": idle.ram_how, "vram_total": mach.vram_total or None,
+            "vram_idle": idle.vram, "vram_how": idle.vram_how}
+
+
 def run(variants, w, out, suite=None):
     import mdl
     wr = out.write
@@ -852,6 +894,10 @@ def run(variants, w, out, suite=None):
                 "- stop it, then run again" % (port, " by '%s'" % owner
                                                if owner else ""))
     run_id = new_id("run-")
+    clean = clean_machine(binary)
+    per = len(w["depths"]) * (w["warmup"] + w["reps"])
+    progress = {"n": 0, "of": len(variants) * per,
+                "t0": time.monotonic()}
     wr("lab      %s: %d variant%s x depth %s x %d rep%s (+%d warmup)\n" % (
         run_id, len(variants), "" if len(variants) == 1 else "s",
         ",".join(_k(d) for d in w["depths"]), w["reps"],
@@ -869,8 +915,13 @@ def run(variants, w, out, suite=None):
                 v.label, (need + RAM_SPARE) / GiB, avail / GiB))
             append(_skip_record(run_id, suite, v, cfg, w, "insufficient RAM"))
             skipped += 1
+            progress["n"] = (vi + 1) * per
             continue
-        got = run_variant(run_id, suite, v, models, binary, top, w, out)
+        got = run_variant(run_id, suite, v, models, binary, top, w, out,
+                          clean, progress)
+        # a variant or depth skipped counts as done, so what is left is
+        # what will actually run
+        progress["n"] = (vi + 1) * per
         done += got
         if got == 0:
             skipped += 1
@@ -908,7 +959,8 @@ def _work_record(w, depth, tokens=None, ctx=None):
         "depth": depth, "prompt_tokens": tokens, "ctx": ctx}
 
 
-def run_variant(run_id, suite, v, models, binary, top, w, out):
+def run_variant(run_id, suite, v, models, binary, top, w, out, clean=None,
+                progress=None):
     """Start, measure every depth and repetition, stop. The number of
     repetitions recorded (0 if the variant could not run)."""
     from . import evalrun
@@ -991,16 +1043,19 @@ def run_variant(run_id, suite, v, models, binary, top, w, out):
                        "rep": rep,
                        "warmup": warm, "metrics": m, "flags": flags,
                        "vram_claimed": claimed_vram(log),
-                       "baseline": base,
+                       "baseline": base, "clean": clean,
                        "env": {"ram_free": hw.ram()[1],
                                "os": sys.platform}}
                 append(rec, taken)
                 recorded += 0 if warm else 1
-                wr("  depth %-5s %s  %4d tok  %6s t/s  ttft %5ss  VRAM %s\n" % (
-                    _k(spec), "warmup  " if warm else "rep %d/%d" % (
-                        rep - w["warmup"] + 1, w["reps"]),
-                    m.get("tokens", 0), _fmt(m["decode"]["avg"], 1),
-                    _fmt(m.get("ttft"), 2), _gb(m["vram"]["peak"])))
+                wr("  %sdepth %-5s %s  %4d tok  %6s t/s  ttft %5ss  VRAM %s  "
+                   "RAM %s  CPU %s%%\n" % (
+                       _progress(progress), _k(spec),
+                       "warmup  " if warm else "rep %d/%d" % (
+                           rep - w["warmup"] + 1, w["reps"]),
+                       m.get("tokens", 0), _fmt(m["decode"]["avg"], 1),
+                       _fmt(m.get("ttft"), 2), _gb(m["vram"]["peak"]),
+                       _ram(m), _fmt(m["cpu"]["mean"], 0)))
                 out.flush()
         sampler.phase = "settle"
         env.stop()
@@ -1029,6 +1084,27 @@ def run_variant(run_id, suite, v, models, binary, top, w, out):
         if not stopped:
             env.stop()
         env.remove()
+
+
+def _progress(p):
+    """[3/8, ~2 min left]: requests done, and the rest at the pace so far."""
+    if not p:
+        return ""
+    p["n"] += 1
+    spent = time.monotonic() - p["t0"]
+    left = spent / p["n"] * (p["of"] - p["n"])
+    return "[%d/%d%s] " % (p["n"], p["of"], ", ~%s left" % (
+        "%d min" % round(left / 60) if left >= 90 else "%d s" % left)
+        if p["n"] < p["of"] else "")
+
+
+def _ram(m):
+    """The machine's RAM above its level before the load - what a model
+    with experts in RAM costs - else the server's resident size."""
+    ram = m.get("ram") or {}
+    if ram.get("delta") is not None:
+        return "+" + _gb(ram["delta"])
+    return _gb(ram.get("peak_rss"))
 
 
 def _fmt(x, n):
@@ -1149,6 +1225,17 @@ def _med(recs, *path):
                                      if len(vals) > 1 else 0.0)
 
 
+def _idle_free(recs, what, cost):
+    """What this config leaves free on the machine at idle: its total,
+    less what the OS and startup programs hold, less what the model took.
+    Below zero, it does not fit a machine you sat down to."""
+    c = recs[0].get("clean") or {}
+    total, idle = c.get(what + "_total"), c.get(what + "_idle")
+    if not total or idle is None or not cost:
+        return None
+    return total - idle - cost
+
+
 def row(label, depth, recs, at):
     dec, sd = _med(recs, "decode", "avg")
     # the efficiency column: throughput for each GB the model itself took,
@@ -1157,6 +1244,9 @@ def row(label, depth, recs, at):
     vram = _med(recs, "vram", "delta")[0]
     if not vram or vram <= 0:
         vram = recs[0].get("vram_claimed")
+    ram_cost = _med(recs, "ram", "delta")[0]
+    if ram_cost is None or ram_cost <= 0:
+        ram_cost = _med(recs, "ram", "peak_rss")[0]
     at_vals = []
     for r in recs:
         snap = (r["metrics"].get("at") or {}).get(str(at))
@@ -1166,7 +1256,15 @@ def row(label, depth, recs, at):
     at_vram = [s["vram"] for s in at_vals if s.get("vram") is not None]
     at_rss = [s["rss"] for s in at_vals if s.get("rss") is not None]
     b = recs[0].get("build") or {}
-    flags = sorted({f for r in recs for f in r.get("flags", [])})
+    flags = {f for r in recs for f in r.get("flags", [])}
+    avgs = [x for x in _vals(recs, ("decode", "avg")) if x]
+    if len(avgs) >= 3 and all(avgs[i + 1] > avgs[i]
+                                  for i in range(len(avgs) - 1)) \
+            and avgs[-1] / avgs[0] - 1 > DRIFT:
+        # each repetition faster than the last: the warmup was not enough,
+        # and the median is of a model still getting up to speed
+        flags.add("rep_drift")
+    flags = sorted(flags)
     toks = [(r.get("workload") or {}).get("prompt_tokens") for r in recs]
     toks = [t for t in toks if t]
     return {"variant": label, "depth": depth, "reps": len(recs),
@@ -1184,6 +1282,8 @@ def row(label, depth, recs, at):
             "cpu": _med(recs, "cpu", "mean")[0],
             "to_1k": _med(recs, "time_to_1k")[0],
             "per_gb": (dec / (vram / GiB)) if dec and vram else None,
+            "ram_idle_free": _idle_free(recs, "ram", ram_cost),
+            "vram_idle_free": _idle_free(recs, "vram", vram),
             "at_vram": statistics.median(at_vram) if at_vram else None,
             "at_rss": statistics.median(at_rss) if at_rss else None,
             "flags": flags}
@@ -1195,6 +1295,8 @@ COLUMNS = [("variant", "variant"), ("build", "build"), ("depth", "depth"),
            ("VRAM peak", "vram_peak"), ("VRAM +", "vram_delta"),
            ("RSS", "rss_peak"), ("CPU %", "cpu"), ("to 1k s", "to_1k"),
            ("t/s per G", "per_gb"),
+           ("RAM free idle", "ram_idle_free"),
+           ("VRAM free idle", "vram_idle_free"),
            ("@N VRAM", "at_vram"), ("@N RSS", "at_rss"), ("flags", "flags")]
 
 
@@ -1206,7 +1308,8 @@ def cell(key, r):
         if isinstance(v, str) and r.get("prompt_tokens"):
             return "%s (%s)" % (v, _kt(r["prompt_tokens"]))
         return _k(v) if v is not None else "-"
-    if key in ("vram_peak", "vram_delta", "rss_peak", "at_vram", "at_rss"):
+    if key in ("vram_peak", "vram_delta", "rss_peak", "at_vram", "at_rss",
+               "ram_idle_free", "vram_idle_free"):
         if v is None and key == "vram_peak" and r.get("vram_claimed"):
             return "%s (log)" % _gb(r["vram_claimed"])
         return _gb(v)

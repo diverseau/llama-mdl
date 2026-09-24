@@ -395,7 +395,16 @@ regression mode (a decode, TTFT or VRAM change the spread cannot explain
 is the exit code); `tok_per_gb` as the report's "t/s per G", over the
 VRAM the model took (its rise over the idle card, else the load log's
 claim) rather than the card's peak, which counts the desktop too; and
-`b` in the dashboard for one measured repetition of the selected config.
+`b` in the dashboard for one measured repetition of the selected config,
+its lines in the log pane as they come with a count of what is left.
+Since: RAM and CPU on every line beside VRAM; "RAM free idle" and "VRAM
+free idle", against the idle machine `mdl fit` plans for (`usage`'s
+baseline: set, seen at boot, or measured less the apps opened since);
+and `warming_up`/`slowing` (the last third of a reply against its
+first) and `rep_drift` (each repetition faster than the last) - read
+from the token arrivals already kept, rather than from a few spaced
+samples averaged, which would need replies several times longer and
+would hide the ramp they were meant to find.
 
 **Not built yet:** the dashboard's live meters pane, its `B` suite
 picker, and inline compare in the dashboard.

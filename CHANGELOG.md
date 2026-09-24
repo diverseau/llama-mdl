@@ -4,6 +4,21 @@ Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `mdl lab` says what a config leaves free on the machine at idle ("RAM
+  free idle", "VRAM free idle"): the total, less what the OS and the
+  programs that start with it hold - as `mdl fit` plans for it, without
+  the browser and the rest opened since boot - less what the model took.
+- `mdl lab` flags a reply that gathers or loses speed as it goes
+  (`warming_up`, `slowing`: its last third more than 10% off its first)
+  and repetitions each faster than the last (`rep_drift`: the warmup was
+  not enough).
+- Each line of `mdl lab run` shows RAM and CPU beside VRAM, and where the
+  run is: `[3/8, ~2 min left]`.
+- `b` in `mdl ui` shows the lab's lines in the log pane as it runs; it
+  showed nothing until the end.
+
 ### Changed
 
 - `mdl lab` measures each variant with its context full as well as
@@ -15,6 +30,9 @@ Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
 
 ### Fixed
 
+- `mdl lab` flagged `clock_drop` on runs that did not throttle: the
+  sample taken as decode starts can catch the card's clock still
+  climbing out of idle. Only a fall from the clock's peak is flagged.
 - `mdl lab compare` pooled every depth a variant ran at into one figure,
   so an empty-context run and a deep one were averaged together and the
   spread called any two configs indistinguishable. It compares depth by

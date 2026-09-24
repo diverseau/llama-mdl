@@ -1535,9 +1535,10 @@ class MdlApp(App):
             dash.update_all(state, self._tele["metrics"], self._tele["slots"],
                             self._tele["gpu"], list(self.tok_history),
                             self._metrics_ok, self._health_ok, self.tok_peak)
-            if self._log_path != Path(state["log"]):
-                self._log_path, self._log_pos = Path(state["log"]), 0
-                self.query_one("#log", CopyableLog).clear()
+            # a measurement in progress keeps the pane on its own lines
+            if self._log_path != Path(state["log"]) and not getattr(
+                    self, "_benching", None):
+                self._follow(state["log"], "log")
         else:
             dash.display = False
             params.display = True
@@ -1669,25 +1670,47 @@ class MdlApp(App):
         self.status_line = "measuring %s with mdl lab..." % name
         self._do_bench(name)
 
+    def _follow(self, path, title):
+        """Point the log pane at a file of our own, from its start."""
+        self._log_path, self._log_pos = Path(path), 0
+        log = self.query_one("#log", CopyableLog)
+        log.clear()
+        log.border_title = title
+
     @work(thread=True, group="lab")
     def _do_bench(self, name):
         import io
 
         from mdl_fit import lab
+
+        # the lab's own lines, in the log pane as they come: which depth,
+        # which repetition, how many are left
+        logs = lab.lab_dir() / "logs"
         try:
-            run_id = lab.main(["run", name, "--reps", "1", "--warmup", "1",
-                               "--cooldown", "0"], io.StringIO())
+            logs.mkdir(parents=True, exist_ok=True)
+            for old in sorted(logs.glob("b-*.log"))[:-9]:
+                old.unlink(missing_ok=True)     # the last ten are enough
+        except OSError:
+            pass
+        path = logs / ("b-%s.log" % time.strftime("%Y%m%d-%H%M%S"))
+        try:
+            with open(path, "w", encoding="utf-8", buffering=1) as fh:
+                self.call_from_thread(self._follow, path,
+                                      "log · mdl lab " + name)
+                run_id = lab.main(["run", name, "--reps", "1", "--warmup",
+                                   "1", "--cooldown", "0"], fh)
             rows = lab.report({"names": [run_id], "format": "json"},
                               io.StringIO())
             if rows:
                 # a row per depth: empty, and the context full
-                msg = "%s: %s; VRAM %s. mdl lab report %s" % (
+                msg = "%s: %s; VRAM %s, RAM %s. mdl lab report %s" % (
                     name, "; ".join(
                         "%s t/s at depth %s, first token %ss" % (
                             lab.cell("decode", r).split(" ")[0],
                             lab.cell("depth", r), lab.cell("ttft", r))
                         for r in rows),
-                    lab.cell("vram_peak", rows[-1]), run_id)
+                    lab.cell("vram_peak", rows[-1]),
+                    lab.cell("rss_peak", rows[-1]), run_id)
                 self.call_from_thread(self.notify, msg, timeout=30)
             else:
                 skipped = [x.get("skipped") for x in lab.load()

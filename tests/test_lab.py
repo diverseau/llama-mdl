@@ -26,6 +26,10 @@ GiB, MiB = lab.GiB, lab.MiB
 lab.BASELINE_S = 0.2
 VRAM = {"used": 1 * GiB}
 lab.gpu_now = lambda: (VRAM["used"], 50.0, 60.0, 1800.0)
+real_clean = lab.clean_machine
+CLEAN = {"ram_total": 32 * GiB, "ram_idle": 6 * GiB, "ram_how": "set",
+         "vram_total": 16 * GiB, "vram_idle": 1 * GiB, "vram_how": "set"}
+lab.clean_machine = lambda binary: dict(CLEAN)
 
 # ------------------------------------------------------------- metrics --
 steady = [0.5 + i * 0.02 for i in range(200)]          # 50 t/s, 4 s long
@@ -61,6 +65,48 @@ check("VRAM and RAM against the baseline, over decode only",
       ({"peak": 9, "steady": 8, "delta": 5}, 3))
 check("a clock that dropped is flagged: a throttled run, not a slow config",
       "clock_drop" in flags, True)
+slow_start = [0.5 + i * 0.04 for i in range(60)]          # 25 t/s
+slow_start += [slow_start[-1] + (i + 1) * 0.02 for i in range(120)]  # to 50
+m, flags = lab.rep_metrics(slow_start, {}, [], 500, {"vram": None,
+                                                     "ram": None})
+check("a reply that gathers speed as it goes is flagged, with its trend",
+      ("warming_up" in flags, m["decode"]["trend"] > 0.5), (True, True))
+m, flags = lab.rep_metrics(list(reversed([2 * slow_start[-1] - t
+                                          for t in slow_start])), {}, [],
+                           500, {"vram": None, "ram": None})
+check("and one that loses it", ("slowing" in flags, "warming_up" in flags),
+      (True, False))
+m, flags = lab.rep_metrics(steady, {}, [], 500, {"vram": None, "ram": None})
+check("a steady one is neither", (flags, abs(m["decode"]["trend"]) < 0.02),
+      ([], True))
+
+
+def reps(*decode):
+    return [{"metrics": {"decode": {"avg": d}, "at": {"20": {}}},
+             "build": {}, "flags": [],
+             "workload": {}} for d in decode]
+
+
+check("each repetition faster than the last: the warmup was not enough",
+      ("rep_drift" in lab.row("x", 0, reps(40, 44, 48), 20)["flags"],
+       "rep_drift" in lab.row("x", 0, reps(40, 41, 40.5), 20)["flags"],
+       "rep_drift" in lab.row("x", 0, reps(40, 40.5, 41), 20)["flags"]),
+      (True, False, False))
+recs = [{"clean": dict(CLEAN)}]
+check("what a config leaves free at idle: total, less the OS, less it",
+      (lab._idle_free(recs, "ram", 4 * GiB), lab._idle_free(recs, "vram",
+                                                            None),
+       lab._idle_free([{}], "ram", 4 * GiB)), (22 * GiB, None, None))
+got = real_clean(sys.executable)
+check("the machine at idle is read as mdl fit reads it, or not at all",
+      got is None or {"ram_total", "ram_idle", "vram_idle"} <= set(got), True)
+
+ramp = [dict(x, clock=c) for x, c in zip(samples, (600, 877, 1942),
+                                          strict=True)]
+_, flags = lab.rep_metrics(steady, {}, ramp, 500, {"vram": 4, "ram": 1})
+check("a clock still climbing out of idle is not a throttle",
+      "clock_drop" in flags, False)
+
 check("two spreads that overlap are indistinguishable",
       lab.verdict([40, 42, 41], [41, 43, 40], "a", "b", max),
       "indistinguishable")
@@ -152,6 +198,11 @@ check("the samples behind it are kept, tagged by phase and token",
       {s["phase"] for s in lab.samples_of(rec)} <= {"ready", "prefill",
                                                      "decode", "idle"}
       and any(s["phase"] == "decode" for s in lab.samples_of(rec)), True)
+check("every line says where the run is, and its RAM and CPU beside VRAM",
+      ("[1/6, ~" in out, "[6/6] " in out, "  RAM " in out,
+       "  CPU " in out), (True, True, True, True))
+check("the machine at idle is kept with each record",
+      rec.get("clean"), CLEAN)
 check("the fake's own rate disagrees with its stream, and that is flagged",
       "timings_disagree" in rec["flags"], True)
 check("models.toml is untouched, and no server of the run is left",
@@ -166,6 +217,9 @@ check("the report has a row per variant, medians and spread",
       (code, [r["variant"] for r in rows], "decode t/s" in out,
        all(r["reps"] == 2 for r in rows), "±" in out),
       (0, ["demo/ctx4096", "demo/ctx8192"], True, True, True))
+check("and what each leaves free on the machine at idle",
+      ("RAM free idle" in out, all(
+          0 < r["ram_idle_free"] <= 26 * GiB for r in rows)), (True, True))
 check("with the usage at the token asked for",
       ("@20 VRAM" in out, rows[0]["at_vram"]), (True, 1 * GiB))
 _, md, _, _ = lab_main("report", run_id, "--format", "md")
@@ -354,5 +408,6 @@ rec["vram_claimed"] = 8 * GiB
 check("and over what the load log claimed when no card figure is there",
       lab.row("x", 0, [rec], 20)["per_gb"], 5.0)
 
+lab.clean_machine = real_clean
 teardown(root)
 sys.exit(t.done())
