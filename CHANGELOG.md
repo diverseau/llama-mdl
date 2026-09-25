@@ -2,7 +2,11 @@
 
 Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
 
-## [Unreleased]
+## [0.11.0] - 2026-09-25
+
+mdl updates itself: `mdl update` upgrades through whatever installed
+it, and the dashboard offers a newer release once a day and restarts
+onto it. Updating from 0.10.0 is by hand, one last time.
 
 ### Added
 
