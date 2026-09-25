@@ -59,6 +59,8 @@ options:
   --no-fetch      use cached GGUF headers only; nothing downloaded
   --catalog PATH  a catalog file other than the pulled one
   --why MODEL     explain one catalog model or models.toml name
+  --pull N        fetch row N of the table and add a preset for it
+  --run N         the same, then start it (one already here just starts)
   --json          machine-readable
 
 Scores are on the public scale (50 + 15 z against the catalog) until
@@ -488,6 +490,81 @@ def choose(cands, qm):
     return main, explore
 
 
+def choose_quant(repo, groups, binary, profile="agent", revision="main"):
+    """The quant of one repo to pull for this machine, when none was
+    named: (label, why, [(label, size, verdict)]).
+
+    The same rule find ranks by, for one model and without the catalog:
+    one header is read and the other quants are sized from it; quality
+    is the quant penalty alone; F16 and above are left out, as they are
+    for converting, not running. The best quant that clears the
+    profile's floors wins, then the fastest within TIE of it. When none
+    clears them, the best that runs here at all, and the why says so.
+    Raises remote.RemoteError when the header cannot be had, and
+    ValueError when no quant runs here.
+    """
+    mach = hw.probe(binary)
+    rows = sorted(((k, sum(s["size"] for s in v)) for k, v in groups.items()),
+                  key=lambda r: r[1])
+    mid = rows[len(rows) // 2][0]
+    inv = remote.inventory(repo, mid, groups[mid], revision)
+    params = inv.n_params or 0
+    capped = [r for r in rows if params and r[1] * 8 / params <= 8.6] or rows
+    opts = search.Options(profile)
+    if mach.bench.get("threads"):
+        opts.threads = int(mach.bench["threads"])
+    good, runs, verdicts = [], [], []
+    for key, size in capped:
+        q_inv = inv if key == mid else rescale(inv, size, "hf:%s/%s" % (
+            repo, key))
+        res = search.solve(search.Context(q_inv, mach), opts)
+        fit = res.best
+        if fit is None:
+            verdicts.append((key, size, "does not fit"))
+            continue
+        quality = -(quality_penalty(q_inv, fit))
+        row = (quality, fit, key, size)
+        if not res.relaxed and floor_ok(fit, profile):
+            good.append(row)
+            verdicts.append((key, size, "fits"))
+        else:
+            verdicts.append((key, size, "runs, below the %s floors"
+                             % profile))
+        runs.append(row)
+    for key, size in rows:
+        if (key, size) not in capped:
+            verdicts.append((key, size, "for converting, not running"))
+    pool = good or runs
+    if not pool:
+        raise ValueError(
+            "none of its %d quants fits this machine; the smallest is %s at "
+            "%.1f G" % (len(rows), _label(rows[0][0]), rows[0][1] / GiB))
+    top = max(r[0] for r in pool)
+    speed = ((lambda f: -f.speed.decode_d) if profile == "chat"
+             else (lambda f: f.speed.s_turn))
+    quality, fit, key, size = min([r for r in pool if r[0] >= top - TIE],
+                                  key=lambda r: speed(r[1]))
+    if good:
+        why = "the best quant that clears the %s floors here" % profile
+    else:
+        why = ("none clears the %s floors here, so the best that runs"
+               % profile)
+    verdicts.sort(key=lambda v: v[1])
+    return key, why, verdicts
+
+
+def quality_penalty(inv, fit):
+    """Points a quant and its KV types cost, as find charges them before
+    local evals have taught it better."""
+    return (quality.quant_penalty(inv.bpw, inv.n_params)
+            + quality.kv_penalty(fit.flags.ctk, fit.flags.ctv))
+
+
+def _label(key):
+    q = catalog.quant_of(key)
+    return q if q != "?" else Path(key).name
+
+
 def refine(rows, qm, mach, opts, profile, binary, cache_only):
     """The rows about to be shown get their own header, if they were
     sized from a sibling's. Each is tried once, so a header that cannot
@@ -519,6 +596,33 @@ def config_words(c):
 def eval_minutes(c, mach, items):
     return evalrun.minutes(evalrun.estimate(items, c.shape, c.fit.flags,
                                             mach, None, False))
+
+
+def get_words(c):
+    """The command that gets a row running: it is here, or pull it."""
+    if c.local:
+        return "mdl run %s" % c.local
+    return "mdl pull %s:%s --run" % (c.repo, c.key)
+
+
+def get(c, run):
+    """--pull N / --run N: the row's model fetched with a fitted preset,
+    and started if asked. Returns the preset's name."""
+    import mdl
+
+    from . import pull
+    if c.local:
+        if run:
+            mdl.cmd_run([c.local])
+        else:
+            print("%s is already here; run it with: mdl run %s"
+                  % (c.local, c.local))
+        return c.local
+    try:
+        return pull.main(["%s:%s" % (c.repo, c.key)] + (["--run"] if run
+                                                         else []))
+    except pull.PullError as e:
+        die(str(e))
 
 
 def next_step(c):
@@ -576,6 +680,9 @@ def show(main, explore, qm, mach, opts, profile, meta, notes, w, items):
                 c.quant[:11], config_words(c), sp,
                 "%.0f ±%.0f" % (c.q.mean, 1.64 * c.q.sd), c.q.evidence(),
                 "" if c.exact else " (sized)"))
+        w("\nget #1   %s\n" % get_words(main[0]))
+        if len(main[:ROWS]) > 1:
+            w("         or another row: mdl find --run N\n")
         flagged = [(c, f) for c in main[:ROWS] for f in c.q.flags]
         if flagged:
             w("\n")
@@ -774,7 +881,7 @@ def show_why(data, w):
 def parse(args):
     o, i = {}, 0
     values = {"--profile", "--top", "--license", "--tag", "--kv-floor",
-              "--catalog", "--why"}
+              "--catalog", "--why", "--pull", "--run"}
     flags = {"--new", "--no-fetch", "--json"}
     while i < len(args):
         a = args[i]
@@ -792,6 +899,13 @@ def parse(args):
         if not re.fullmatch(r"[1-9]\d*", o["top"]):
             die("--top takes a number of models, 1 or more")
         o["top"] = int(o["top"])
+    for key in ("pull", "run"):
+        if key in o:
+            if not re.fullmatch(r"[1-9]\d*", o[key]):
+                die("--%s takes a row number from the table, 1 or more" % key)
+            o[key] = int(o[key])
+    if "pull" in o and "run" in o:
+        die("--pull and --run both name a row; pick one")
     return o
 
 
@@ -808,7 +922,7 @@ def main(args, out=None):
     o = parse(args)
     import mdl
     try:
-        models, binary = mdl.load_config()
+        models, binary = mdl.load_config(missing_ok=True)
     except mdl.MdlError:
         models, binary = {}, "llama-server"
     profile = o.get("profile", "agent")
@@ -820,6 +934,13 @@ def main(args, out=None):
     if mach.bench.get("threads"):
         opts.threads = int(mach.bench["threads"])
     notes, cat, meta = [], None, {}
+    if not o.get("catalog") and not o.get("no-fetch"):
+        # without the catalog there is nothing to find but models.toml,
+        # which on a first run is nothing at all
+        try:
+            catalog.ensure(say=lambda line: sys.stderr.write(line + "\n"))
+        except catalog.CatalogError as e:
+            notes.append("could not fetch the catalog: %s" % e)
     try:
         cat = catalog.Catalog(o.get("catalog"))
         meta = cat.meta()
@@ -865,6 +986,16 @@ def main(args, out=None):
     if o.get("json"):
         w(json.dumps(as_json(main_rows, explore, qm, profile), indent=1)
           + "\n")
+        return main_rows, explore
+    row = o.get("pull") or o.get("run")
+    if row:
+        if row > len(main_rows[:ROWS]):
+            die("the table has %d row%s; --%s %d is not one of them" % (
+                len(main_rows[:ROWS]), "" if len(main_rows[:ROWS]) == 1
+                else "s", "run" if o.get("run") else "pull", row))
+        c = main_rows[row - 1]
+        w("#%d  %s  %s  %s\n" % (row, c.label, c.quant, config_words(c)))
+        get(c, bool(o.get("run")))
         return main_rows, explore
     items = evalsuite.build(evalsuite.SUITES, evalsuite.secret())
     show(main_rows, explore, qm, mach, opts, profile, meta, notes, w, items)

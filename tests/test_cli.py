@@ -92,8 +92,15 @@ del os.environ["MDL_LLAMA_SERVER"]
 # ------------------------------------------------------------ config file ---
 mdl.CONFIG = root / "config" / "nope.toml"
 _, err, code = run(mdl.cmd_list, [])
-check("missing config", (err.strip(), code),
-      ("mdl: no config at %s; run 'mdl init' to create one" % mdl.CONFIG, 1))
+check("no config yet: list says how to get a model, and is not a failure",
+      (err.strip(), code), (mdl.NO_MODELS, 0))
+_, err, code = run(mdl.cmd_run, ["demo"])
+check("run with no config: one line saying how to get a model",
+      (err.strip(), code), ("mdl: no model named 'demo': " + mdl.NO_MODELS, 1))
+_, err, code = run(mdl.load_config)
+check("a command that needs the config still says there is none",
+      (err.strip().startswith("mdl: no config at %s yet" % mdl.CONFIG), code),
+      (True, 1))
 bad = root / "config" / "bad.toml"
 bad.write_text("[oops\n", encoding="utf-8")
 mdl.CONFIG = bad
@@ -240,16 +247,27 @@ check("XDG_CONFIG_HOME is honoured", fresh.CONFIG,
 check("XDG_STATE_HOME is honoured", fresh.STATE_DIR, home / "st" / "mdl")
 
 _, err, code = run(fresh.cmd_list, [])
-check("missing config points at init", ("run 'mdl init'" in err, code), (True, 1))
+check("missing config points at getting a model",
+      ("mdl pull" in err, code), (True, 0))
 
 out, _, code = run(fresh.cmd_init, [])
 check("init writes a config", (fresh.CONFIG.is_file(), code), (True, 0))
-starter = tomllib.loads(fresh.CONFIG.read_text(encoding="utf-8"))
-check("starter config is valid toml", "example" in starter, True)
-check("starter uses only known keys",
-      set(starter["example"]) <= fresh.KNOWN, True)
-check("starter builds a real command",
-      "-fa" in fresh.build_argv("example", starter["example"], "LS"), True)
+text = fresh.CONFIG.read_text(encoding="utf-8")
+starter = tomllib.loads(text)
+check("starter config is valid toml, with no model in it",
+      [k for k, v in starter.items() if isinstance(v, dict)], [])
+check("and says what to do next", "mdl pull" in out, True)
+# the example is commented out; uncommented, it is a working table
+lines = text.splitlines()
+at = lines.index("# [example]")
+example = tomllib.loads("\n".join(
+    x[2:].split("  #")[0] for x in lines[at:] if x.startswith("# ")
+    and "=" in x or x == "# [example]"))["example"]
+check("its example uses only known keys", set(example) <= fresh.KNOWN, True)
+check("its example builds a real command",
+      "-fa" in fresh.build_argv("example", example, "LS"), True)
+check("its example uses the placeholder check knows",
+      example["model"], fresh.PLACEHOLDER)
 _, err, code = run(fresh.cmd_init, [])
 check("init refuses to clobber", ("already exists" in err, code), (True, 1))
 _, err, code = run(fresh.cmd_init, ["x"])

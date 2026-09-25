@@ -60,29 +60,43 @@ USAGE = ("usage: mdl {init|config [--path|--undo|--history]|"
          "catalog {pull|build|tree|search|stats}|update [--check]} "
          "[--version]")
 
-# The model path mdl init leaves behind. check knows to treat it as a
-# to-do rather than a fault; tests keep the two in step.
+# The model path the starter config's example uses, and mdl init wrote
+# as a live table before 0.13. check treats it as a to-do rather than a
+# fault; tests keep the two in step.
 PLACEHOLDER = "/path/to/your-model.gguf"
 
+# Written by mdl init, and by the first command that adds a model when
+# there is no config yet. The example is commented out: a live table
+# pointing nowhere took port 8080 from the first real model, and check
+# and doctor warned about it until someone deleted it.
 STARTER = '''# mdl config. One table per model; the table name is what you
-# pass to `mdl run`. Use forward slashes in paths on Windows - TOML
-# treats a backslash as an escape character.
+# pass to `mdl run`. `mdl pull org/repo` and `mdl add file.gguf` add
+# tables for you, and `mdl config` opens this file in your editor.
+# Use forward slashes in paths on Windows - TOML treats a backslash as
+# an escape character.
 
 # Where llama-server lives. $MDL_LLAMA_SERVER overrides this.
-llama_server = "%s"
+%s
 
-# Rename this, point it at a .gguf, and run: mdl run example
-[example]
-model = "/path/to/your-model.gguf"
-ngl = 99          # layers on the GPU; 99 means all of them
-ctx = 8192        # context window
-flash_attn = true
-kv_type = "q8_0"  # quantised KV cache, needs flash_attn
-parallel = 1
+# A model by hand: uncomment this, point it at a .gguf, and run:
+# mdl run example
+#
+# [example]
+# model = "/path/to/your-model.gguf"
+# ngl = 99          # layers on the GPU; 99 means all of them
+# ctx = 8192        # context window
+# flash_attn = true
+# kv_type = "q8_0"  # quantised KV cache, needs flash_attn
+# parallel = 1
 # mmproj = "/path/to/mmproj-F16.gguf"   # for a vision model
-port = 8080
-args = ["--metrics"]   # extra flags, passed through as-is
+# port = 8080
+# args = ["--metrics"]   # extra flags, passed through as-is
 '''
+
+# What to do with no models yet, for everything that finds none.
+NO_MODELS = ("no models yet: `mdl find` shows what fits this machine, "
+             "`mdl pull org/repo` fetches one, `mdl add file.gguf` adds "
+             "one you have")
 
 
 class MdlError(Exception):
@@ -93,11 +107,16 @@ def die(msg):
     raise MdlError(msg)
 
 
-def load_config():
+def load_config(missing_ok=False):
+    """(models, llama-server). No config is an error only for a command
+    that needs a model from it; missing_ok reads it as empty, for the ones
+    that list, check or add."""
     try:
         data = tomllib.loads(CONFIG.read_text())
     except FileNotFoundError:
-        die(f"no config at {CONFIG}; run 'mdl init' to create one")
+        if not missing_ok:
+            die(f"no config at {CONFIG} yet; {NO_MODELS}")
+        data = {}
     except (OSError, tomllib.TOMLDecodeError) as e:
         die(f"cannot read {CONFIG}: {e}")
     global CONFIG_DATA
@@ -113,6 +132,28 @@ def load_config():
 # ., starting with a letter or digit. A dot needs quoting in TOML, which
 # toml_key does; a slash or a space is never allowed.
 NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+
+
+def starter():
+    """The starter config's text: llama_server set to the one on PATH, or
+    left commented out so a llama.cpp installed later is found there."""
+    found = shutil.which(DEFAULT_BIN)
+    line = ('llama_server = "%s"' % found.replace(chr(92), "/") if found
+            else '# llama_server = "/path/to/llama-server"')
+    return STARTER % line
+
+
+def ensure_config():
+    """Create the config if there is none, for a command about to add a
+    model to it. Returns whether it made one."""
+    if CONFIG.exists():
+        return False
+    try:
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        write_atomic(CONFIG, starter())
+    except OSError as e:
+        die(f"cannot write {CONFIG}: {e}")
+    return True
 
 
 def check_name(name):
@@ -1019,15 +1060,26 @@ def cmd_run(args):
     if len(args) != 1:
         die("usage: mdl run <name> [--port N]")
     name = args[0]
-    models, binary = load_config()
+    models, binary = load_config(missing_ok=True)
     if name not in models:
-        die(f"no model named '{name}' in {CONFIG}")
+        die(f"no model named '{name}' in {CONFIG}" if models else
+            f"no model named '{name}': {NO_MODELS}")
     # spawn() says if it is already running, under the launch lock
     proc, log, port = spawn(name, models, binary, port)
     print(f"starting {name} (pid {proc.pid}), log {log}", flush=True)
     tail_until_ready(proc, log, name, port)
     print(f"ready: {name} on http://127.0.0.1:{port} (pid {proc.pid})")
+    if sys.stdout.isatty():
+        # for a person; a script reads the ready line, and it stays last
+        print(next_steps(name, port))
     learn_from_log(name, models[name], binary, log)
+
+
+def next_steps(name, port):
+    """What to do with a server that just came up."""
+    url = f"http://127.0.0.1:{port}"
+    return (f"  chat in a browser: {url}  ·  OpenAI API: {url}/v1\n"
+            f"  dashboard: mdl ui  ·  stop it: mdl stop {name}")
 
 
 def learn_from_log(name, cfg, binary, log):
@@ -1194,9 +1246,10 @@ def cmd_ps(args):
 def cmd_list(args):
     if args:
         die("usage: mdl list")
-    models, _ = load_config()
+    models, _ = load_config(missing_ok=True)
     if not models:
-        die(f"no models defined in {CONFIG}")
+        print(NO_MODELS, file=sys.stderr)
+        return
     width = max(len(n) for n in models)
     for name in sorted(models):
         print(f"{name.ljust(width)}  {models[name].get('model', '(no model path)')}")
@@ -1330,17 +1383,13 @@ def cmd_init(args):
         die("usage: mdl init")
     if CONFIG.exists():
         die(f"config already exists at {CONFIG}")
-    found = shutil.which(DEFAULT_BIN) or "/path/to/llama-server"
-    try:
-        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-        write_atomic(CONFIG, STARTER % found.replace(chr(92), "/"))
-    except OSError as e:
-        die(f"cannot write {CONFIG}: {e}")
+    ensure_config()
     print(f"wrote {CONFIG}")
     if not shutil.which(DEFAULT_BIN):
         print("llama-server is not on your PATH: install llama.cpp (%s), "
               "or set llama_server in it" % llama_hint())
-    print("edit it, then run: mdl list")
+    print("next: `mdl find` shows what fits this machine, `mdl pull "
+          "org/repo` fetches a model, `mdl add file.gguf` adds one you have")
 
 
 def cmd_add(args):
@@ -1361,6 +1410,7 @@ def cmd_add(args):
         name = re.sub(r"[^A-Za-z0-9_-]+", "-", stem).strip("-").lower()
         name = name[:64].strip("-") or "model"
     port = check_port(args[2]) if len(args) > 2 else DEFAULT_PORT
+    ensure_config()
     models, _ = load_config()
     if name in models:
         die(f"{name} is already in {CONFIG}; pick another name")
@@ -1392,9 +1442,10 @@ def cmd_check(args):
     """Validate every model in the config without launching anything."""
     if args:
         die("usage: mdl check")
-    models, binary = load_config()
+    models, binary = load_config(missing_ok=True)
     if not models:
-        die(f"no models defined in {CONFIG}")
+        print(NO_MODELS, file=sys.stderr)
+        return
     problems = 0
     ports = {}
     if not shutil.which(binary) and not Path(binary).is_file():
@@ -1619,14 +1670,21 @@ def cmd_doctor(args):
     report = {"global": [], "models": {}}
     notes = report["global"]
     try:
-        models, binary = load_config()
+        models, binary = load_config(missing_ok=True)
     except (MdlError, UnicodeError) as e:
         _doctor_note(notes, "fail", "config", e)
         _doctor_print(report, as_json)
         return
     if rest and rest[0] not in models:
         die("no model named %r in %s" % (rest[0], CONFIG))
-    _doctor_note(notes, "ok", "config", "config parses: %s" % CONFIG)
+    if not CONFIG.exists():
+        _doctor_note(notes, "warn", "config", "no config at %s yet; the "
+                     "first `mdl pull` or `mdl add` writes one" % CONFIG)
+    elif not models:
+        _doctor_note(notes, "warn", "config", "config parses, but has no "
+                     "models yet: %s" % CONFIG)
+    else:
+        _doctor_note(notes, "ok", "config", "config parses: %s" % CONFIG)
     for directory in (STATE_DIR, run_dir()):
         try:
             directory.mkdir(parents=True, exist_ok=True)

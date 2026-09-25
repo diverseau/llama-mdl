@@ -424,6 +424,30 @@ def why_run(*args, models=None):
     return out.getvalue()
 
 
+table = why_run()
+check("the table ends with how to get #1 running",
+      "get #1   mdl pull " in table and " --run\n" in table, True)
+got = []
+with patch.object(find, "get", lambda c, run: got.append((c.label, run))):
+    picked = why_run("--run", "1")
+check("--run N gets that row, and prints which it is",
+      (got, picked.startswith("#1  ")), ([(got[0][0], True)] if got else
+                                         [("?", True)], True))
+try:
+    why_run("--pull", "99")
+    message = ""
+except mdl.MdlError as e:
+    message = str(e)
+check("a row the table does not have is one line saying so",
+      message.startswith("the table has "), True)
+for bad in (["--run", "0"], ["--run", "x"], ["--run", "1", "--pull", "2"]):
+    try:
+        find.parse(bad)
+        message = ""
+    except mdl.MdlError as e:
+        message = str(e)
+    check("find %s is refused in words" % " ".join(bad), bool(message), True)
+
 ranked_text = why_run("--why", "Fam/Base-Instruct")
 check("--why shows rank, every quant, evidence and penalties",
       [s in ranked_text for s in ("main table · rank #1", "Q8_0", "Q4_K_M",

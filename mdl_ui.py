@@ -1329,11 +1329,13 @@ class MdlApp(App):
     # ---- config / table ----
     def _load_config(self):
         try:
-            self.models, self.binary = mdl.load_config()
+            self.models, self.binary = mdl.load_config(missing_ok=True)
         except mdl.MdlError as e:
             self.models, self.binary = {}, ""
             self.status_line = str(e)
             return
+        if not self.models:
+            self.status_line = mdl.NO_MODELS
         marks = self._marks_path()
         try:
             self.marks = json.loads(marks.read_text())

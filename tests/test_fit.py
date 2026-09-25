@@ -248,8 +248,16 @@ check("the default KV floor never goes below q8_0",
 
 floor = search.solve(ctx_obj, search.Options("agent"))
 check("an unreachable floor is reported, not refused",
-      (bool(floor.picks), "most context" in (floor.relaxed or "")),
+      (bool(floor.picks), "(floor 128k)" in (floor.relaxed or "")),
       (True, True))
+roomy = search.solve(search.Context(inv, machine(vram=64 * GiB, ram=GiB),
+                                    residuals=calib.Residuals(entries=[])),
+                     search.Options("agent"))
+check("a floor past the model's own trained context says so: memory is "
+      "not what it lacks",
+      (bool(roomy.picks), "this model is trained for at most %dk"
+       % (inv.n_ctx_train // 1024) in (roomy.relaxed or ""),
+       "can hold here" in (roomy.relaxed or "")), (True, True, False))
 
 tiny_ram = machine(vram=GiB, ram=int(0.001 * GiB))
 nope = search.solve(search.Context(inv, tiny_ram, calib.Residuals([])),

@@ -383,7 +383,7 @@ def build(failed=None, stopping=None):
     snap = {"schema": SCHEMA, "version": mdl.VERSION, "at": round(now),
             "config": str(mdl.CONFIG), "error": None}
     try:
-        models, _ = mdl.load_config()
+        models, _ = mdl.load_config(missing_ok=True)
     except mdl.MdlError as e:
         models, snap["error"] = {}, str(e)
     states = mdl.read_states()

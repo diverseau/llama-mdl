@@ -385,7 +385,13 @@ def solve(ctx_obj, opts):
     top_ctx = max(f.flags.ctx for f in loose)
     top_tps = max(f.speed.decode_d for f in loose)
     why = []
-    if top_ctx < opts.min_ctx:
+    trained = ctx_obj.inv.n_ctx_train
+    if top_ctx < opts.min_ctx and trained and top_ctx >= trained:
+        # the model's own limit, not this machine's: more memory would
+        # not help, and saying "can hold here" sent people shopping
+        why.append("this model is trained for at most %dk of context "
+                   "(floor %dk)" % (trained // K, opts.min_ctx // K))
+    elif top_ctx < opts.min_ctx:
         why.append("the most context this quant can hold here is %dk "
                    "(floor %dk)" % (top_ctx // K, opts.min_ctx // K))
     if opts.min_tps and top_tps < opts.min_tps:

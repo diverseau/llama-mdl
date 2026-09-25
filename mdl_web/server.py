@@ -184,7 +184,7 @@ def act(hub, req):
             return 409, {"ok": False, "error": str(e)}
         return 200, {"ok": True}
     try:
-        models, binary = mdl.load_config()
+        models, binary = mdl.load_config(missing_ok=True)
     except mdl.MdlError as e:
         return 409, {"ok": False, "error": str(e)}
     states = mdl.read_states()

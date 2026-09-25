@@ -542,6 +542,30 @@ def build(path, bases=(), prev=None, log=None, **kw):
 
 # ---------------------------------------------------------------- pull --
 
+REFRESH_S = 7 * 24 * 3600   # how stale a pulled snapshot find tolerates
+
+
+def ensure(say=None, max_age=REFRESH_S):
+    """The pulled snapshot, for find: fetched when there is none, and asked
+    for again when the last check is over a week old (a 304 when nothing
+    changed, so that costs a request). Returns 'fresh', 'unchanged' or
+    None when nothing was asked; raises CatalogError."""
+    path = default_path()
+    try:
+        age = time.time() - path.stat().st_mtime
+    except OSError:
+        age = None
+    if age is not None and age < max_age:
+        return None
+    if say:
+        say("fetching the model catalog, once" if age is None else
+            "the model catalog is over a week old; checking for a newer one")
+    state = pull(path)
+    if state == "unchanged":
+        os.utime(path)          # checked now: the next week asks nothing
+    return state
+
+
 def pull(path=None, repo=None):
     """Fetch the published snapshot if it changed. 'fresh', 'unchanged'."""
     path = Path(path or default_path())

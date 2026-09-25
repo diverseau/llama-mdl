@@ -95,6 +95,9 @@ os.environ["HF_HUB_CACHE"] = str(TMP / "hf-cache")
 for var in ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN"):
     os.environ.pop(var, None)
 os.environ["HF_HOME"] = str(TMP / "hf-home")          # no token file either
+# the preset a pull adds is fitted, and fitting keeps its measurements and
+# header cache under mdl's config: never the real one
+os.environ["MDL_FIT_HOME"] = str(TMP / "fit-home")
 
 # ------------------------------------------------------------ the plan --
 check("a preset's name from the repo",
@@ -107,6 +110,17 @@ except pull.PullError as e:
     check("two quants and none named: says which there are",
           ("Q4_K_M" in str(e), "Q8_0" in str(e), "mdl pull %s:" % REPO in str(e)),
           (True, True, True))
+try:
+    pull.plan(REPO)
+except pull.PullError as e:
+    check("and suggests Q4_K_M by name, not the first alphabetically",
+          "e.g. mdl pull %s:Q4_K_M" % REPO in str(e), True)
+asked = []
+sha, key, need = pull.plan(REPO, choose=lambda repo, groups, sha: (
+    asked.append(sorted(groups)) or "Tiny-Model-Q4_K_M.gguf"))
+check("given a chooser, several quants are its to pick from",
+      (asked, key), ([["Tiny-Model-Q4_K_M.gguf", "Tiny-Model-Q8_0.gguf"]],
+                     "Tiny-Model-Q4_K_M.gguf"))
 sha, key, need = pull.plan(REPO, "Q8_0")
 check("a quant named: pinned to the commit, the model then its projector, "
       "at full precision",
@@ -171,6 +185,20 @@ _, err, code = run(pull.main, ["%s:Q4_K_M" % REPO, "--name", "tiny-model"])
 check("a name another preset has is refused",
       (code, "already in" in err), (1, True))
 pull.stop("tiny-model")
+teardown(root)
+
+# -- no quant named, and no config yet: it picks one and writes the config ------
+root, port = sandbox()
+mdl.CONFIG.unlink()
+out, err, code = run(pull.main, [REPO, "--name", "auto"])
+cfg = mdl.load_config()[0].get("auto", {})
+check("no quant named, no config: one is picked for this machine, said in "
+      "a line, fetched, and the config is written for it",
+      (code, "picked Q" in out, "another: mdl pull %s:QUANT" % REPO in out,
+       Path(cfg.get("model", "")).name in FILES), (0, True, True, True))
+check("the config it wrote is the starter, with the model added",
+      mdl.CONFIG.read_text(encoding="utf-8").startswith("# mdl config."), True)
+pull.stop("auto")
 teardown(root)
 
 # -- a verified copy in the Hugging Face cache is used where it is ---------------

@@ -146,8 +146,11 @@ try:
                                                 len(err.splitlines())), (1, {}, 1))
     mdl.CONFIG.unlink()
     report, _, code = diagnose()
-    check("missing config fails", (code, has(report, "fail", "no config", None)),
-          (1, True))
+    check("no config yet: a warning saying what writes one, not a failure",
+          (code, has(report, "warn", "the first `mdl pull` or `mdl add` "
+                     "writes one", None)), (0, True))
+    check("and the environment is still checked",
+          any(f["check"] == "backend" for f in report["global"]), True)
     check("doctor registered", mdl.COMMANDS.get("doctor"), mdl.cmd_doctor)
     # the backend: what llama.cpp lists, and a GPU it cannot see
     mdl.CONFIG.write_bytes(original)

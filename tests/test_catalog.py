@@ -7,6 +7,7 @@ import os
 import sys
 import tempfile
 import threading
+import time
 import urllib.parse
 from pathlib import Path
 
@@ -341,6 +342,20 @@ check("a download cut off halfway is an error, not a traceback, and leaves "
       "no .part behind", (err is not None, (TMP / "pulled.sqlite.part")
                           .exists(), catalog.Catalog(TMP / "pulled.sqlite")
                           .meta()["nodes"]), (True, False, 5))
+
+# find's own fetch: once when there is none, then only once a week
+os.environ["MDL_FIT_HOME"] = str(TMP / "home-ensure")
+SNAP.update(etag='"v4"', body=path.read_bytes())
+said = []
+check("no snapshot yet: fetched, and it says so",
+      (catalog.ensure(said.append), said, catalog.default_path().is_file()),
+      ("fresh", ["fetching the model catalog, once"], True))
+check("fetched today: nothing asked", catalog.ensure(said.append), None)
+week_ago = time.time() - catalog.REFRESH_S - 60
+os.utime(catalog.default_path(), (week_ago, week_ago))
+check("a week old: asked again, and a 304 counts as checked",
+      (catalog.ensure(said.append), catalog.ensure(said.append),
+       "over a week old" in said[-1]), ("unchanged", None, True))
 
 # ================================================================= cli ===
 

@@ -16,6 +16,18 @@ Getting started, made shorter: from installing to a model answering.
   install that lacked Textual gains it as a dependency.
 - The README's non-goals no longer rule out downloading models or a web
   UI: `mdl pull` and `mdl ui` are features.
+- No config is not an error. The first `mdl pull`, `mdl add` or
+  `mdl fit --write` creates `models.toml`; `mdl list`, `mdl check` and
+  `mdl doctor` with no models say how to get one and exit 0 (doctor warns).
+- `mdl init` writes the example model commented out: the live `[example]`
+  pointed at nothing, took port 8080 from the first real model, and was
+  flagged by check and doctor until deleted. `llama_server` is left
+  commented out when llama-server is not on PATH, so installing it later
+  is enough.
+- `mdl fit` says a model is trained for at most N k of context, when that
+  is what keeps it under a floor, instead of "the most context this quant
+  can hold here" - which sent people looking for memory that would not
+  help.
 
 ### Added
 
@@ -25,13 +37,29 @@ Getting started, made shorter: from installing to a model answering.
 - A llama-server missing from PATH says how to install llama.cpp here
   (`winget install ggml.llamacpp` on Windows, `brew install llama.cpp`
   with Homebrew), in `mdl run`, `mdl init` and `mdl doctor`.
+- `mdl pull org/repo` without a quant picks the one `mdl find` would for
+  this machine, and says which and why in one line. Naming one still
+  works; the error listing quants (with no chooser) suggests Q4_K_M, not
+  BF16.
+- `mdl find` ends its table with the command that gets #1 running, and
+  `--run N` / `--pull N` fetch row N (and start it).
+- `mdl find` fetches the catalog when there is none, and checks for a
+  newer one once a week; `--no-fetch` does neither.
+- `mdl run` and `mdl pull --run` end, on a terminal, with where to chat
+  with the model, its OpenAI API URL, and how to stop it. `pull --run`
+  prints the `ready:` line `run` does.
 - `tools/journey.py`: a new user's first session in a throwaway home,
   timed step by step, with the longest stretch each step printed nothing.
+- `tests/test_journey.py`: that walk, offline, as part of the gate: an
+  empty home to a model answering in one command, with no errors.
 
 ### Fixed
 
 - `tools/update_e2e.py` built wheels without `mdl_web`, which setuptools
   refused since 0.12.
+- An error during `mdl pull` was printed on the end of its progress line.
+- `test_pull` let the fit behind a pull write into the real
+  `~/.config/mdl`.
 
 ## [0.12.0] - 2026-09-25
 

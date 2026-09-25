@@ -104,9 +104,10 @@ def revision(repo, rev="main"):
     return sha
 
 
-def plan(repo, selector=None, rev="main"):
+def plan(repo, selector=None, rev="main", choose=None):
     """(commit, quant label, [file dicts]): the model's shards, then its
-    projector if the repo has one."""
+    projector if the repo has one. `choose(repo, groups, commit)` picks
+    one of several quants; without it, several is an error naming them."""
     sha = revision(repo, rev)
     files = remote.list_files(repo, sha)
     groups = remote.gguf_groups(files)
@@ -116,10 +117,13 @@ def plan(repo, selector=None, rev="main"):
         hit = remote.select(groups, selector)
     except remote.RemoteError as e:
         raise PullError(str(e)) from None
+    if len(hit) > 1 and choose is not None:
+        chosen = choose(repo, hit, sha)
+        hit = {chosen: hit[chosen]}
     if len(hit) > 1:
         raise PullError("%s has %d quants; name one, e.g. mdl pull %s:%s "
                         "(have: %s)" % (repo, len(hit), repo,
-                                        _quant(sorted(hit)[0]),
+                                        _quant(example(hit)),
                                         ", ".join(_quant(k) for k in sorted(hit))))
     key, shards = next(iter(hit.items()))
     need = list(shards)
@@ -141,6 +145,42 @@ def _quant(key):
     from . import catalog
     q = catalog.quant_of(key)
     return q if q != "?" else Path(key).name
+
+
+def example(groups):
+    """The quant to suggest by name: Q4_K_M, the usual first choice, when
+    the repo has it, else the middle one by size. Not the first
+    alphabetically - that is BF16, the one nobody should start with."""
+    for k in groups:
+        if _quant(k).upper() == "Q4_K_M":
+            return k
+    by_size = sorted(groups, key=lambda k: sum(s["size"] for s in groups[k]))
+    return by_size[len(by_size) // 2]
+
+
+def chooser(binary, say):
+    """plan()'s `choose`: the quant find would pick for this machine,
+    said in one line through `say`."""
+    def choose(repo, groups, sha):
+        from . import find, gguf
+        try:
+            key, why, _ = find.choose_quant(repo, groups, binary,
+                                            revision=sha)
+        except (remote.RemoteError, gguf.NotGGUF, gguf.Truncated,
+                ValueError, OSError) as e:
+            raise PullError("%s has %d quants and none could be picked for "
+                            "this machine (%s); name one, e.g. mdl pull "
+                            "%s:%s" % (repo, len(groups), e, repo,
+                                       _quant(example(groups)))) from None
+        size = sum(s["size"] for s in groups[key])
+        say("picked %s (%s): %s; another: mdl pull %s:QUANT"
+            % (_quant(key), _size(size), why, repo))
+        return key
+    return choose
+
+
+def _size(n):
+    return "%.1f GB" % (n / GiB) if n >= GiB else "%d MB" % (n >> 20)
 
 
 # ------------------------------------------------------------ the files --
@@ -245,6 +285,8 @@ class Status:
         if not force and now - self.last < EVERY_S:
             return
         self.last = now
+        if state == "error":
+            self.clear()            # the error is printed on a line of its own
         if not self.quiet and state == "download":
             sys.stderr.write("\r%-40s" % ("%s  %d%%" % (detail, percent)))
             sys.stderr.flush()
@@ -256,9 +298,20 @@ class Status:
             self.base, state=state, detail=detail, percent=int(percent),
             error=error, at=time.time())))
 
-    def done(self):
+    def clear(self):
+        """Take the progress line off the terminal, for what is printed next."""
         if not self.quiet:
             sys.stderr.write("\r" + " " * 40 + "\r")
+            sys.stderr.flush()
+
+    def say(self, line):
+        """A line of its own, under the progress line rather than over it."""
+        if not self.quiet:
+            self.clear()
+            print(line, flush=True)
+
+    def done(self):
+        self.clear()
         if self.path:
             try:
                 self.path.unlink()
@@ -311,12 +364,14 @@ def pull(repo, selector=None, name=None, keys=(), run=False, quiet=False):
     """Fetch, check, add. Returns the preset's name."""
     import mdl
     name = mdl.check_name(name or default_name(repo))
+    mdl.ensure_config()
     models, binary = mdl.load_config()
     spec = "hf:%s" % repo + (":" + selector if selector else "")
     status = Status(name, repo, keys, quiet, spec)
     status("download", "checking the files", 0)
     try:
-        sha, key, need = plan(repo, selector)
+        sha, key, need = plan(repo, selector,
+                              choose=chooser(binary, status.say))
         total = sum(f["size"] for f in need) or 1
         if name in models and not _same(models[name], repo, sha, need):
             raise PullError("%s is already in %s; pick another name with "
@@ -339,6 +394,10 @@ def pull(repo, selector=None, name=None, keys=(), run=False, quiet=False):
         if not quiet:
             status.done()
             mdl.tail_until_ready(proc, log, name, port)
+            print("ready: %s on http://127.0.0.1:%d (pid %d)"
+                  % (name, port, proc.pid))
+            if sys.stdout.isatty():
+                print(mdl.next_steps(name, port))
             return name
         # the web UI's: its state file shows the load; a start that
         # fails leaves why here, as a start from the page does

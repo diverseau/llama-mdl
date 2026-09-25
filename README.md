@@ -88,14 +88,19 @@ git clone https://github.com/diverseau/llama-mdl ~/src/mdl
 python ~/src/mdl/mdl.py --help
 ```
 
-Then create a starter config:
+Then get a model and start it:
 
 ```sh
-mdl init
+mdl find                        # what fits this machine, best first
+mdl find --run 1                # fetch #1, fit a preset to it, start it
+mdl pull unsloth/Qwen3-8B-GGUF --run   # or a repo you already know
 ```
 
-That writes `~/.config/mdl/models.toml`, finds `llama-server` on your PATH if
-it is there, and tells you what to edit.
+There is no config to write first: the first model you pull or add
+creates `~/.config/mdl/models.toml`, with `llama-server` set to the one on
+your PATH. `mdl add file.gguf` adds a GGUF you already have. `mdl init`
+writes the same starter config on its own, with a commented example to
+copy from.
 
 For bulk edits, run `mdl config` to open models.toml in `$VISUAL` or
 `$EDITOR` (Notepad on Windows or vi elsewhere if neither is set).
@@ -207,7 +212,8 @@ mdl check        Validate every model in the config without launching
                  anything. Exits non-zero if it finds a problem.
 mdl doctor [--json] [name]
                  Diagnose the environment and all presets, or just one.
-mdl init         Write a starter config, if you do not have one.
+mdl init         Write a starter config, if you do not have one. (The
+                 first pull or add writes it too.)
 mdl config       Open models.toml in your editor; --path prints its location.
 mdl --version    The version, for bug reports.
 mdl update [--check]
@@ -226,6 +232,7 @@ mdl catalog ...  The hub's models, fine-tunes and GGUF quants, offline.
 mdl find         The best model this machine can run, and how to run it.
 mdl pull <org/repo[:quant]> [--run]
                  Download a GGUF, check it, and add a preset fitted to it.
+                 Without a quant, the one that suits this machine.
 mdl lab ...      The same prompt through variants of a config, measured.
 mdl manifest <name>
                  What <name> is running as: its command line, llama.cpp
@@ -522,7 +529,13 @@ mdl find --profile chat                ≥ 20 t/s decode
 mdl find --license apache --tag code
 mdl find --new                         only what has appeared since last time
 mdl find --no-fetch                    use cached GGUF headers only
+mdl find --run 1                       fetch the top row and start it
+mdl find --pull 3                      fetch row 3, add a preset, no start
 ```
+
+The table ends with the command that gets #1 running. The first `find`
+fetches the catalog (`mdl catalog pull`) if there is none, and asks for a
+newer one when the last check is a week old; `--no-fetch` does neither.
 
 The ranking is a heuristic for a shortlist, not a measured quality
 scale: it combines public scores that were run by different people with
@@ -561,10 +574,18 @@ then `mdl eval NAME`.
 ## Downloading a model: `mdl pull`
 
 ```
-mdl pull unsloth/Qwen3-8B-GGUF:Q4_K_M          download, check, add a preset
+mdl pull unsloth/Qwen3-8B-GGUF                 the quant that suits this machine
+mdl pull unsloth/Qwen3-8B-GGUF:Q4_K_M          this quant: download, check, add a preset
 mdl pull unsloth/Qwen3-8B-GGUF:Q4_K_M --run    and start it
 mdl pull org/repo:Q8_0 --name mine             under a name of your own
 ```
+
+Without a quant, it picks the one `mdl find` would: it reads one header
+(nothing is downloaded yet), sizes the other quants from it, leaves out
+F16 and above, and takes the best quant that clears the agent profile's
+floors here, then the fastest within half a point of it. When none
+clears them - a model trained for less than 128k of context never can -
+it takes the best that runs, and says so in the line naming its pick.
 
 `mdl pull` pins the repo at its current commit and takes every shard of
 the quant, plus its vision projector when the repo ships one (the full
