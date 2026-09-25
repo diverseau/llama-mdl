@@ -2,6 +2,22 @@
 
 Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- `mdl update` upgrades mdl to the newest release, through whatever
+  installed it - pipx, `uv tool` or pip - and checks with a fresh
+  interpreter that the new version is the one that imports.
+  `mdl update --check` only says whether there is one. It refuses in a
+  source checkout (that is `git pull`), and while `mdl eval` is running
+  or a server is starting, unless `--force`.
+- The dashboard asks PyPI once a day whether a newer mdl is out, and
+  offers it: update and restart, later, or skip that version. Servers
+  keep running through the restart; `u` brings the offer back. Off with
+  `MDL_NO_UPDATE_CHECK=1` or `update_check = false` in models.toml.
+- `mdl doctor` says when a newer release is out.
+
 ## [0.10.0] - 2026-09-24
 
 `mdl lab` measures a full context as well as an empty one, compares

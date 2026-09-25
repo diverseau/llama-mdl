@@ -19,6 +19,7 @@ from collections import deque
 from pathlib import Path
 
 import mdl
+import mdl_update
 
 from rich.text import Text
 from textual import work
@@ -743,6 +744,7 @@ class HelpScreen(ModalScreen):
         ("l", "focus the log pane"),
         ("/", "filter the log"),
         ("g", "reload models.toml and refresh telemetry"),
+        ("u", "update mdl, when a newer release is out"),
         ("?", "this help"),
         ("q", "quit the UI (the server keeps running)"),
     ]
@@ -1224,6 +1226,12 @@ class MdlApp(App):
                 border: round #7aa2f7; }
     #edit-box { width: 66; height: auto; padding: 1 2;
                 background: #151a23; border: round #7aa2f7; }
+    #update-box { width: 72; height: auto; padding: 1 2;
+                  background: #151a23; border: round #e0af68; }
+    #update-buttons { height: auto; margin-top: 1; }
+    #update-buttons Button { margin-right: 1; }
+    #update-log { height: 10; margin-top: 1; background: #0b0e14;
+                  border: round #1f2430; display: none; }
     #prompt-box { width: 88; height: auto; padding: 1 2;
                 background: #151a23; border: round #bb7af7; }
     #chat-head { height: 1; padding: 0 1; }
@@ -1235,7 +1243,8 @@ class MdlApp(App):
     .edit-row { height: 3; }
     .edit-label { padding: 1 0 0 0; color: #565f89; width: 12; }
     .edit-input { width: 1fr; }
-    HelpScreen, EditScreen, PromptScreen { align: center middle; }
+    HelpScreen, EditScreen, PromptScreen, UpdateScreen {
+        align: center middle; }
     """
 
     BINDINGS = [
@@ -1251,6 +1260,7 @@ class MdlApp(App):
         Binding("l", "focus_log", "logs"),
         Binding("slash", "filter", "filter"),
         Binding("g", "refresh", "refresh"),
+        Binding("u", "update", "update"),
         Binding("question_mark", "help", "help"),
         Binding("j", "cursor_down", "", show=False),
         Binding("k", "cursor_up", "", show=False),
@@ -1278,6 +1288,7 @@ class MdlApp(App):
         self._tele = {"metrics": {}, "slots": None, "gpu": None}
         self.states = {}          # name -> state, refreshed every tick
         self._following = None    # whose tok/s the sparkline is showing
+        self._update_ver = None   # a newer mdl on offer, once one is known
 
     # ---- layout ----
     def compose(self) -> ComposeResult:
@@ -1306,8 +1317,14 @@ class MdlApp(App):
         self._load_config()
         self._build_table()
         self._sysinfo()
+        # popped, so a server or an editor started from here does not
+        # inherit it and a later restart does not repeat it
+        came_from = os.environ.pop("MDL_UPDATED_FROM", None)
+        if came_from:
+            self.status_line = "updated mdl %s -> %s" % (came_from, mdl.VERSION)
         self.set_interval(POLL_SECONDS, self._tick)
         self._tick()
+        self._check_update()
 
     # ---- config / table ----
     def _load_config(self):
@@ -1635,6 +1652,8 @@ class MdlApp(App):
             t.append("   filter: " + self._filter, style="#e0af68")
         if self.status_line:
             t.append("   " + self.status_line, style="#7aa2f7")
+        if self._update_ver:
+            t.append("   mdl %s is out: u" % self._update_ver, style="#e0af68")
         self.query_one("#status", Static).update(t)
 
     def on_data_table_row_highlighted(self, _):
@@ -1653,6 +1672,69 @@ class MdlApp(App):
 
     def action_help(self):
         self.push_screen(HelpScreen())
+
+    # ---- update ----
+    def check_action(self, action, parameters):
+        """`u` is in the footer only while there is an update to take."""
+        if action == "update":
+            return self._update_ver is not None
+        return True
+
+    @work(thread=True, group="update-check")
+    def _check_update(self):
+        """Ask, at most once a day, whether a newer mdl is out. A courtesy:
+        whatever goes wrong in here, the dashboard carries on without it,
+        so nothing may escape the worker and take the app down."""
+        try:
+            if mdl_update.disabled():
+                return
+            mdl_update.sweep()
+            version = mdl_update.offer()
+        except Exception:
+            return
+        if version:
+            self.call_from_thread(self._offer_update, version)
+
+    def _offer_update(self, version):
+        self._update_ver = version
+        self.refresh_bindings()
+        self._tick()
+        # never on top of something the user is in the middle of; the
+        # status line and `u` still say it
+        if len(self.screen_stack) == 1:
+            self.push_screen(UpdateScreen(version))
+
+    def action_update(self):
+        if self._update_ver and not isinstance(self.screen, UpdateScreen):
+            self.push_screen(UpdateScreen(self._update_ver))
+
+    def begin_update(self, screen):
+        """Update and restart, unless something this process is doing
+        would be cut off by the restart."""
+        doing = {"start": "a server is starting", "stop": "a server is stopping",
+                 "lab": "a measurement is running"}
+        busy = sorted({doing[w.group] for w in self.workers
+                       if w.is_running and w.group in doing})
+        if busy:
+            self.notify("%s; update once it is done" % "; ".join(busy),
+                        severity="warning")
+            return
+        screen.installing_now()
+        self._do_update(screen, screen.version,
+                        screen.query_one("#update-log", RichLog))
+
+    @work(thread=True, group="update")
+    def _do_update(self, screen, version, log):
+        def out(line):
+            self.call_from_thread(log.write, Text(line, style="#565f89"))
+        try:
+            now = mdl_update.install(version, out=out)
+        except mdl.MdlError as e:
+            self.call_from_thread(screen.failed, str(e))
+            return
+        self.call_from_thread(screen.done, now)
+        time.sleep(0.8)                 # long enough to read that it worked
+        self.call_from_thread(self.exit, mdl_update.RESTART)
 
     def action_bench(self):
         """A measured run of the selected config through mdl lab: one
@@ -1930,6 +2012,77 @@ class MdlApp(App):
         self.action_run()
 
 
+class UpdateScreen(ModalScreen):
+    """A newer mdl is out: update and restart, later, or skip that one."""
+
+    # q too: the app's q would quit halfway through an install
+    BINDINGS = [Binding("escape,q", "later", "later")]
+    AUTO_FOCUS = "#update-go"
+
+    def __init__(self, version):
+        super().__init__()
+        self.version, self.installing = version, False
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="update-box"):
+            yield Label(Text(" update ", style="bold #e0af68"))
+            body = Text()
+            body.append("\nmdl %s is out" % self.version, style="bold #c0caf5")
+            body.append(" - you have %s\n" % mdl.VERSION, style="#565f89")
+            body.append("what changed: %s\n" % mdl_update.CHANGES,
+                        style="#565f89")
+            body.append("servers keep running; the dashboard restarts on "
+                        "the new version", style="#565f89")
+            yield Static(body, id="update-msg")
+            with Horizontal(id="update-buttons"):
+                yield Button("update & restart", variant="primary",
+                             id="update-go")
+                yield Button("later", id="update-later")
+                yield Button("skip %s" % self.version, id="update-skip")
+            yield RichLog(id="update-log", wrap=True, markup=False,
+                          max_lines=500)
+
+    def on_button_pressed(self, event):
+        if event.button.id == "update-go":
+            self.app.begin_update(self)
+        elif event.button.id == "update-skip":
+            mdl_update.skip(self.version)
+            self.app._update_ver = None
+            self.app.refresh_bindings()
+            self.dismiss()
+        else:
+            self.action_later()
+
+    def action_later(self):
+        if self.installing:
+            # killing pip halfway leaves a worse install than either version
+            self.notify("updating; this cannot be interrupted",
+                        severity="warning")
+            return
+        self.dismiss()
+
+    def _buttons(self, enabled):
+        for button in self.query(Button):
+            button.disabled = not enabled
+
+    def installing_now(self):
+        self.installing = True
+        self._buttons(False)
+        self.query_one("#update-log", RichLog).display = True
+
+    def failed(self, message):
+        self.installing = False
+        self._buttons(True)
+        self.query_one("#update-log", RichLog).write(
+            Text(message, style="#f7768e"))
+        self.notify("update failed; still on %s" % mdl.VERSION,
+                    severity="error", timeout=10)
+
+    def done(self, version):
+        self.query_one("#update-log", RichLog).write(
+            Text("updated to %s - restarting" % version, style="bold #9ece6a"))
+
+
 class FilterScreen(ModalScreen):
     """One-line log filter prompt."""
 
@@ -1952,4 +2105,5 @@ class FilterScreen(ModalScreen):
 
 
 def run_ui(fx=None, fx_period_override=None):
-    MdlApp(fx, fx_period_override).run()
+    """Returns mdl_update.RESTART when the user updated mdl from here."""
+    return MdlApp(fx, fx_period_override).run()
