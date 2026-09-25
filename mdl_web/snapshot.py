@@ -13,6 +13,7 @@ now: the state files, each server's /health and /metrics, nvidia-smi.
 """
 
 import datetime
+import http.client
 import json
 import re
 import shutil
@@ -44,7 +45,9 @@ def http_get(port, path, timeout=1.5, key=None):
             return r.status, r.read().decode("utf-8", "replace")
     except urllib.error.HTTPError as e:
         return e.code, None
-    except (urllib.error.URLError, OSError, ValueError):
+    except (urllib.error.URLError, OSError, ValueError,
+            http.client.HTTPException):
+        # HTTPException: a server stopped mid-reply, IncompleteRead
         return None, None
 
 

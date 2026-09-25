@@ -407,7 +407,10 @@ def make_handler(hub, token, port):
             except (ValueError, AttributeError):
                 return self._json(400, {"ok": False, "error": "bad request"})
             code, out = act(hub, req)
-            hub.rebuild()
+            try:
+                hub.rebuild()
+            except Exception:           # noqa: BLE001 - the loop says why
+                pass                    # the action happened: answer it
             return self._json(code, out)
 
         def _file(self, name):

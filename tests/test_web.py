@@ -5,9 +5,11 @@ import http.client
 import json
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.parse
 from pathlib import Path
@@ -31,6 +33,22 @@ got = snapshot.parse_metrics("# HELP x\nllamacpp:n_decode_total 12\n"
                              'llamacpp:thing{a="b"} 3.5\nbroken line\n')
 check("parse_metrics reads values and skips comments",
       got.get("llamacpp:n_decode_total"), 12.0)
+
+
+def cut_short(lsock):
+    # a server that dies mid-reply: the length promised, then nothing
+    conn, _ = lsock.accept()
+    conn.recv(4096)
+    conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 15\r\n\r\n")
+    conn.close()
+
+
+with socket.socket() as lsock:
+    lsock.bind(("127.0.0.1", 0))
+    lsock.listen(1)
+    threading.Thread(target=cut_short, args=(lsock,), daemon=True).start()
+    check("a server stopped mid-reply does not answer, and does not raise",
+          snapshot.http_get(lsock.getsockname()[1], "/health"), (None, None))
 check("a model's logo comes from its name or file",
       [snapshot.family("qwen9u", ""), snapshot.family("x", "/m/LFM2-8B.gguf"),
        snapshot.family("gemma", "/m/gemma.gguf")], ["qwen", "lfm", ""])
