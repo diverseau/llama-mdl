@@ -468,6 +468,11 @@ try:
     check("share: not without an --api-key", action("share", "demo")[0], 409)
     code, _, body = req("GET", "/api/log?name=demo")
     check("its log", (code, b"server is listening" in body), (200, True))
+    if b"server is listening" not in body:
+        # a start that never got there says why in its log, and nowhere else
+        print("      its log, as it stands:\n%s\n      state: %r, failed: %r"
+              % (body.decode(errors="replace")[-2000:], mdl.read_states(),
+                 hub.failed))
     check("no log for a name without one", req("GET", "/api/log?name=zz")[0],
           404)
 
