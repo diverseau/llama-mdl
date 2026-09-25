@@ -303,6 +303,24 @@ for args, words in (
     check("mdl %s: one line, exit 1" % " ".join(args),
           (p.returncode, len(lines), bool(lines) and lines[0].startswith(
               "mdl: ") and words in lines[0]), (1, 1, True))
+
+# textual comes with every install since 0.13, and is still imported only
+# by the dashboard: a textual that is broken, or slow to import, must cost
+# the everyday commands nothing.
+(home / "c" / "mdl").mkdir(parents=True, exist_ok=True)
+(home / "c" / "mdl" / "models.toml").write_text(
+    '[demo]\nmodel = "/nowhere/demo.gguf"\n', encoding="utf-8")
+PROBE = ("import runpy, sys; sys.argv = ['mdl'] + sys.argv[1:]\n"
+         "try:\n    runpy.run_path(sys.argv.pop(1), run_name='__main__')\n"
+         "except SystemExit:\n    pass\n"
+         "sys.stderr.write('textual=%s' % ('textual' in sys.modules))")
+for args in (["--version"], ["ps"], ["list"], ["check"], ["--help"]):
+    p = subprocess.run([sys.executable, "-c", PROBE,
+                        str(support.ROOT / "mdl.py"), *args],
+                       capture_output=True, env=env, encoding="utf-8",
+                       errors="replace", timeout=60)
+    check("mdl %s does not import textual" % " ".join(args),
+          p.stderr.strip().splitlines()[-1:], ["textual=False"])
 _sh.rmtree(home, ignore_errors=True)
 
 sys.exit(t.done())
