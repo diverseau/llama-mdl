@@ -173,6 +173,20 @@ const other = View.build(snap, { view: "kind", id: "RTX 3090", key: "1", model: 
 check("config: another model chosen, its facts and Run",
       [other.hero.chips.map(c => c.icon || c.text), byType(other, "acts")[0].items[0].action],
       [["GGUF Q8_0", "gpu", "context", "weights", "vision"], "run|gemma|1"]);
+// a model find picked, not on this machine yet: marked in the list, and Run says it downloads
+const picked = JSON.parse(JSON.stringify(snap));
+picked.kinds[0].models[1].pull = true;
+const pk = View.build(picked, { view: "kind", id: "RTX 3090", key: "1", model: "gemma" });
+check("config: a pick carries the mark, a model you have does not",
+      byType(pk, "opt").map(r => [r.label, r.mark]), [["qwen", ""], ["gemma", "download"]]);
+check("config: its Run says it downloads, and how much",
+      byType(pk, "acts")[0].items[0].label, "Download 12 GB and run ›");
+picked.kinds[0].models.reverse();
+const pickHome = View.build(picked, { view: "home", open: "gpu:1" });
+check("home: a free card whose first model is a pick shows the mark, and says so on Run",
+      [byType(pickHome, "slot")[0].run.mark, byType(pickHome, "links")[0].items[0].label],
+      ["download", "Download 12 GB and run ›"]);
+check("the wording lives in one place", View.PICK.run({ sizeGb: 4.2 }), "Download 4.2 GB and run ›");
 const busy = View.build(snap, { view: "kind", id: "RTX 3090", key: "0" });
 check("config: a card that is busy has no Run", byType(busy, "acts")[0].items[0].action, "");
 

@@ -33,7 +33,8 @@
   // (as its screenshots measure), so the text after one keeps clear of it
   var GLYPHS = { gpu: [0xf08ae, 832], memory: [0xf035b, 750], temp: [0xf050f, 600], context: [0xf09aa, 668],
     weights: [0xf01a7, 750], vision: [0xf06d0, 918], speed: [0xf140c, 600], tokens: [0xf04a0, 600], agent: [0xf07b7, 771],
-    folder: [0xf0256, 832], machine: [0xf0379, 918], tailnet: [0xf0317, 832], check: [0xf012c, 729], down: [0xf0140, 600] }
+    folder: [0xf0256, 832], machine: [0xf0379, 918], tailnet: [0xf0317, 832], check: [0xf012c, 729], down: [0xf0140, 600],
+    download: [0xf0b8f, 591] }
   function glyph(name) { return GLYPHS[name] ? String.fromCodePoint(GLYPHS[name][0]) : "" }
   function icon(name, size) {
     var n = label(glyph(name), "icon", size)
@@ -227,7 +228,8 @@
     row.appendChild(el("div", "left", [label(r.label, r.open ? "ink" : "value"), r.hint ? label(r.hint, "alert") : null]))
     if (r.run) {
       var runLabel = label(r.run.label, "ink")
-      var go = right(click(el("div", "go", [logo(r.run.family, 12), runLabel]), r.run.action))
+      var go = right(click(el("div", "go", [logo(r.run.family, 12), runLabel,
+        r.run.mark ? icon(r.run.mark) : null]), r.run.action))
       row.appendChild(go)
       requestAnimationFrame(function() {
         var left = row.querySelector(".left")
@@ -339,7 +341,8 @@
 
   function optRow(r) {
     var row = click(el("div", "row opt"), r.action), name = label(r.label, r.on ? "ink" : "value")
-    var val = r.value ? right(label(r.value, "label")) : null
+    var val = r.value || r.mark ? right(el("span", "l label", [r.value || "", r.mark ? icon(r.mark) : null])) : null
+    if (val && r.mark) val.classList.add("marked")
     row.appendChild(el("div", "left", [el("span", "glyph", [r.on ? icon("check") : null]), name]))
     if (val) row.appendChild(val)
     requestAnimationFrame(function() {

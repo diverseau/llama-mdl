@@ -101,6 +101,10 @@ function health(g) {
 
 var ADD = "url|https://github.com/diverseau/llama-mdl#readme"
 
+// A model from mdl find's picks is not on this machine yet: Run downloads it first. How the page says so, in one
+// place: the mark after its name in a list (an icon name, "" for none), and what its Run button says.
+var PICK = { mark: "download", run: function(m) { return "Download " + gb(m.sizeGb) + " and run ›" } }
+
 // One GPU as a row: on the right its quick action (run its model, run again) or what it is doing; opened, a line
 // under it with its memory, what there is to know, and buttons for the rest, Config included for every card with
 // a model, so a busy one can be set up too. Rank orders the rows: free, groups, running, crashed, held, no model.
@@ -135,9 +139,10 @@ function slot(s, ui, g, at) {
   } else {
     var r = kd.models[0]
     row.rank = 0
-    row.run = { family: r.family, label: "run " + r.name + " ›", action: "run|" + r.id + "|" + g.key }
+    row.run = { family: r.family, label: "run " + r.name + " ›", action: "run|" + r.id + "|" + g.key,
+      mark: r.pull ? PICK.mark : "" }
     chips = spec(r)
-    items = [{ label: "Run ›", action: row.run.action, primary: true }, config]
+    items = [{ label: r.pull ? PICK.run(r) : "Run ›", action: row.run.action, primary: true }, config]
   }
   chips = health(g).concat(chips)
   return { rank: row.rank, at: at, rows: row.open ? [row, { type: "links", chips: chips, note: note, items: items }] : [row] }
@@ -284,7 +289,7 @@ function page(s, ui, m) {
     v.rows.push({ type: "sec", label: "MODEL" })
     m.models.forEach(function(x) {
       v.rows.push({ type: "opt", label: x.name, value: [fmt(x.format), x.ctx ? ctx(x.ctx) : ""].filter(Boolean).join("  "),
-        on: x.id === m.id, action: "model|" + x.id })
+        on: x.id === m.id, action: "model|" + x.id, mark: x.pull ? PICK.mark : "" })
     })
   }
   v.rows.push({ type: "sec", label: "GPUS" })
@@ -304,7 +309,7 @@ function page(s, ui, m) {
     if (run.error) v.rows.push({ type: "error", label: run.error })
     v.rows.push({ type: "acts", items: [{ label: "View logs", action: "log|" + run.id }, { label: "Stop model", action: "stop|" + run.id, danger: true }] })
   } else {
-    v.rows.push({ type: "acts", items: [{ label: "Run ›", action: m.action, primary: true }] })
+    v.rows.push({ type: "acts", items: [{ label: m.pull ? PICK.run(m) : "Run ›", action: m.action, primary: true }] })
   }
   return v
 }
@@ -382,7 +387,7 @@ function build(s, ui) {
   return Object.assign(v, { mark: mark(s) })
 }
 
-return { build: build, parse: parse, nice: nice, apca: apca, reach: reach, tones: tones, over: over, LC: LC, k: k, gb: gb, ctx: ctx, dur: dur, ago: ago }
+return { build: build, parse: parse, nice: nice, PICK: PICK, apca: apca, reach: reach, tones: tones, over: over, LC: LC, k: k, gb: gb, ctx: ctx, dur: dur, ago: ago }
 })();
 
 if (typeof module !== "undefined") module.exports = View;

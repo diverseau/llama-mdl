@@ -282,7 +282,9 @@ def picks(models):
             continue
         seen.add(repo)
         q = r.get("quant")
-        name = str(r.get("model") or repo).split("/")[-1]
+        # named for what lands on disk: the repo, not the model find
+        # ranked it as (a fine-tune's parent, say)
+        name = re.sub(r"[-_.]gguf", "", repo.split("/")[-1], flags=re.I)
         out.append({"id": "hf:%s:%s" % (repo, f), "name": name,
                     "family": family(name, f),
                     "format": "GGUF" + (" · " + q if q and q != "?" else ""),

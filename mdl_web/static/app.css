@@ -145,6 +145,9 @@ button, input { font: inherit; color: inherit; }
                            gap: calc(8 * var(--u)); }
 .field .glyph, .opt .glyph { width: calc(12 * var(--u)); display: inline-flex; align-items: center; color: var(--label); }
 .opt .glyph { color: var(--ink); }
+/* the mark after a model that is not on this machine yet */
+.opt .marked .icon { margin-left: calc(10 * var(--u)); opacity: 0.7; }
+.slot .go .icon { color: var(--label); opacity: 0.7; }
 .field .val { white-space: pre; text-align: right; }
 .field .secret { position: absolute; top: 50%; transform: translateY(-50%); font-size: var(--caption-2); color: var(--label); cursor: pointer; }
 
