@@ -62,9 +62,6 @@ GROUP_KEY = chr(0) + "g:"   # row keys a model name can never take
 NEWLINE = chr(10)
 
 
-BACKSLASH = chr(92)
-
-
 def fx_period(override=None):
     """Seconds per colour cycle. --fx-period beats $MDL_UI_FX_PERIOD
     beats ui_fx_period in the config."""
@@ -760,22 +757,17 @@ class HelpScreen(ModalScreen):
         yield Static(body, id="help-box")
 
 
-FLASH_SHOWN = {True: "on", False: "off"}
-FLASH_TYPED = {"on": True, "true": True, "yes": True, "1": True,
-               "off": False, "false": False, "no": False, "0": False}
-
-
 class EditScreen(ModalScreen):
     """Edit one model's params and save them to the config."""
 
     BINDINGS = [Binding("escape", "dismiss", "cancel")]
     FIELDS = ["ngl", "n_cpu_moe", "ctx", "kv_type", "parallel", "port"]
-    TEXT = {"kv_type", "mmproj", "group"}   # the rest are whole numbers
 
     def __init__(self, name, cfg):
         super().__init__()
         # NB: `name` is a reserved DOMNode property, so it cannot be self.name.
         self.model_name, self.cfg = name, dict(cfg)
+        self.shown = mdl.form_values(cfg)
 
     def compose(self) -> ComposeResult:
         with Vertical(id="edit-box"):
@@ -783,14 +775,14 @@ class EditScreen(ModalScreen):
             for f in self.FIELDS:
                 with Horizontal(classes="edit-row"):
                     yield Label(f"{f:<11}", classes="edit-label")
-                    yield Input(value=str(self.cfg.get(f, "")), id=f"f-{f}",
+                    yield Input(value=self.shown[f], id=f"f-{f}",
                                 placeholder="unset", classes="edit-input")
             # A group is not an object to create and delete: it is a
             # name two models share. Type the same one twice and they
             # fold together; clear the last one and it is gone.
             with Horizontal(classes="edit-row"):
                 yield Label(f"{'group':<11}", classes="edit-label")
-                yield Input(value=str(self.cfg.get("group", "")),
+                yield Input(value=self.shown["group"],
                             id="f-group", placeholder="unset",
                             classes="edit-input")
             # The vision half of a multimodal model. Its own row rather
@@ -798,7 +790,7 @@ class EditScreen(ModalScreen):
             # can go missing, and check has to be able to say so.
             with Horizontal(classes="edit-row"):
                 yield Label(f"{'mmproj':<11}", classes="edit-label")
-                yield Input(value=str(self.cfg.get("mmproj", "")),
+                yield Input(value=self.shown["mmproj"],
                             id="f-mmproj", placeholder="path to mmproj-*.gguf",
                             classes="edit-input")
             # Three states, as in the config: false is -fa off, and unset
@@ -806,16 +798,14 @@ class EditScreen(ModalScreen):
             # a save used to turn one into the other either way.
             with Horizontal(classes="edit-row"):
                 yield Label(f"{'flash_attn':<11}", classes="edit-label")
-                yield Input(value=FLASH_SHOWN.get(self.cfg.get("flash_attn"),
-                                                  ""),
+                yield Input(value=self.shown["flash_attn"],
                             id="f-flash_attn", placeholder="unset",
                             classes="edit-input")
             # Everything llama-server takes that mdl has no key for. Better
             # one row here than a form that chases llama.cpp's flag list.
             with Horizontal(classes="edit-row"):
                 yield Label(f"{'args':<11}", classes="edit-label")
-                yield Input(value=shlex.join(str(a) for a in
-                                             self.cfg.get("args", [])),
+                yield Input(value=self.shown["args"],
                             id="f-args", placeholder="--metrics --no-mmap",
                             classes="edit-input")
             yield Label(Text(" enter saves to models.toml · esc cancels",
@@ -823,47 +813,15 @@ class EditScreen(ModalScreen):
             yield Button("apply", variant="primary", id="apply")
 
     def _collect(self):
-        cfg = dict(self.cfg)
-        for f in self.FIELDS + ["mmproj", "group"]:
-            raw = self.query_one(f"#f-{f}", Input).value.strip()
-            if not raw:
-                cfg.pop(f, None)
-                continue
-            if f in self.TEXT:
-                cfg[f] = raw.replace(BACKSLASH, "/") if f == "mmproj" else raw
-            elif f == "ngl" and raw.lower() in ("all", "auto"):
-                cfg[f] = raw.lower()     # what llama.cpp and the config take
-            else:
-                try:
-                    cfg[f] = int(raw)
-                except ValueError:
-                    self.notify(f"{f} must be a whole number"
-                                + (', "all" or "auto"' if f == "ngl" else ""),
-                                severity="error")
-                    return None
-        raw = self.query_one("#f-args", Input).value.strip()
-        if not raw:
-            cfg.pop("args", None)
-        elif os.name == "nt" and chr(92) in raw:
-            # shlex would eat them, and a path that quietly lost its
-            # separators is worse than being told to type it the other way.
-            self.notify("args: use forward slashes in paths", severity="error")
+        # the page's reader too, so the two dashboards take the same text
+        form = {f: self.query_one(f"#f-{f}", Input).value for f in mdl.FORM}
+        try:
+            changes, cleared = mdl.form_read(form)
+        except mdl.MdlError as e:
+            self.notify(str(e), severity="error")
             return None
-        else:
-            try:
-                cfg["args"] = shlex.split(raw)
-            except ValueError as e:              # an unbalanced quote
-                self.notify("args: %s" % e, severity="error")
-                return None
-        fa = self.query_one("#f-flash_attn", Input).value.strip().lower()
-        if not fa:
-            cfg.pop("flash_attn", None)
-        elif fa in FLASH_TYPED:
-            cfg["flash_attn"] = FLASH_TYPED[fa]
-        else:
-            self.notify("flash_attn must be on, off, or empty for the "
-                        "build's default", severity="error")
-            return None
+        cfg = {k: v for k, v in self.cfg.items() if k not in cleared}
+        cfg.update(changes)
         # the rules `mdl run` holds the config to: a save the form took
         # but run refused left a models.toml nothing would start from
         try:

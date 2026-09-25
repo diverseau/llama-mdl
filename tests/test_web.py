@@ -494,6 +494,54 @@ try:
     check("no log for a name without one", req("GET", "/api/log?name=zz")[0],
           404)
 
+    # -- save: a model's config from its page -----------------------------------
+    before = mdl.CONFIG.read_text(encoding="utf-8")
+    check("snapshot: each model's keys as the form shows them",
+          (s["configs"]["demo"], s["configs"]["keyed"]["args"]),
+          ({"ngl": "99", "n_cpu_moe": "", "ctx": "4096", "kv_type": "q8_0",
+            "parallel": "1", "port": str(port), "group": "", "mmproj": "",
+            "flash_attn": "on", "args": ""}, "--metrics --api-key sekrit"))
+    check("save: it runs as its config says", d["stale"], False)
+    for form, why in (({"ctx": "lots"}, "ctx must be a whole number"),
+                      ({"flash_attn": "maybe"}, "flash_attn must be on, off"),
+                      ({"args": "--port 9"}, "'--port' in args would"),
+                      ({"args": "'open"}, "args: "),
+                      ({"model": "/x.gguf"}, "model is not a field"),
+                      ("ctx=1", "a form is a set of fields")):
+        code, got = action("save", "demo", extra={"form": form})
+        check("save: refused, and why: %s" % why,
+              (code, got.get("ok"), why in got.get("error", "")),
+              (409, False, True))
+    check("save: a refused save writes nothing",
+          mdl.CONFIG.read_text(encoding="utf-8"), before)
+    check("save: an unknown model",
+          action("save", "nope", extra={"form": {"ctx": "1"}})[0], 404)
+    # a hand edit while the page was open: a save of other keys keeps it
+    mdl.CONFIG.write_text(before.replace("parallel = 1", "parallel = 2  # mine"),
+                          encoding="utf-8")
+    check("save: the changed fields",
+          action("save", "demo", extra={"form": {
+              "ctx": "8192", "kv_type": "", "args": "--no-mmap  --jinja"}}),
+          (200, {"ok": True}))
+    models, _ = mdl.load_config()
+    check("save: set, cleared and split; the hand edit and its comment kept",
+          (models["demo"]["ctx"], "kv_type" in models["demo"],
+           models["demo"]["args"], models["demo"]["parallel"],
+           "parallel = 2  # mine" in mdl.CONFIG.read_text(encoding="utf-8"),
+           models["keyed"]["group"]),
+          (8192, False, ["--no-mmap", "--jinja"], 2, True, "g"))
+    check("save: backed up, so mdl config --undo takes it back",
+          mdl.config_backups(mdl.CONFIG)[0].is_file(), True)
+    s = snap()
+    check("save: the page sees it at once, and the running server is stale",
+          (s["configs"]["demo"]["ctx"], dep(s, "demo")["stale"]),
+          ("8192", True))
+    check("save: nothing changed is nothing written",
+          action("save", "demo", extra={"form": {}}), (200, {"ok": True}))
+    mdl.CONFIG.write_text(before, encoding="utf-8")
+    check("save: put back, it is not stale", dep(snap(), "demo")["stale"],
+          False)
+
     # -- a server with an API key and --metrics ------------------------------
     check("run keyed", action("run", "keyed")[0], 200)
     k = until(lambda: (dep(snap(), "keyed") or {}).get("state") == "ready"

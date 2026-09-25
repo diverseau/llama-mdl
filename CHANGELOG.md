@@ -2,6 +2,17 @@
 
 Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- `mdl ui`: Edit config on every model in your config, a page of its
+  keys in the panel's own rows. Save writes only the keys changed and
+  keeps comments and hand edits; a refused save says why on the page;
+  a running model has Save and restart, and its page says when its
+  config has changed since it started. `mdl tui`'s edit form and the
+  page read what is typed through the same code.
+
 ## [0.12.0] - 2026-09-25
 
 A web UI: `mdl ui` opens 0xSero's Local AI panel, ported, in a window

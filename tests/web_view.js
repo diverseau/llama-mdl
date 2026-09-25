@@ -190,6 +190,50 @@ check("the wording lives in one place", View.PICK.run({ sizeGb: 4.2 }), "Downloa
 const busy = View.build(snap, { view: "kind", id: "RTX 3090", key: "0" });
 check("config: a card that is busy has no Run", byType(busy, "acts")[0].items[0].action, "");
 
+// -- editing a model's config ---------------------------------------------------------
+const form = { ngl: "99", n_cpu_moe: "", ctx: "32768", kv_type: "q8_0", parallel: "1", port: "8080", group: "",
+               mmproj: "", flash_attn: "on", args: "--metrics" };
+const conf = JSON.parse(JSON.stringify(snap));
+conf.configs = { qwen: form, gemma: Object.assign({}, form, { kv_type: "", flash_attn: "" }) };
+check("config: a model in the config has Edit, a pick does not",
+      [byType(View.build(conf, { view: "kind", id: "RTX 3090", key: "1" }), "acts")[0].items.map(i => i.action),
+       byType(View.build(Object.assign({}, conf, { configs: {} }), { view: "kind", id: "RTX 3090", key: "1" }), "acts")[0]
+         .items.length],
+      [["run|qwen|1", "edit|qwen"], 1]);
+check("run: logs, edit and stop",
+      byType(View.build(conf, { view: "run", id: "qwen" }), "acts")[0].items.map(i => i.action),
+      ["log|qwen", "edit|qwen", "stop|qwen"]);
+conf.deployments[0].stale = true;
+const stale = byType(View.build(conf, { view: "run", id: "qwen" }), "links");
+check("run: a config changed since it started offers the restart",
+      stale.map(r => [r.note, r.items[0].action]), [["its config has changed since it started", "again|qwen|0"]]);
+conf.deployments[0].stale = false;
+const ed = View.build(conf, { view: "edit", id: "qwen" });
+check("edit: its fields under their headings, typed or picked",
+      ed.rows.filter(r => r.type === "sec" || r.type === "input" || r.type === "field").map(r => r.label),
+      ["SERVER", "ngl", "n_cpu_moe", "ctx", "kv_type", "flash_attn", "parallel", "port", "MORE", "mmproj", "group", "args"]);
+check("edit: what the config says, and what unset means",
+      [byType(ed, "input")[0].value, byType(ed, "input")[1].hint, byType(ed, "field").map(r => r.value)],
+      ["99", "llama.cpp default", ["q8_0", "on"]]);
+check("edit: a running model saves and restarts, or only saves",
+      byType(ed, "acts")[0].items.map(i => [i.label, i.action]),
+      [["Save and restart ›", "save|qwen|restart"], ["Save", "save|qwen|"], ["Cancel", "back"]]);
+const edGemma = View.build(conf, { view: "edit", id: "gemma", open: "kv_type", draft: { ctx: "4096" } });
+check("edit: one not running only saves",
+      byType(edGemma, "acts")[0].items.map(i => i.label), ["Save", "Cancel"]);
+check("edit: the picker offers llama.cpp's default and the cache types",
+      byType(edGemma, "opt").map(r => [r.label, r.on]).slice(0, 3),
+      [["llama.cpp default", true], ["f16", false], ["bf16", false]]);
+check("edit: what was typed is shown, and lit as a change",
+      byType(edGemma, "input").filter(r => r.key === "ctx").map(r => [r.value, r.changed]), [["4096", true]]);
+check("edit: a value the list lacks is still offered",
+      byType(View.build(conf, { view: "edit", id: "qwen", open: "kv_type", draft: { kv_type: "turbo3" } }), "opt")
+        .filter(r => r.on).map(r => r.label), ["turbo3"]);
+check("edit: a refused save says why on the page",
+      View.build(conf, { view: "edit", id: "qwen", problem: "port must be a whole number" }).rows[0],
+      { type: "error", label: "port must be a whole number" });
+check("edit: a model not in the config is not a page", View.build(conf, { view: "edit", id: "nope" }).title, "MDL");
+
 // -- every card, and a log ----------------------------------------------------------
 const gpus = View.build(snap, { view: "gpus" });
 check("gpus: every card, running ones too",

@@ -5,7 +5,8 @@ model can be his, line for line: `gpus` (the cards), `kinds` (the cards
 grouped by model, each with the models it can run, best first - here,
 every model in the config), `deployments` (what runs: loading, ready,
 stopping, or a start that failed), `life` (tokens a day for 20 weeks),
-`total` and `week`, and what an agent opens with.
+`total` and `week`, what an agent opens with, and `configs` (each
+model's editable keys, as the text its edit page shows).
 
 Figures that need history - all-time averages, the token line, the
 activity grid - come from usage.py's recorder. Everything else is read
@@ -329,6 +330,20 @@ def _usage(names, now):
 
 # ---------------------------------------------------------- deployments --
 
+def stale(name, state, cfg):
+    """True when the config now says something other than what the server
+    was started with: a save that waits for a restart. A run moved with
+    `mdl run --port` counts too: a restart from the page uses the config's."""
+    import mdl
+    argv = state.get("argv")
+    if not argv or not cfg:
+        return False
+    try:
+        return mdl.build_argv(name, cfg, argv[0]) != list(argv)
+    except mdl.MdlError:            # it would not start as it is now
+        return True
+
+
 def deployment(name, state, cfg, keys, per, loads, own, now, history=None):
     """A running server as the panel's deployment."""
     port, key = state.get("port"), api_key(state.get("argv"))
@@ -343,6 +358,7 @@ def deployment(name, state, cfg, keys, per, loads, own, now, history=None):
                              if quant(cfg.get("model")) else ""),
          "ctx": cfg.get("ctx") or 0, "caps": {"vision": bool(cfg.get("mmproj"))},
          "weights": weights(cfg.get("model")), "log": state.get("log"),
+         "stale": stale(name, state, cfg),
          "session": {"tokens": 0, "all": per.get(name) or {}}}
     # how fast this config runs as its context fills, from use and lab
     from . import usage
@@ -462,7 +478,8 @@ def build(failed=None, stopping=None):
                  "agents": _installed(), "defaults": {
                      "agent": d["agent"], "folder": d["folder"]},
                  "folders": d["folders"], "tailnet": _tailnet(),
-                 "home": str(Path.home())})
+                 "home": str(Path.home()),
+                 "configs": {n: mdl.form_values(c) for n, c in models.items()}})
     return snap
 
 

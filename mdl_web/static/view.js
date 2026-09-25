@@ -297,6 +297,8 @@ function page(s, ui, m) {
   v.rows.push({ type: "sec", label: "OPENS WITH" })
   pickers(s, v.rows, ui, run ? run.agent : (s.defaults || {}).agent, run ? run.folder : (s.defaults || {}).folder, run ? run.id : "")
   weights(v.rows, m.weights)
+  // a model in your config can be edited from its page; one find picked is not in it yet
+  var edit = (s.configs || {})[m.id] ? { label: "Edit config", action: "edit|" + m.id } : null
   if (run) {
     v.rows.push({ type: "sec", label: "REACH" })
     v.rows.push({ type: "field", icon: "machine", label: "this machine", value: "127.0.0.1:" + run.port })
@@ -307,11 +309,55 @@ function page(s, ui, m) {
         : { type: "field", icon: "tailnet", label: "tailnet", value: "needs an --api-key" })
     if (run.metrics === false) v.rows.push({ type: "error", label: "started without --metrics: add it to the model's args to count its tokens" })
     if (run.error) v.rows.push({ type: "error", label: run.error })
-    v.rows.push({ type: "acts", items: [{ label: "View logs", action: "log|" + run.id }, { label: "Stop model", action: "stop|" + run.id, danger: true }] })
+    // a saved edit waits for a restart: say so, and offer it
+    if (run.stale) v.rows.push({ type: "links", note: "its config has changed since it started",
+      items: [{ label: "Restart ›", action: "again|" + run.id + "|" + run.keys.join(","), primary: true }] })
+    v.rows.push({ type: "acts", items: [{ label: "View logs", action: "log|" + run.id }, edit,
+      { label: "Stop model", action: "stop|" + run.id, danger: true }].filter(Boolean) })
   } else {
-    v.rows.push({ type: "acts", items: [{ label: m.pull ? PICK.run(m) : "Run ›", action: m.action, primary: true }] })
+    v.rows.push({ type: "acts", items: [{ label: m.pull ? PICK.run(m) : "Run ›", action: m.action, primary: true }, edit].filter(Boolean) })
   }
   return v
+}
+
+// A model's config as its page edits it: what models.toml says, as text, with what has been typed or picked over
+// it. Numbers and names are typed; the two keys with a handful of answers are picked, as an agent is. Save writes
+// only what changed, and a model that runs can be saved and restarted in one go.
+var KV = ["f16", "bf16", "q8_0", "q5_1", "q5_0", "q4_1", "q4_0", "iq4_nl"]
+var UNSET = "llama.cpp default"
+var TYPED = [
+  ["SERVER", [["ngl", "layers, all or auto"], ["n_cpu_moe", UNSET], ["ctx", UNSET], ["kv_type"], ["flash_attn"],
+    ["parallel", UNSET], ["port", "8080"]]],
+  ["MORE", [["mmproj", "no vision"], ["group", "none"], ["args", "none"]]]]
+function editView(s, id, ui) {
+  var base = (s.configs || {})[id]
+  if (!base) return null
+  var draft = ui.draft || {}, val = function(f) { return draft[f] !== undefined ? draft[f] : base[f] }
+  var d = find(s.deployments, "id", id), running = d && d.state !== "error" ? d : null
+  var m = running || find([].concat.apply([], (s.kinds || []).map(function(x) { return x.models })), "id", id) || { name: id }
+  var rows = ui.problem ? [{ type: "error", label: ui.problem }] : []
+  var go = running ? "save|" + id + "|restart" : "save|" + id + "|"
+  TYPED.forEach(function(sec) {
+    rows.push({ type: "sec", label: sec[0] })
+    sec[1].forEach(function(f) {
+      var key = f[0], now = val(key), changed = now !== base[key]
+      if (f.length > 1) {
+        rows.push({ type: "input", key: key, label: key, value: now, base: base[key], hint: f[1], changed: changed, submit: go })
+        return
+      }
+      var choices = key === "flash_attn" ? ["", "on", "off"] : [""].concat(KV)
+      if (choices.indexOf(now) < 0) choices.push(now)
+      rows.push({ type: "field", label: key, value: now || UNSET, action: "pick|" + key, drop: true, open: ui.open === key,
+        changed: changed })
+      if (ui.open === key) choices.forEach(function(c) {
+        rows.push({ type: "opt", label: c || UNSET, on: c === now, action: "draft|" + key + "|" + c })
+      })
+    })
+  })
+  rows.push({ type: "acts", items: (running ? [{ label: "Save and restart ›", action: go, primary: true }, { label: "Save", action: "save|" + id + "|" }]
+    : [{ label: "Save", action: go, primary: true }]).concat([{ label: "Cancel", action: "back" }]) })
+  rows.push({ type: "links", note: "Saves to models.toml; mdl config --undo takes it back." })
+  return { back: true, rows: rows, hero: { name: m.name, family: m.family, chips: m.format ? spec(m) : [] } }
 }
 
 function runView(s, id, ui) {
@@ -383,7 +429,8 @@ function build(s, ui) {
   ui = ui || { view: "home" }
   HOME = (s.home || "").replace(/\\/g, "/")
   var v = (ui.view === "run" ? runView(s, ui.id, ui) : ui.view === "kind" ? kindView(s, ui.id, ui) : ui.view === "gpus" ? gpusView(s, ui)
-    : ui.view === "group" ? groupView(s, ui.id, Number(ui.key), ui) : ui.view === "log" ? logView(s, ui.id) : null) || homeView(s, ui)
+    : ui.view === "group" ? groupView(s, ui.id, Number(ui.key), ui) : ui.view === "log" ? logView(s, ui.id)
+    : ui.view === "edit" ? editView(s, ui.id, ui) : null) || homeView(s, ui)
   return Object.assign(v, { mark: mark(s) })
 }
 
