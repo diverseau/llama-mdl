@@ -24,6 +24,7 @@ import json
 import os
 import secrets
 import shutil
+import socketserver
 import sys
 import threading
 import time
@@ -455,6 +456,12 @@ def make_handler(hub, token, port):
 class Server(http.server.ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = False
+
+    def server_bind(self):
+        # HTTPServer's own asks reverse DNS for 127.0.0.1's name, which
+        # can stall a macOS start for tens of seconds; nothing here uses it
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
 
 
 def serve(port=0, token=None):

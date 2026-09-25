@@ -24,6 +24,7 @@ import http.server
 import json
 import os
 import signal
+import socketserver
 import sys
 import threading
 import time
@@ -188,6 +189,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
         pass                                  # keep our stdout clean
 
 
+class Server(http.server.HTTPServer):
+    def server_bind(self):
+        # HTTPServer's own asks reverse DNS for 127.0.0.1's name, which on a
+        # macOS runner stalls the "start" past any test's patience
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
+
+
 def main():
     if "--version" in sys.argv:
         print("version: 1234 (fake)")
@@ -209,7 +218,7 @@ def main():
     if MODE == "slow":
         # $MDL_FAKE_LOAD_S makes it a long one: a load a stop must not wait
         time.sleep(float(os.environ.get("MDL_FAKE_LOAD_S", "3.0")))
-    server = http.server.HTTPServer(("127.0.0.1", port_from_argv()), Handler)
+    server = Server(("127.0.0.1", port_from_argv()), Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     print("main: server is listening on http://127.0.0.1:%d" % port_from_argv(),
           flush=True)
