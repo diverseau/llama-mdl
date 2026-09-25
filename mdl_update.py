@@ -14,7 +14,6 @@ at the top of models.toml. Nothing is sent but the request itself.
 """
 
 import importlib.metadata
-import importlib.util
 import json
 import os
 import re
@@ -306,12 +305,10 @@ def command(inst, version):
     if inst.kind == "uv":
         return ["uv", "tool", "upgrade", PACKAGE]
     if inst.kind == "pip":
-        # pinned, so what is installed is what was offered; the extra is
-        # kept when the dashboard's dependency is here to be kept
-        extra = "[ui]" if importlib.util.find_spec("textual") else ""
+        # pinned, so what is installed is what was offered; textual is a
+        # dependency since 0.13, so an install that lacked it gains it
         argv = [sys.executable, "-m", "pip", "install", "--upgrade",
-                "--disable-pip-version-check",
-                "%s%s==%s" % (PACKAGE, extra, version)]
+                "--disable-pip-version-check", "%s==%s" % (PACKAGE, version)]
         return argv + (["--user"] if inst.user else [])
     mdl.die("running from %s; update it with git pull" % inst.describe())
 
@@ -466,7 +463,7 @@ def _why_failed(argv, code, lines, inst):
         # it, --user included, and forcing it past is not ours to do
         return ("pip will not install into this Python, which your OS or "
                 "package manager owns (PEP 668); install mdl with pipx "
-                "instead: pipx install \"llama-mdl[ui]\"")
+                "instead: pipx install llama-mdl")
     first = next((x for x in lines
                   if x.lower().startswith(("error:", "error "))), None)
     first = first or (lines[-1] if lines else "")

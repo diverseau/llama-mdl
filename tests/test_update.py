@@ -273,17 +273,12 @@ try:
           ["pipx", "upgrade", "llama-mdl"])
     check("uv upgrades by name", mdl_update.command(Inst("uv", root), NEWER),
           ["uv", "tool", "upgrade", "llama-mdl"])
-    with patch("importlib.util.find_spec", return_value=object()):
-        argv = mdl_update.command(Inst("pip", root), NEWER)
-        check("pip pins, keeps the extra, and is this interpreter's",
-              (argv[:3], argv[-1]), ([sys.executable, "-m", "pip"],
-                                     "llama-mdl[ui]==" + NEWER))
-        check("--user kept", mdl_update.command(Inst("pip", root, True),
-                                                NEWER)[-1], "--user")
-    with patch("importlib.util.find_spec", return_value=None):
-        check("no extra without textual",
-              mdl_update.command(Inst("pip", root), NEWER)[-1],
-              "llama-mdl==" + NEWER)
+    argv = mdl_update.command(Inst("pip", root), NEWER)
+    check("pip pins, and is this interpreter's",
+          (argv[:3], argv[-1]), ([sys.executable, "-m", "pip"],
+                                 "llama-mdl==" + NEWER))
+    check("--user kept", mdl_update.command(Inst("pip", root, True),
+                                            NEWER)[-1], "--user")
     check("a checkout is never installed over",
           "git pull" in (raises(mdl_update.command, Inst("source", root), NEWER)
                          or ""), True)

@@ -2,6 +2,37 @@
 
 Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
 
+## [Unreleased]
+
+Getting started, made shorter: from installing to a model answering.
+
+### Changed
+
+- The terminal dashboard installs with mdl: Textual is a dependency, so
+  `pip install llama-mdl` (or pipx, or `uv tool`) is the whole install and
+  bare `mdl` always opens the dashboard. `llama-mdl[ui]` still works and
+  adds nothing. The CLI still imports Textual only for `mdl tui`.
+- `mdl update` installs `llama-mdl==<newest>` without the `[ui]` extra; an
+  install that lacked Textual gains it as a dependency.
+- The README's non-goals no longer rule out downloading models or a web
+  UI: `mdl pull` and `mdl ui` are features.
+
+### Added
+
+- `mdl doctor` says what the llama-server on your PATH runs on - its GPU
+  and backend, as llama.cpp lists them - and warns about a CPU-only build
+  on a machine with an NVIDIA GPU.
+- A llama-server missing from PATH says how to install llama.cpp here
+  (`winget install ggml.llamacpp` on Windows, `brew install llama.cpp`
+  with Homebrew), in `mdl run`, `mdl init` and `mdl doctor`.
+- `tools/journey.py`: a new user's first session in a throwaway home,
+  timed step by step, with the longest stretch each step printed nothing.
+
+### Fixed
+
+- `tools/update_e2e.py` built wheels without `mdl_web`, which setuptools
+  refused since 0.12.
+
 ## [0.12.0] - 2026-09-25
 
 A web UI: `mdl ui` opens 0xSero's Local AI panel, ported, in a window

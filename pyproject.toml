@@ -21,7 +21,12 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
     "Topic :: Utilities",
 ]
-dependencies = []
+# The terminal dashboard comes with every install: one command to install,
+# and bare `mdl` always opens it. Tested floor, not a guess: 2.x fails the
+# suite, 3.0 passes. Capped at the next major because a TUI is exactly the
+# kind of dependency that breaks quietly. mdl.py still imports it only in
+# the `tui` handler, so a broken textual can break nothing but the TUI.
+dependencies = ["textual>=3,<9"]
 
 [project.urls]
 Homepage = "https://github.com/diverseau/llama-mdl"
@@ -29,13 +34,10 @@ Repository = "https://github.com/diverseau/llama-mdl"
 Issues = "https://github.com/diverseau/llama-mdl/issues"
 Changelog = "https://github.com/diverseau/llama-mdl/blob/main/CHANGELOG.md"
 
-# Only the dashboard has a dependency, and mdl.py never imports it, so
-# `pip install llama-mdl` stays dependency-free.
+# Kept so that `pip install "llama-mdl[ui]"` from before 0.13 still works;
+# the dashboard's dependency is a plain one now, so it adds nothing.
 [project.optional-dependencies]
-# Tested floor, not a guess: 2.x fails the suite, 3.0 passes. Capped at
-# the next major because a TUI is exactly the kind of dependency that
-# breaks quietly.
-ui = ["textual>=3,<9"]
+ui = []
 
 [project.scripts]
 mdl = "mdl:main"

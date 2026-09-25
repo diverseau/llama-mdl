@@ -22,7 +22,7 @@ from a config file, and works out what to run and how. Two halves:
 
 ```
 mdl.py            the whole CLI for running servers. Standard library only.
-mdl_ui.py         optional Textual dashboard (`mdl tui`). The only dependency.
+mdl_ui.py         the Textual dashboard (`mdl tui`). The only dependency.
 mdl_update.py     `mdl update`, the daily check, the dashboard's restart
 mdl_web/          the web UI (`mdl ui`, `mdl snapshot`): stdlib server,
                   static/ page with no build step; view.js is pure.
@@ -86,11 +86,13 @@ worse, silently.
    level.** It reaches `mdl_fit` lazily, inside the handlers that need it
    (`fit`, `eval`, `catalog`, `find`, `manifest`, `lab`, and the passive
    calibration after a launch), so the everyday commands load nothing
-   extra. `pyproject` declares
-   `dependencies = []`; only the `ui` extra has one.
-2. **`mdl_ui.py` is the only file allowed a dependency** (Textual, pinned
-   `>=3,<9` — a tested floor, not a guess). The CLI must never import it
-   except inside the `tui` handler. `mdl_web` is standard library, and
+   extra. `pyproject` declares one dependency, Textual, for the dashboard;
+   the `ui` extra is kept, empty, so pre-0.13 install commands still work.
+2. **`mdl_ui.py` is the only file that imports a dependency** (Textual,
+   pinned `>=3,<9` — a tested floor, not a guess). It installs with mdl
+   since 0.13, but the CLI must never import it except inside the `tui`
+   handler: `test_cli.py` checks that `--version`, `ps`, `list`, `check`
+   and `--help` leave it unloaded. `mdl_web` is standard library, and
    its page loads nothing from the network: no CDN, no build step.
 3. **`mdl_fit` and `mdl_update` are standard library too.** Keep them
    that way. `mdl_update` is reached lazily, like `mdl_fit`: by
@@ -300,9 +302,10 @@ the terminal back: `os.execve` on POSIX, a waited-on child on Windows
 
 ## Non-goals
 
-Stated in the README and enforced in review: no daemon, no downloading model
-weights, no hot-swap, no web UI. `mdl eval` is the one carve-out on
-hot-swap, and a narrow one — it starts a server for the run and stops it
+Stated in the README and enforced in review: no daemon and no hot-swap.
+(`mdl pull` and `mdl ui` are features: the non-goals once ruled out
+downloading weights and a web UI, and no longer do.) `mdl eval` is the one
+carve-out on hot-swap, and a narrow one — it starts a server for the run and stops it
 after, but only one it started itself; an already-running server is used as
 it stands and left up. Read the README's non-goals before implementing
 anything that sounds like model management.

@@ -892,6 +892,27 @@ class port_lock(file_lock):
                          f"try again in a moment")
 
 
+def llama_hint():
+    """How to get llama.cpp here: the one command that installs it, or
+    where its builds are. A package manager's build, not one of ours:
+    choosing a GPU backend and keeping it updated is that tool's job."""
+    if sys.platform == "win32":
+        return "winget install ggml.llamacpp"
+    if sys.platform == "darwin" or shutil.which("brew"):
+        return "brew install llama.cpp"
+    return "https://github.com/ggml-org/llama.cpp/releases"
+
+
+def missing_binary(binary):
+    """Why a llama-server cannot be found, and what to do about it. A bare
+    name missed on PATH means llama.cpp is not installed; a path someone
+    wrote down is theirs to fix."""
+    if os.sep in binary or "/" in binary:
+        return f"llama-server not found: {binary}"
+    return (f"llama-server not found: {binary} is not on your PATH; install "
+            f"llama.cpp ({llama_hint()}) or set llama_server in {CONFIG}")
+
+
 def spawn(name, models, binary, port=None):
     """Launch <name> detached, write its state file, return (proc, log, port).
 
@@ -933,7 +954,7 @@ def _spawn(name, models, binary, port):
     binary = argv[0]                    # the model's own, if it names one
     port = cfg.get("port", DEFAULT_PORT)
     if not shutil.which(binary) and not Path(binary).is_file():
-        die(f"llama-server not found: {binary}")
+        die(missing_binary(binary))
     if not Path(models[name]["model"]).is_file():
         die(f"model file not found: {models[name]['model']}")
     with port_lock(port):
@@ -1317,7 +1338,8 @@ def cmd_init(args):
         die(f"cannot write {CONFIG}: {e}")
     print(f"wrote {CONFIG}")
     if not shutil.which(DEFAULT_BIN):
-        print("set llama_server in it: llama-server is not on your PATH")
+        print("llama-server is not on your PATH: install llama.cpp (%s), "
+              "or set llama_server in it" % llama_hint())
     print("edit it, then run: mdl list")
 
 
@@ -1450,7 +1472,7 @@ def _doctor_model(name, cfg, binary, states, help_cache):
         except (OSError, ValueError):
             found = False
         if not found:
-            note("fail", "binary", "llama-server not found: %s" % binary)
+            note("fail", "binary", missing_binary(binary))
         else:
             note("ok", "binary", "llama-server found: %s" % binary)
             text, error = _doctor_probe(binary, "--version")
@@ -1522,6 +1544,31 @@ def _doctor_model(name, cfg, binary, states, help_cache):
     except (MdlError, OSError, ValueError, TypeError, OverflowError) as e:
         note("warn", "runtime", "cannot check runtime: %s" % e)
     return notes
+
+
+def _doctor_backend(notes, binary):
+    """What this llama-server can compute on, as llama.cpp lists it. A
+    build without a GPU backend on a machine with a GPU runs, and runs
+    many times slower, and nothing else says so."""
+    path = shutil.which(binary) or (binary if Path(binary).is_file() else None)
+    if not path:
+        return                      # each model's binary check says so
+    from mdl_fit import hw
+    devices = hw.llama_devices(path)
+    if devices:
+        _doctor_note(notes, "ok", "backend", "llama-server runs on %s" % ", ".join(
+            "%s%d %s (%.0f G)" % (b, i, name, total / (1 << 30))
+            for b, i, name, total, _ in devices))
+        return
+    gpus = [g["name"] for g in hw.nvidia()]
+    if gpus:
+        _doctor_note(notes, "warn", "backend", "llama-server lists no GPU, so "
+                     "it runs on the CPU only, but this machine has %s: "
+                     "install a GPU build (%s)" % (", ".join(gpus),
+                                                   llama_hint()))
+    else:
+        _doctor_note(notes, "ok", "backend", "llama-server runs on the CPU "
+                     "(it lists no GPU)")
 
 
 def _doctor_update(notes):
@@ -1612,6 +1659,7 @@ def cmd_doctor(args):
     except (OSError, ValueError) as e:
         _doctor_note(notes, "warn", "runtime", "cannot read state: %s" % e)
         states = {}
+    _doctor_backend(notes, binary)
     _doctor_update(notes)
     help_cache = {}
     for name in rest or sorted(models):
@@ -1650,8 +1698,8 @@ def _launch_ui(fx=None, args=("tui",)):
     try:
         from mdl_ui import run_ui
     except ImportError as e:
-        die("mdl tui needs textual: pip install \"llama-mdl[ui]\" ({})"
-            .format(e))
+        die("the dashboard needs textual, which did not import ({}); "
+            "reinstall mdl, or in a clone: pip install textual".format(e))
     _after_ui(run_ui(fx), args)
 
 

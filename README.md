@@ -19,18 +19,19 @@ mdl run ornith
 only, and on its own it is everything you need to run servers. Linux, macOS
 and Windows.
 
-The `mdl_fit` package behind `mdl fit`, `mdl eval`, `mdl catalog` and
-`mdl find` is standard library too, and `mdl.py` imports it only when you
-call one of those four, so the commands you use every day load nothing extra.
+The `mdl_fit` package behind `mdl fit`, `mdl eval`, `mdl catalog`,
+`mdl find` and `mdl pull` is standard library too, and `mdl.py` imports it
+only when you call one of those, so the commands you use every day load
+nothing extra.
 
 `mdl ui` opens the same thing in a window: your models, what is running
 and how fast, what each has served, run and stop at a click, and a coding
 agent opened on any of them. It is `mdl_web/`, standard library
 too, serving a page that has no build step and loads nothing from the
-network. `mdl_ui.py` adds an optional terminal dashboard (`mdl tui`). It is
-the only part that needs a dependency — [Textual](https://textual.textualize.io/) —
-and the CLI never imports it, so every command but `tui` stays
-dependency-free.
+network. `mdl tui` (or just `mdl`) is the terminal dashboard, `mdl_ui.py`.
+It is the one part with a dependency - [Textual](https://textual.textualize.io/),
+which installs with mdl - and the CLI imports it only for `tui`, so the
+other commands never load it.
 
 In practice it does two jobs. It manages llama.cpp servers through named
 model presets: start one from a config file, switch between GGUF models, or
@@ -42,9 +43,24 @@ whether the quant you picked is measurably worse than the one above it
 
 ## Install
 
+mdl runs llama.cpp's `llama-server`, so that comes first:
+
 ```sh
-pipx install llama-mdl          # or: pip install llama-mdl
-pipx install "llama-mdl[ui]"    # with the terminal dashboard
+winget install ggml.llamacpp    # Windows
+brew install llama.cpp          # macOS, and Linux with Homebrew
+```
+
+or a build for your GPU from
+[llama.cpp's releases](https://github.com/ggml-org/llama.cpp/releases).
+`mdl doctor` says which GPU the `llama-server` on your PATH runs on, and
+warns if it is a CPU-only build on a machine with a GPU.
+
+Then mdl itself, with any of:
+
+```sh
+uv tool install llama-mdl       # the quickest
+pipx install llama-mdl
+pip install llama-mdl
 ```
 
 To update:
@@ -59,11 +75,13 @@ that tool upgrade it, so nothing changes but the version. See
 `mdl --version` says which one you are running.
 
 The package is `llama-mdl`; the command it installs is `mdl`. (Plain `mdl`
-on PyPI is an unrelated project.) Nothing but the dashboard has a
-dependency, and that is [Textual](https://textual.textualize.io/).
+on PyPI is an unrelated project.) Its one dependency is
+[Textual](https://textual.textualize.io/), for the terminal dashboard.
+`pip install "llama-mdl[ui]"`, the way to get the dashboard before 0.13,
+still works and installs the same thing.
 
-Or run it straight from a clone - it is Python and the standard library,
-nothing to build:
+Or run it straight from a clone - it is Python, nothing to build, and
+only `mdl tui` needs Textual (`pip install textual`):
 
 ```sh
 git clone https://github.com/diverseau/llama-mdl ~/src/mdl
@@ -215,8 +233,8 @@ mdl manifest <name>
                  as JSON. --redact cuts paths and secrets for a bug report.
 ```
 
-Without textual installed, `mdl tui` fails with one line and bare `mdl`
-prints the usage string, exactly as it always did.
+In a clone without Textual, `mdl tui` fails with one line saying how to
+add it, and bare `mdl` prints the usage string.
 
 ```console
 $ mdl list
@@ -828,7 +846,7 @@ has the tool that installed mdl upgrade it:
 |---|---|
 | pipx | `pipx upgrade llama-mdl` |
 | `uv tool` | `uv tool upgrade llama-mdl` |
-| pip, into any environment | `python -m pip install -U "llama-mdl[ui]==<newest>"`, with `[ui]` only if Textual is there and `--user` if mdl is |
+| pip, into any environment | `python -m pip install -U "llama-mdl==<newest>"`, with `--user` if mdl is |
 
 It then starts a fresh interpreter to check that the new version is the
 one that imports, and says so if the `mdl` first on your `PATH` is a
@@ -934,27 +952,25 @@ is what `mdl fit`, `mdl find` and `mdl eval` are for.
 ## Non-goals
 
 These are deliberate, and issues asking for them will be closed with a link
-here. `mdl` starts servers, stops them, says what is running, and works out
-what to run and how. What it does not do is manage your models for you.
+here. `mdl` starts servers, stops them, says what is running, works out
+what to run and how, and fetches the model you chose. What it does not do
+is run things behind your back or decide for you what stays loaded.
 
-- **No daemon.** Nothing runs in the background except the server itself.
+- **No daemon.** Nothing runs in the background but the servers and the
+  usage recorder `mdl run` starts beside them, which goes 30 seconds after
+  the last one stops (`MDL_RECORD=off` keeps it from starting at all).
   `mdl catalog pull` fetches the published snapshot and exits; the nightly
   crawl that builds that snapshot runs in CI, not on your machine.
-- **No model downloading.** `mdl find` and `mdl catalog` will tell you which
-  GGUF to fetch, and Range-read the first few megabytes of it to get the
-  tensor table, but they never pull the weights. Use `huggingface-cli`, or
-  your browser.
 - **No hot-swap.** Nothing is unloaded to make room for something else; what
   you started stays started until you stop it. `mdl eval` is the single
   exception and a narrow one: it starts a server for the run and stops it
   afterwards, but only one it started itself - a server that was already up
   is used as it stands and left running.
-- **No web UI.** llama-server already ships one.
 
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). Short version: open an issue first,
-keep `mdl.py` free of dependencies, and run the tests.
+keep `mdl.py` to the standard library, and run the tests.
 
 ```sh
 python tests/run.py
