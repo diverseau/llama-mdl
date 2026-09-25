@@ -318,12 +318,12 @@ def _usage(names, now):
     life = {"requests": requests, "days": days, "start": int(start),
             "today": today, "since": _day(min(firsts)) if firsts else ""}
     loads = {n: u.get("load_s") for n, u in everything.items()}
-    return per, total, week, life, loads
+    return per, total, week, life, loads, everything
 
 
 # ---------------------------------------------------------- deployments --
 
-def deployment(name, state, cfg, keys, per, loads, own, now):
+def deployment(name, state, cfg, keys, per, loads, own, now, history=None):
     """A running server as the panel's deployment."""
     port, key = state.get("port"), api_key(state.get("argv"))
     started = state.get("started") or now
@@ -338,6 +338,12 @@ def deployment(name, state, cfg, keys, per, loads, own, now):
          "ctx": cfg.get("ctx") or 0, "caps": {"vision": bool(cfg.get("mmproj"))},
          "weights": weights(cfg.get("model")), "log": state.get("log"),
          "session": {"tokens": 0, "all": per.get(name) or {}}}
+    # how fast this config runs as its context fills, from use and lab
+    from . import usage
+    ck = usage.config_key(state.get("argv"))
+    d["session"]["speed"] = usage.speed(history or {}, ck)
+    d["session"]["lab"] = usage.lab_points(ck)
+    d["ctxMax"] = usage.ctx_of(state.get("argv")) or cfg.get("ctx") or 0
     status, _ = http_get(port, "/health", timeout=1)
     if status != 200:
         # 503 while the weights load; nothing at all before it listens
@@ -377,7 +383,7 @@ def build(failed=None, stopping=None):
     states = mdl.read_states()
     cards = machine()
     everything = sorted(set(models) | set(states))
-    per, total, week, life, loads = _usage(everything, now)
+    per, total, week, life, loads, booked = _usage(everything, now)
 
     on_gpu = [g["key"] for g in cards if not g.get("cpu")]
     deps = []
@@ -387,7 +393,8 @@ def build(failed=None, stopping=None):
             ngl = cfg.get("ngl", 99)
             keys = on_gpu if on_gpu and ngl != 0 else [cards[0]["key"]]
             d = deployment(name, states[name], cfg, keys, per, loads,
-                           agents.run_config(name, states[name]), now)
+                           agents.run_config(name, states[name]), now,
+                           booked.get(name))
             if name in stopping:
                 d["state"], d["detail"] = "stopping", "stopping"
             deps.append(d)

@@ -20,9 +20,13 @@ Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
   127.0.0.1 only, with a token per start and Host and Origin checks, and
   stops a little after its last window closes.
 - A usage recorder, started by `mdl run` and gone 30 s after the last
-  server stops, books each server's tokens, seconds and requests per
-  hour from its `/metrics` and `/slots`, surviving server restarts.
+  server stops, books each server's tokens and seconds per hour from its
+  `/metrics`, and every request and its speed at the depth it ran at
+  from its log. It survives server restarts and its own.
   `MDL_RECORD=off` turns it off.
+- A running model's page charts decode speed (or prefill, a click away)
+  against context depth, from your own requests, per config, with any
+  `mdl lab` results for the same config as dots.
 - Open on a running model starts a coding agent on it in a terminal: pi,
   claude, codex, opencode, omp, crush, grok, copilot or hermes.
 - A model whose server has an `--api-key` can be shared on your tailnet

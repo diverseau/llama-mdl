@@ -107,6 +107,69 @@ check("read: a server that restarted counts from zero", reset[:2], [3, 1])
 check("read: no metrics, nothing read",
       usage.read(st, usage.Cursor(), FakeGet([(501, None)])), None)
 
+# -- speed by context depth, from the server's log ---------------------------
+LOG = """\
+12.00.000.000 I slot launch_slot_: id  0 | task 7 | processing task, is_child = 0
+12.00.100.000 W srv          stop: cancel task, id_task = 9
+12.02.000.000 I slot print_timing: id  0 | task 7 | prompt processing, n_tokens =   2048, progress = 0.50, t =   4.00 s / 512.00 tokens per second
+12.04.000.000 I slot print_timing: id  0 | task 7 | prompt processing, n_tokens =   4096, progress = 1.00, t =   8.00 s / 512.00 tokens per second
+12.07.000.000 I slot print_timing: id  0 | task 7 | n_gen =     90, tg =  30.00 t/s, tg_3s =  30.00 t/s
+12.10.000.000 I slot print_timing: id  0 | task 7 | n_gen =    180, tg =  30.00 t/s, tg_3s =  30.00 t/s
+12.10.500.000 I slot print_timing: id  0 | task 7 | prompt eval time =    8100.00 ms /  4100 tokens (    1.98 ms per token,   506.17 tokens per second)
+12.10.500.001 I slot print_timing: id  0 | task 7 |        eval time =    6400.00 ms /   192 tokens (   33.33 ms per token,    30.00 tokens per second)
+12.10.500.002 I slot      release: id  0 | task 7 | stop processing: n_tokens = 4291, truncated = 0
+12.20.000.000 I slot launch_slot_: id  0 | task 12 | processing task, is_child = 0
+12.21.000.000 I slot print_timing: id  0 | task 12 | prompt eval time =    1000.00 ms /   500 tokens (    2.00 ms per token,   500.00 tokens per second)
+12.21.000.001 I slot print_timing: id  0 | task 12 |        eval time =    2000.00 ms /    50 tokens (   40.00 ms per token,    25.00 tokens per second)
+12.21.000.002 I slot      release: id  0 | task 12 | stop processing: n_tokens = 4841, truncated = 0
+"""  # noqa: E501 - llama-server's own lines, verbatim
+logf = Path(tempfile.mkdtemp(prefix="mdl-log-")) / "m.log"
+cut = LOG.index("n_gen =    180")
+logf.write_bytes(LOG[:cut].encode())
+reader = usage.LogReader()
+check("the log: nothing until a request is released", reader.read(logf), [])
+with open(logf, "ab") as fh:
+    fh.write(LOG[cut:].encode())
+done = reader.read(logf)
+check("the log: a request per release, a line split across reads kept whole",
+      len(done), 2)
+(pre, dec), (pre2, dec2) = done
+check("prefill batch by batch, at the depth each reached",
+      [(int(d), n, round(t, 2)) for d, n, t in pre],
+      [(1024, 2048, 4.0), (3072, 2048, 4.0)])
+check("decode three seconds at a time, past the prompt",
+      [(int(d), round(n / t, 1)) for d, n, t in dec], [(4190, 30.0), (4280, 30.0)])
+check("a request on a cached prompt starts as deep as its cache",
+      ([(int(d), n) for d, n, _ in pre2], [(int(d), n, t) for d, n, t in dec2]),
+      ([(4541, 500)], [(4816, 50, 2.0)]))
+logf.write_bytes(LOG[:40].encode())
+check("a log that starts again is read from its top",
+      (reader.read(logf), reader.offset), ([], 40))
+
+check("a config's id leaves out the port and key, not the context",
+      [usage.config_key(["s", "-c", "4096", "--port", "1", "--api-key", "a"])
+       == usage.config_key(["s", "-c", "4096", "--port", "2"]),
+       usage.config_key(["s", "-c", "4096"]) == usage.config_key(["s", "-c", "8192"])],
+      [True, False])
+check("the context a server runs with", [usage.ctx_of(["s", "-c", "8192"]),
+                                         usage.ctx_of(["s"])], [8192, None])
+data = {}
+usage.book_speed(data, "cfg", 8192, done)
+sp = usage.speed(data, "cfg", points=8)
+check("speed by depth: steps across the context, a step once it has time",
+      sp, {"n_ctx": 8192, "decode": [[4380, 28.8]],
+           "prefill": [[1024, 512.0], [3072, 512.0], [4541, 500.0]]})
+check("no speed for a config never seen", usage.speed(data, "other"), None)
+cur = usage.Cursor()
+cur.resume({"id": "1:2", "counters": [1, 2, 3, 4], "log": 99}, "1:2")
+check("a recorder carries on where the last left this server",
+      (cur.counters, cur.log.offset, cur.baseline), ([1, 2, 3, 4], 99, False))
+cur = usage.Cursor()
+cur.resume({"id": "1:1", "log": 99}, "1:2", booked_since=True)
+check("and with none for it, counts from what it reads now",
+      (cur.counters, cur.log.offset, cur.baseline), (None, 0, True))
+shutil.rmtree(logf.parent, ignore_errors=True)
+
 # ------------------------------------------------------------ agents ----
 home = Path(tempfile.mkdtemp(prefix="mdl-agent-"))
 argv, env, files = agents.argv("claude", "claude", "http://127.0.0.1:9", "m",
@@ -441,6 +504,23 @@ try:
     usage.tick(cursors)
     check("a second pass books nothing new", usage.load("keyed")["hours"],
           booked["hours"])
+    usage.tick({})
+    check("a recorder that starts again counts nothing twice",
+          usage.load("keyed")["hours"], booked["hours"])
+    check("the page has its speed and lab entries",
+          sorted(k for k in dep(snap(), "keyed")["session"]
+                 if k in ("speed", "lab")), ["lab", "speed"])
+    rec = {"argv": mdl.read_states()["keyed"]["argv"], "warmup": False,
+           "workload": {"prompt_tokens": 2000},
+           "metrics": {"tokens": 100, "decode": {"p50": 41.5},
+                       "prefill": {"tps": 900.0}}}
+    lab_dir = mdl.STATE_DIR / "lab"
+    lab_dir.mkdir(parents=True, exist_ok=True)
+    (lab_dir / "records.jsonl").write_text(json.dumps(rec) + "\n" + json.dumps(
+        dict(rec, warmup=True, metrics={"decode": {"p50": 1}})) + "\n")
+    check("what mdl lab measured for this config, warmups left out",
+          dep(snap(), "keyed")["session"]["lab"],
+          {"decode": [[2050, 41.5]], "prefill": [[1000, 900.0]]})
 
     # -- stop, as the page does it: in the background ------------------------
     for name in ("demo", "keyed"):

@@ -697,10 +697,19 @@ card shows how much of it is down, then it loads like any other. The
 picks come from a `mdl find` the page runs in the background, again
 every 12 hours or when your config changes.
 
-A running model's page has its averages for decode, prefill and the wait
-for a first token, what it served this session and this week, how long
-it has been up, which agent and folder Open uses, its weights on Hugging
-Face when the path says where they came from, and where it answers.
+A running model's page opens with how fast it runs as its context fills:
+decode speed against context depth, from 0 to the whole context, so you
+can see how much slower it gets as a session grows and how much of the
+context your use has reached. A click shows prefill instead. The points
+come from your own requests. When `mdl lab` has measured the same config,
+its results are dots on the same chart. A different config (context, KV
+type, layers, any flag but the port and key) starts a new chart. Until
+there are a few requests, the chart is the panel's token line.
+
+Below it: averages for decode, prefill and the wait for a first token,
+what it served this session and this week, how long it has been up,
+which agent and folder Open uses, its weights on Hugging Face when the
+path says where they came from, and where it answers.
 
 Open starts a coding agent on the model, in a terminal, in the folder you
 picked: pi, claude, codex, opencode, omp, crush, grok, copilot or hermes,
@@ -711,12 +720,16 @@ the agent's own config changes.
 The history comes from a recorder that `mdl run` starts alongside the
 first server and that goes 30 seconds after the last one stops, whether
 or not the page is open. Every 2 seconds it reads each server's
-`/metrics` and `/slots` and books what moved, per model and per hour, in
-`usage/` under mdl's state directory. It needs `--metrics` in the
-model's `args`; a server without it runs as usual and the page says
-what to add. Tokens and seconds are llama-server's own. Requests are
-counted from its slots and are a floor: two replies on one slot within
-2 seconds count as one. `MDL_RECORD=off` stops the recorder starting.
+`/metrics` and the new lines of its log, and books what moved, per model
+and per hour, in `usage/` under mdl's state directory. It needs
+`--metrics` in the model's `args`; a server without it runs as usual and
+the page says what to add. Tokens and seconds are llama-server's own
+counters. Requests, and the speed of each at the depth it ran at, come
+from the log: llama-server logs every request's prompt batch by batch,
+its generation every few seconds, and how full the context was when it
+finished, cached prompt included. The recorder keeps its place in the
+usage file, so if it restarts it carries on without counting anything
+twice. `MDL_RECORD=off` stops the recorder starting.
 
 A model can be shared on your tailnet with `tailscale serve`, but only
 when its server has an `--api-key`: anyone on the tailnet could use it

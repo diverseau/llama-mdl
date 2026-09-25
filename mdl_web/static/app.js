@@ -117,6 +117,41 @@
     return c
   }
 
+  // Speed against context depth: the same dim line over a faint area, from the first depth seen to the last, on
+  // the whole context's width so how much of it use has reached shows; what mdl lab measured as dots
+  function curve(c0) {
+    var c = el("canvas")
+    requestAnimationFrame(function() {
+      var w = c.clientWidth, h = c.clientHeight, dpr = window.devicePixelRatio || 1
+      if (!w || !h) return
+      c.width = Math.round(w * dpr); c.height = Math.round(h * dpr)
+      var g = c.getContext("2d"), pts = c0.points || []
+      g.scale(dpr, dpr)
+      function X(d) { return Math.min(1, d / (c0.xmax || 1)) * w }
+      // its top a little lower than the token line's: the labels sit where this line is highest
+      function Y(v) { return h - 4 * U - v / (c0.ymax || 1) * (h * 0.66) }
+      if (pts.length > 1) {
+        g.beginPath()
+        pts.forEach(function(p, i) { if (i) g.lineTo(X(p[0]), Y(p[1])); else g.moveTo(X(p[0]), Y(p[1])) })
+        g.strokeStyle = css(T.ink, 0.25)
+        g.lineWidth = 1.2 * U
+        g.stroke()
+        g.lineTo(X(pts[pts.length - 1][0]), h)
+        g.lineTo(X(pts[0][0]), h)
+        g.closePath()
+        g.fillStyle = css(T.ink, 0.06)
+        g.fill()
+      }
+      ;(c0.lab || []).forEach(function(p) {
+        g.beginPath()
+        g.arc(X(p[0]), Y(p[1]), 2 * U, 0, 2 * Math.PI)
+        g.fillStyle = css(T.ink, 0.5)
+        g.fill()
+      })
+    })
+    return c
+  }
+
   // -- rows --------------------------------------------------------------------------------------------------
   function lifeRow(r) {
     var days = r.cells || [], cols = Math.ceil(days.length / 7)
@@ -324,8 +359,14 @@
   function hero(h) {
     var who = el("div", "who", [el("div", "name", [logo(h.family, 14), label(h.name)]), chips(h.chips, "value")])
     var box = el("div", "hero", [who])
-    if (h.line) {
-      var surface = el("div", "hero-line breathes", [line(h.line)])
+    if (h.line || h.curve) {
+      var surface = el("div", "hero-line breathes", [h.curve ? curve(h.curve) : line(h.line)])
+      if (h.toggle) click(surface, h.toggle)
+      if (h.note) {
+        var note = label(h.note, "label note")
+        note.style.top = (8 * U - 3) + "px"
+        surface.appendChild(note)
+      }
       var t = label(h.top, "label"), m = label(h.mid, "label"), since = label(h.since, "label"), now = label(h.now, "label")
       t.style.top = (8 * U - 3) + "px"
       m.style.top = "50%"; m.style.transform = "translateY(-50%)"
@@ -404,7 +445,8 @@
   // a new view starts at its top with nothing chosen; within a view, a chosen model stays chosen
   function nav(patch) {
     var moved = patch.view !== undefined || patch.id !== undefined
-    ui = Object.assign({ view: ui.view, id: ui.id, open: "", key: ui.key, problem: "", model: moved ? "" : ui.model || "" }, patch)
+    ui = Object.assign({ view: ui.view, id: ui.id, open: "", key: ui.key, problem: "", model: moved ? "" : ui.model || "",
+      curve: ui.curve || "" }, patch)
     revealed = false
     if (moved) {
       var hash = ui.view === "home" ? "" : "#" + [ui.view, ui.id, ui.key].map(encodeURIComponent).join("/")
@@ -438,6 +480,7 @@
     case "kind": nav({ view: "kind", id: a[1], key: a[2] || "" }); break
     case "group": nav({ view: "group", id: a[1], key: a[2] }); break
     case "model": nav({ model: a[1] }); break
+    case "curve": nav({ curve: a[1] }); break
     case "gpus": nav({ view: "gpus", id: "" }); break
     case "pick": nav({ open: ui.open === a[1] ? "" : a[1] }); break
     case "home": goHome(); break

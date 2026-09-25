@@ -31,6 +31,12 @@ function home(dir) {
   if (HOME && dir.indexOf(HOME) === 0) return "~" + dir.slice(HOME.length)
   return dir.replace(/^\/home\/[^\/]+/, "~").replace(/^\/Users\/[^\/]+/, "~")
 }
+// a round number at or above n, for a chart's top: 1, 1.5, 2, 3, 4, 5, 6, 8 of its power of ten
+function nice(n) {
+  if (!(n > 0)) return 1
+  var p = Math.pow(10, Math.floor(Math.log(n) / Math.LN10))
+  return [1, 1.5, 2, 3, 4, 5, 6, 8, 10].map(function(m) { return m * p }).filter(function(v) { return v >= n })[0]
+}
 function find(list, key, v) { return (list || []).filter(function(x) { return x[key] === v })[0] || null }
 function working(d) { return d.state === "download" || d.state === "starting" || d.state === "stopping" }
 
@@ -249,7 +255,22 @@ function page(s, ui, m) {
   if ((m.caps || {}).vision) facts.push({ icon: "vision", text: "" })
   var v = { back: true, rows: [], hero: { name: m.name, family: m.family, chips: facts } }
   if (run) {
-    Object.assign(v.hero, { line: line, top: k(top) + " tokens", mid: k(Math.round(top / 2)), since: all.since || "", now: all.last ? ago(all.last, s.at) : "now" })
+    // How fast it runs as its context fills: decode (or prefill) against depth, from use, with what mdl lab
+    // measured for the same config as dots. Until there is enough of it, the panel's token line.
+    var sp = u.speed || {}, lab = u.lab || {}, kind = ui.curve === "prefill" ? "prefill" : "decode"
+    var have = function(x) { return (sp[x] || []).length >= 2 }
+    if (!have(kind)) kind = have("decode") ? "decode" : have("prefill") ? "prefill" : ""
+    if (kind) {
+      var pts = sp[kind], ref = lab[kind] || [], other = kind === "decode" ? "prefill" : "decode"
+      var ymax = nice(Math.max.apply(null, pts.concat(ref).map(function(p) { return p[1] })))
+      var xmax = sp.n_ctx || run.ctxMax || pts[pts.length - 1][0]
+      Object.assign(v.hero, { curve: { points: pts, lab: ref, xmax: xmax, ymax: ymax }, top: k(ymax) + " tok/s " + kind,
+        mid: "", since: "0", now: ctx(xmax) + " context", note: ref.length ? "● mdl lab" : "",
+        toggle: have(other) ? "curve|" + other : "" })
+    } else {
+      Object.assign(v.hero, { line: line, top: k(top) + " tokens", mid: k(Math.round(top / 2)), since: all.since || "",
+        now: all.last ? ago(all.last, s.at) : "now", note: "speed by context after a few requests" })
+    }
     v.rows.push({ type: "grid", cells: [
       { v: all.decode != null ? String(all.decode) : "–", u: "tok/s", k: "decode avg" },
       { v: all.prefill != null ? k(all.prefill) : "–", u: "tok/s", k: "prefill avg" },
@@ -361,7 +382,7 @@ function build(s, ui) {
   return Object.assign(v, { mark: mark(s) })
 }
 
-return { build: build, parse: parse, apca: apca, reach: reach, tones: tones, over: over, LC: LC, k: k, gb: gb, ctx: ctx, dur: dur, ago: ago }
+return { build: build, parse: parse, nice: nice, apca: apca, reach: reach, tones: tones, over: over, LC: LC, k: k, gb: gb, ctx: ctx, dur: dur, ago: ago }
 })();
 
 if (typeof module !== "undefined") module.exports = View;

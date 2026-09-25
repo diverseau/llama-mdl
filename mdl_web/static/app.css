@@ -173,6 +173,7 @@ button, input { font: inherit; color: inherit; }
 .hero-line { position: relative; height: calc(110 * var(--u)); background: var(--surface); border: 1.45px solid rgba(var(--theme), 0.19);
              overflow: hidden; }
 .hero-line .l { position: absolute; left: calc(var(--pad) - 1.45px); color: var(--label); }
+.hero-line .l.note { left: auto; right: calc(6 * var(--u)); font-size: var(--caption-2); }
 
 /* nothing to run: a square wave, one line, and where to read how */
 .soon { padding: calc(28 * var(--u)) 0 calc(20 * var(--u)); display: flex; flex-direction: column; align-items: center;

@@ -150,7 +150,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         with COUNT_LOCK:
             COUNT["prompt"] += 10
             COUNT["task"] += 1
-            COUNT["slot"] = COUNT["task"]
+            COUNT["slot"] = task = COUNT["task"]
+        # the lines llama-server logs for a request, which the recorder reads
+        print("slot launch_slot_: id  0 | task %d | processing task, "
+              "is_child = 0" % task, flush=True)
         for i, delta in enumerate(deltas):
             with COUNT_LOCK:
                 COUNT["predicted"] += 1
@@ -166,6 +169,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
             except OSError:
                 return                     # the client hung up mid-stream
             time.sleep(pause)
+        n = len(deltas)
+        print("slot print_timing: id  0 | task %d | prompt eval time =     "
+              "100.00 ms /    10 tokens (   10.00 ms per token,   100.00 tokens "
+              "per second)" % task, flush=True)
+        print("slot print_timing: id  0 | task %d |        eval time =     "
+              "%.2f ms /    %d tokens" % (task, n * pause * 1000 or 1.0, n),
+              flush=True)
+        print("slot      release: id  0 | task %d | stop processing: n_tokens "
+              "= %d, truncated = 0" % (task, 10 + n), flush=True)
         try:
             self.wfile.write(b"data: [DONE]\n\n")
             self.wfile.flush()

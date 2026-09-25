@@ -123,6 +123,23 @@ check("run: reach: here, and the tailnet with a key",
       [["this machine", "127.0.0.1:8080", ""], ["tailnet", "share", "share|qwen"]]);
 check("run: logs and stop", byType(run, "acts")[0].items.map(i => i.action), ["log|qwen", "stop|qwen"]);
 
+// how fast it runs as the context fills, once there is some of it
+const fast = Object.assign({}, snap, { deployments: [Object.assign({}, snap.deployments[0], { ctxMax: 32768,
+  session: Object.assign({}, snap.deployments[0].session, {
+    speed: { n_ctx: 32768, decode: [[2000, 41.2], [9000, 33.9], [16000, 28.1]], prefill: [[1000, 850], [5000, 700]] },
+    lab: { decode: [[4200, 39.0]], prefill: [] } }) })] });
+const fh = View.build(fast, { view: "run", id: "qwen" }).hero;
+check("run: speed against context: its scale, its span, the lab's dots",
+      [fh.line, fh.curve.xmax, fh.curve.ymax, fh.curve.lab, fh.top, fh.mid, fh.since, fh.now, fh.note],
+      [undefined, 32768, 50, [[4200, 39.0]], "50 tok/s decode", "", "0", "32K context", "● mdl lab"]);
+check("run: a click shows prefill", fh.toggle, "curve|prefill");
+const ph = View.build(fast, { view: "run", id: "qwen", curve: "prefill" }).hero;
+check("run: prefill on its own scale, a click back",
+      [ph.curve.points.length, ph.curve.ymax, ph.top, ph.toggle, ph.note], [2, 1000, "1K tok/s prefill", "curve|decode", ""]);
+check("run: until then, the token line and a word on what is coming",
+      [run.hero.curve, run.hero.note], [undefined, "speed by context after a few requests"]);
+check("numbers: nice", [View.nice(41.2), View.nice(850), View.nice(9.1), View.nice(0)], [50, 1000, 10, 1]);
+
 const shared = Object.assign({}, snap, { deployments: [Object.assign({}, snap.deployments[0],
   { shared: "https://box.tail.ts.net:8080" })] });
 const sf = byType(View.build(shared, { view: "run", id: "qwen" }), "field").pop();
