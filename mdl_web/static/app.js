@@ -83,6 +83,20 @@
     if (o.action) click(b, o.action)
     return b
   }
+  // Text that must fit gives way in its middle, as the panel's long values do, so both ends of a long model name
+  // stay readable; `room` is the width it may take
+  function squeeze(node, room, size) {
+    var full = node.dataset.full || node.textContent
+    node.dataset.full = full
+    if (room <= 0 || ink(full, size).adv <= room) { node.textContent = full; return }
+    for (var n = full.length - 1; n > 1; n--) {
+      var cut = full.slice(0, Math.ceil(n / 2)) + "…" + full.slice(full.length - Math.floor(n / 2))
+      if (ink(cut, size).adv <= room) { node.textContent = cut; return }
+    }
+  }
+  // where a node starts, from its row's left edge
+  function leftIn(node, row) { return node.getBoundingClientRect().left - row.getBoundingClientRect().left }
+
   function right(node, margin) {
     node.classList.add("right")
     if (margin !== undefined) node.style.right = margin + "px"
@@ -212,8 +226,14 @@
     click(row, r.toggle)
     row.appendChild(el("div", "left", [label(r.label, r.open ? "ink" : "value"), r.hint ? label(r.hint, "alert") : null]))
     if (r.run) {
-      var go = right(click(el("div", "go", [logo(r.run.family, 12), label(r.run.label, "ink")]), r.run.action))
+      var runLabel = label(r.run.label, "ink")
+      var go = right(click(el("div", "go", [logo(r.run.family, 12), runLabel]), r.run.action))
       row.appendChild(go)
+      requestAnimationFrame(function() {
+        var left = row.querySelector(".left")
+        var room = row.clientWidth - G - (leftIn(left, row) + left.offsetWidth + 16 * U) - (go.offsetWidth - runLabel.offsetWidth)
+        squeeze(runLabel, room)
+      })
       if (r.dismiss) {
         var dis = click(label("dismiss", "dismiss"), r.dismiss)
         row.appendChild(dis)
@@ -304,12 +324,7 @@
     row.appendChild(val)
     // a long value (a weights repository) gives way in its middle rather than run over the label
     if (!r.secret) requestAnimationFrame(function() {
-      var full = val.textContent, room = row.clientWidth - left.offsetLeft - left.offsetWidth - G - 16 * U
-      if (room <= 0 || ink(full).adv <= room) return
-      for (var n = full.length - 1; n > 1; n--) {
-        var cut = full.slice(0, Math.ceil(n / 2)) + "…" + full.slice(full.length - Math.floor(n / 2))
-        if (ink(cut).adv <= room) { val.textContent = cut; return }
-      }
+      squeeze(val, row.clientWidth - left.offsetLeft - left.offsetWidth - G - 16 * U)
     })
     if (r.secret) {
       click(val, r.action)
@@ -323,9 +338,13 @@
   }
 
   function optRow(r) {
-    var row = click(el("div", "row opt"), r.action)
-    row.appendChild(el("div", "left", [el("span", "glyph", [r.on ? icon("check") : null]), label(r.label, r.on ? "ink" : "value")]))
-    if (r.value) row.appendChild(right(label(r.value, "label")))
+    var row = click(el("div", "row opt"), r.action), name = label(r.label, r.on ? "ink" : "value")
+    var val = r.value ? right(label(r.value, "label")) : null
+    row.appendChild(el("div", "left", [el("span", "glyph", [r.on ? icon("check") : null]), name]))
+    if (val) row.appendChild(val)
+    requestAnimationFrame(function() {
+      squeeze(name, row.clientWidth - G - (val ? val.offsetWidth + 16 * U : 0) - leftIn(name, row))
+    })
     return row
   }
 
