@@ -525,9 +525,9 @@ def next_step(c):
     if c.local:
         return "mdl eval %s" % c.local
     name = re.sub(r"[^a-z0-9-]+", "-", c.node.split("/")[-1].lower()).strip("-")
-    # mdl does not download: the step is to fetch the file, then fit it
-    return "download %s/%s, then mdl fit <file> --write %s && mdl eval %s" % (
-        c.repo, c.key, name, name)
+    # pull fetches it and writes a preset fitted to this machine
+    return "mdl pull %s:%s --name %s && mdl eval %s" % (c.repo, c.key, name,
+                                                         name)
 
 
 def clip(s, n):
@@ -600,7 +600,11 @@ def as_json(main, explore, qm, profile):
                 "s_turn": c.fit.speed.s_turn,
                 "decode": c.fit.speed.decode_d, "score": c.q.mean,
                 "sd": c.q.sd, "evidence": sorted(c.q.kinds),
-                "warnings": c.q.flags, "exact": c.exact}
+                "warnings": c.q.flags, "exact": c.exact,
+                # what mdl pull and the web UI need: the repo, the file
+                # and its size, and the context it would run at
+                "repo": c.repo, "file": c.key, "size": c.size,
+                "ctx": c.fit.flags.ctx}
     return {"profile": profile, "scale": qm.scale_name,
             "main": [one(c) for c in main[:ROWS]],
             "explore": [one(c) for c in explore[:5]]}

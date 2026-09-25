@@ -89,6 +89,13 @@ const sc = View.build(starting, {}).rows.filter(r => r.type === "run")[0];
 check("home: a load in progress: how far, and Stop",
       [sc.progress, sc.sub, sc.primary.label, sc.mem], [40, "loading · 40%", "Stop model", ""]);
 
+const pulling = Object.assign({}, snap, { deployments: [{ id: "tiny", name: "tiny", family: "", keys: ["1"],
+  state: "download", detail: "3 of 14 GB", percent: 21, session: { tokens: 0, all: {} } }] });
+const pc = View.build(pulling, {}).rows.filter(r => r.type === "run")[0];
+check("home: a download: how much of how much, the bar, and Stop",
+      [pc.sub, pc.progress, pc.primary.label, pc.gpu], ["3 of 14 GB", 21, "Stop model", "RTX 3090"]);
+check("home: the window's mark while it downloads", View.build(pulling, {}).mark, "busy");
+
 // -- nothing to run ----------------------------------------------------------
 const soon = View.build(Object.assign({}, snap, { kinds: [], deployments: [] }), {});
 check("an empty config: what is missing, and where to read how",

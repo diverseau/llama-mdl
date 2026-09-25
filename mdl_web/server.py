@@ -187,6 +187,13 @@ def act(hub, req):
     except mdl.MdlError as e:
         return 409, {"ok": False, "error": str(e)}
     states = mdl.read_states()
+    if verb in ("run", "again") and name.startswith("hf:"):
+        return _pull(name, str(req.get("keys") or ""), states)
+    if verb in ("run", "again") and name not in models:
+        from mdl_fit import pull
+        spec = (pull.read_all().get(name) or {}).get("spec")
+        if spec:                         # a download that stopped: again
+            return _pull(spec, str(req.get("keys") or ""), states)
     if verb in ("run", "again"):
         if name not in models:
             return 404, {"ok": False, "error": "no model named %r" % name}
@@ -204,6 +211,9 @@ def act(hub, req):
                          daemon=True).start()
         return 200, {"ok": True}
     if verb == "stop":
+        from mdl_fit import pull
+        if name not in states and pull.stop(name):
+            return 200, {"ok": True}     # a download stopped, or dismissed
         if name in hub.failed and name not in states:
             del hub.failed[name]         # dismiss a start that failed
             return 200, {"ok": True}
@@ -231,6 +241,42 @@ def act(hub, req):
             return 409, {"ok": False, "error": str(e)}
         return 200, {"ok": True}
     return 400, {"ok": False, "error": "unknown verb %r" % verb}
+
+
+def _pull(spec, keys, states):
+    """Run on a model find picked: download it, add it, start it - a
+    process of its own, so it outlives the page."""
+    from mdl_fit import pull, remote
+
+    from . import proc
+    try:
+        repo, _ = remote.parse_spec(spec)
+    except remote.RemoteError as e:
+        return 404, {"ok": False, "error": str(e)}
+    name = pull.default_name(repo)
+    if name in states:
+        return 409, {"ok": False, "error": "%s is running" % name}
+    going = pull.read_all().get(name)
+    if going and going.get("state") != "error":
+        return 409, {"ok": False, "error": "%s is downloading" % name}
+    pull.stop(name)                      # forget a pull that failed before
+    if not all(k.isalnum() for k in keys.split(",") if k):
+        keys = ""
+    try:
+        proc.detach(["pull", spec, "--run", "--quiet", "--keys", keys])
+    except OSError as e:
+        return 409, {"ok": False, "error": str(e)}
+    return 200, {"ok": True}
+
+
+def picks_loop(hub):
+    """mdl find for the Config pages, again when it goes stale."""
+    while not hub.halt.is_set():
+        try:
+            snapshot.refresh_picks()
+        except Exception:               # noqa: BLE001 - no picks, no harm
+            pass
+        hub.halt.wait(600)
 
 
 def log_tail(name):
@@ -495,6 +541,7 @@ def main(args):
         httpd, hub, url = serve(port)
     except OSError as e:
         mdl.die("cannot listen on 127.0.0.1:%s: %s" % (port or "any", e))
+    threading.Thread(target=picks_loop, args=(hub,), daemon=True).start()
     how = open_window(url, mdl.STATE_DIR / "ui-browser") if opening else None
     print({"window": "mdl ui: opened in an app window",
            "browser": "mdl ui: opened in your browser"}.get(

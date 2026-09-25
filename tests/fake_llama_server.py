@@ -180,6 +180,9 @@ def main():
     if "--version" in sys.argv:
         print("version: 1234 (fake)")
         return
+    if "--list-devices" in sys.argv:
+        print("Available devices:")        # none: a CPU machine
+        return
     if "--help" in sys.argv:
         print("-m --mmproj -ngl --n-cpu-moe -c -np --port -fa "
               "--cache-type-k --cache-type-v --metrics --api-key")

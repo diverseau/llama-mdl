@@ -28,6 +28,14 @@ Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
 - A model whose server has an `--api-key` can be shared on your tailnet
   (`tailscale serve`) from its page.
 - `mdl snapshot`: what the web UI shows, as JSON.
+- `mdl pull org/repo[:quant]`: a GGUF from the Hub, pinned to its
+  commit, taken from the Hugging Face cache when a matching copy is
+  there, else downloaded with resume; every file checked against the
+  Hub's sha256, then a preset fitted to this machine. `--run` starts it.
+  `mdl find` now suggests it as the next step.
+- A card's Config in `mdl ui` offers `mdl find`'s picks from the Hub
+  after your own models; Run on one pulls it, its card showing how much
+  is down, then starts it.
 
 - `b` in `mdl ui`, pressed while a measurement runs, stops it at once -
   mid-reply or mid-load, without waiting out a full context's prefill.

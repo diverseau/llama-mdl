@@ -25,6 +25,8 @@ from pathlib import Path
 SCHEMA = 2
 GPU_TTL = 2.0                   # nvidia-smi is ~100 ms; not every snapshot
 AGENTS_TTL = 30.0               # which agents are installed changes rarely
+PICKS_TTL = 12 * 3600           # mdl find again after this, or a config change
+PICKS = 6                       # find's picks offered beside your own models
 TAKEN = 0.6                     # a card this full with nothing of ours on it
 
 
@@ -223,6 +225,75 @@ def recipe(name, cfg):
             "port": cfg.get("port"), "group": cfg.get("group")}
 
 
+# ---------------------------------------------------------------- picks --
+
+def picks_path():
+    from . import agents
+    return agents.ui_dir() / "picks.json"
+
+
+def _config_stamp():
+    import mdl
+    try:
+        return mdl.CONFIG.stat().st_mtime
+    except OSError:
+        return None
+
+
+def refresh_picks(force=False):
+    """Run `mdl find` for the page when its last run is stale: slow (it
+    may fetch GGUF headers), so a thread's job, never a snapshot's."""
+    import mdl
+    try:
+        old = json.loads(picks_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        old = {}
+    stamp = _config_stamp()
+    if (not force and old.get("config") == stamp
+            and time.time() - (old.get("at") or 0) < PICKS_TTL):
+        return False
+    from . import proc
+    raw = proc.output(["find", "--json"], timeout=900)
+    try:
+        found = json.loads(raw)
+        rows = found.get("main", []) + found.get("explore", [])
+    except (TypeError, ValueError, AttributeError):
+        rows = old.get("rows", [])      # keep the last good ones
+    picks_path().parent.mkdir(parents=True, exist_ok=True)
+    mdl.write_atomic(picks_path(), json.dumps(
+        {"at": time.time(), "config": stamp, "rows": rows}))
+    return True
+
+
+def picks(models):
+    """find's picks on the Hub as the panel's recipes, leaving out any
+    already pulled: Run on one downloads it first."""
+    try:
+        rows = json.loads(picks_path().read_text(encoding="utf-8"))["rows"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return []
+    have = {w["repository"] for cfg in models.values()
+            for w in weights(cfg.get("model"))}
+    out, seen = [], set()
+    for r in rows:
+        repo, f = r.get("repo"), r.get("file")
+        if (not str(r.get("spec", "")).startswith("hf:") or not repo
+                or not f or repo in have or repo in seen):
+            continue
+        seen.add(repo)
+        q = r.get("quant")
+        name = str(r.get("model") or repo).split("/")[-1]
+        out.append({"id": "hf:%s:%s" % (repo, f), "name": name,
+                    "family": family(name, f),
+                    "format": "GGUF" + (" · " + q if q and q != "?" else ""),
+                    "ctx": r.get("ctx") or 0,
+                    "sizeGb": round((r.get("size") or 0) / 2**30, 1),
+                    "caps": {"vision": False},
+                    "weights": [{"repository": repo, "revision": "main"}],
+                    "cards": 1, "port": None, "group": None, "pull": True})
+    return out[:PICKS]
+
+
 # ---------------------------------------------------------------- usage --
 
 def _day(t):
@@ -326,6 +397,23 @@ def build(failed=None, stopping=None):
                          "keys": on_gpu or [cards[0]["key"]], "state": "error",
                          "error": failed[name], "port": cfg.get("port"),
                          "session": {"tokens": 0, "all": per.get(name) or {}}})
+    # downloads the page started: how far, or why one stopped
+    from mdl_fit import pull
+    for name, st in pull.read_all().items():
+        if name in states or any(d["id"] == name for d in deps):
+            continue
+        known = {g["key"] for g in cards}
+        keys = ([k for k in st.get("keys") or [] if k in known]
+                or on_gpu or [cards[0]["key"]])
+        d = {"id": name, "name": name,
+             "family": family(name, st.get("repo")), "keys": keys,
+             "port": None, "session": {"tokens": 0, "all": {}}}
+        if st.get("state") == "error":
+            d.update(state="error", error=st.get("error") or "stopped")
+        else:
+            d.update(state="download", detail=st.get("detail") or "starting",
+                     percent=st.get("percent") or 0)
+        deps.append(d)
     held = {k for d in deps if d["state"] != "error" for k in d["keys"]}
 
     # the configured models, best first: the one last run, then the rest
@@ -334,7 +422,7 @@ def build(failed=None, stopping=None):
     order = sorted(models, key=lambda n: -last[n])
     if not any(last.values()):
         order = list(models)
-    recipes = [recipe(n, models[n]) for n in order]
+    recipes = [recipe(n, models[n]) for n in order] + picks(models)
     kinds = []
     for g in cards:
         kd = next((k for k in kinds if k["hw"] == g["name"]), None)

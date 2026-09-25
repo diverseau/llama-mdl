@@ -267,6 +267,15 @@
     else if (!r.secret && r.action) val.appendChild(document.createTextNode(" ›"))
     right(val)
     row.appendChild(val)
+    // a long value (a weights repository) gives way in its middle rather than run over the label
+    if (!r.secret) requestAnimationFrame(function() {
+      var full = val.textContent, room = row.clientWidth - left.offsetLeft - left.offsetWidth - G - 16 * U
+      if (room <= 0 || ink(full).adv <= room) return
+      for (var n = full.length - 1; n > 1; n--) {
+        var cut = full.slice(0, Math.ceil(n / 2)) + "…" + full.slice(full.length - Math.floor(n / 2))
+        if (ink(cut).adv <= room) { val.textContent = cut; return }
+      }
+    })
     if (r.secret) {
       click(val, r.action)
       var hid = label(revealed ? r.value : r.value.replace(/[^.:\/]+/g, "•••"), "secret")
@@ -396,8 +405,8 @@
   function activate(action) {
     var a = (action || "").split("|")
     switch (a[0]) {
-    case "run": post({ verb: "run", name: a[1] }); goHome(); break
-    case "again": post({ verb: "again", name: a[1] }); goHome(); break
+    case "run": post({ verb: "run", name: a[1], keys: a[2] || "" }); goHome(); break
+    case "again": post({ verb: "again", name: a[1], keys: a[2] || "" }); goHome(); break
     case "stop": post({ verb: "stop", name: a[1] }); goHome(); break
     case "open": post({ verb: "open", name: a[1] }); break
     case "share": post({ verb: "share", name: a[1] }); break

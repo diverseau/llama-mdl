@@ -199,6 +199,8 @@ mdl fit ...      What a GGUF will do on this machine, and the flags for it.
 mdl eval <name>  Score a model on a private, auto-graded suite.
 mdl catalog ...  The hub's models, fine-tunes and GGUF quants, offline.
 mdl find         The best model this machine can run, and how to run it.
+mdl pull <org/repo[:quant]> [--run]
+                 Download a GGUF, check it, and add a preset fitted to it.
 mdl lab ...      The same prompt through variants of a config, measured.
 mdl manifest <name>
                  What <name> is running as: its command line, llama.cpp
@@ -528,9 +530,28 @@ expected quality:
   shown on your local scale instead.
 
 Models no one has rated show up under "worth testing" when they could
-beat the #1, with the steps that would rate them: download the quant,
-then `mdl fit <file> --write NAME` and `mdl eval NAME`. mdl does not
-download models itself.
+beat the #1, with the steps that would rate them: `mdl pull` the quant,
+then `mdl eval NAME`.
+
+## Downloading a model: `mdl pull`
+
+```
+mdl pull unsloth/Qwen3-8B-GGUF:Q4_K_M          download, check, add a preset
+mdl pull unsloth/Qwen3-8B-GGUF:Q4_K_M --run    and start it
+mdl pull org/repo:Q8_0 --name mine             under a name of your own
+```
+
+`mdl pull` pins the repo at its current commit and takes every shard of
+the quant, plus its vision projector when the repo ships one (the full
+precision one, when there is a choice). A file already in the Hugging
+Face cache is used where it is, once its size and sha256 match the
+Hub's. Anything else is downloaded to `$MDL_MODELS` (else `~/models`),
+in a folder per repo with a `.mdl-pull.json` naming the repo and commit.
+Every file is checked against the Hub's sha256 before it is kept. A
+download that stops keeps its `.part`, and the next `mdl pull` resumes
+it. Then it adds a preset fitted to this machine (`mdl fit --write`),
+with `--metrics`, on a port no other preset uses. A gated repo needs
+`HF_TOKEN`.
 
 The catalog is one SQLite file in `~/.cache/mdl/` (`$XDG_CACHE_HOME` is
 honoured). `mdl catalog
@@ -670,7 +691,11 @@ column a week. Then each running model as a card: its tokens as a line,
 its decode speed, what it has served, and Open. Then every card that is
 free, a click from running the first model in your config, and any start
 that failed, to run again or dismiss. Each card's Config lists every
-model in your config to pick from.
+model in your config to pick from, then up to six of `mdl find`'s picks
+from the Hub. Run on one of those pulls it first (`mdl pull --run`): its
+card shows how much of it is down, then it loads like any other. The
+picks come from a `mdl find` the page runs in the background, again
+every 12 hours or when your config changes.
 
 A running model's page has its averages for decode, prefill and the wait
 for a first token, what it served this session and this week, how long

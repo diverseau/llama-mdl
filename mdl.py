@@ -55,7 +55,8 @@ USAGE = ("usage: mdl {init|config [--path|--undo|--history]|"
          "stop [<name>|--all]|ps [--json]|logs [-f] [name]|"
          "ui [--no-open] [--port N]|tui [--no-fx]|snapshot|"
          "fit <gguf|hf:repo|name> [--help]|eval <name> [--help]|"
-         "find [--help]|manifest <name>|lab {run|report|compare} [--help]|"
+         "find [--help]|pull <org/repo[:quant]> [--run]|manifest <name>|"
+         "lab {run|report|compare} [--help]|"
          "catalog {pull|build|tree|search|stats}} [--version]")
 
 # The model path mdl init leaves behind. check knows to treat it as a
@@ -1041,6 +1042,11 @@ def cmd_find(args):
     find.main(args)
 
 
+def cmd_pull(args):
+    from mdl_fit import pull
+    pull.main(args)
+
+
 def cmd_manifest(args):
     from mdl_fit import manifest
     manifest.main(args)
@@ -1667,7 +1673,7 @@ COMMANDS = {"init": cmd_init, "config": cmd_config,
             "ui": cmd_ui, "tui": cmd_tui, "snapshot": cmd_snapshot,
             "run": cmd_run, "stop": cmd_stop, "ps": cmd_ps, "list": cmd_list,
             "logs": cmd_logs, "fit": cmd_fit, "eval": cmd_eval,
-            "catalog": cmd_catalog, "find": cmd_find,
+            "catalog": cmd_catalog, "find": cmd_find, "pull": cmd_pull,
             "manifest": cmd_manifest, "lab": cmd_lab}
 
 
