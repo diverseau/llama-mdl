@@ -334,10 +334,11 @@ class Inventory:
     @property
     def quant_label(self):
         """Q4_K_M-style label from the filename, else the dominant type."""
-        m = re.search(r"(UD-)?(I?Q\d[_A-Z0-9]*|BF16|F16|F32|MXFP4\w*)",
-                      Path(str(self.source)).stem, re.I)
-        if m:
-            return m.group(0).upper()
+        # the catalog's reading, so a PQ2_0 file is not called Q2_0 here
+        from .catalog import quant_of
+        q = quant_of(str(self.source))
+        if q != "?":
+            return q
         sizes = {}
         for t in self.tensors:
             sizes[t.type] = sizes.get(t.type, 0) + t.nbytes

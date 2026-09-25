@@ -175,9 +175,11 @@ check("quant labels come out of file names",
           "Qwen3-8B-UD-Q4_K_XL.gguf", "LFM2.5-8B-A1B-Q8_0.gguf",
           "Qwen3.8-27B-GSQ-RCO-IQ2_XS-mtp.gguf", "model.q4_k_m.gguf",
           "gpt-oss-20b-MXFP4.gguf", "Model-BF16.gguf", "Qwen3-8B.fp16.gguf",
-          "types/NVFP4.gguf", "weird.gguf")],
+          "types/NVFP4.gguf", "weird.gguf",
+          "Bonsai-2-27B-PQ2_0-CRACK.gguf",
+          "Laguna-XS-2.1-APEX-I-Balanced.gguf", "M-APEX-Quality-MTP.gguf")],
       ["UD-Q4_K_XL", "Q8_0", "IQ2_XS", "Q4_K_M", "MXFP4", "BF16", "F16",
-       "NVFP4", "?"])
+       "NVFP4", "?", "PQ2_0", "APEX-I-Balanced", "APEX-Quality"])
 # Every name here was in a published snapshot, listed as a quant of a 27B.
 AUX = ["MTP/mtp-Qwen3.8-27B-Q4_0.gguf", "mtp-Qwen3.8-27B-BF16.gguf",
        "mtp-RVN.gguf", "Qwen3.8-27B-Uncensored-draft-Q8_0.gguf",

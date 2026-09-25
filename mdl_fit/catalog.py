@@ -75,10 +75,12 @@ CREATE INDEX IF NOT EXISTS evals_node ON evals(node);
 
 QUANT = re.compile(
     r"(?i)(?:^|[-_.])((?:UD-)?(?:IQ\d_[A-Z0-9]+(?:_[A-Z0-9]+)?"
-    r"|Q\d(?:_[A-Z0-9]+)*|TQ\d_\d|BF16|F16|F32|FP16|FP32|MXFP4(?:_MOE)?"
-    r"|NVFP4))"
+    r"|Q\d(?:_[A-Z0-9]+)*|TQ\d_\d|PQ\d_\d|BF16|F16|F32|FP16|FP32"
+    r"|MXFP4(?:_MOE)?|NVFP4|APEX(?:-I)?-[A-Z]+))"
     r"(?=[-_.]|$)")
 SPELLINGS = {"FP16": "F16", "FP32": "F32"}
+# mudler's APEX mixes are named in words, and read that way: I-Balanced
+KEEP_CASE = ("APEX",)
 
 
 class CatalogError(Exception):
@@ -108,7 +110,9 @@ def quant_of(name):
     found = QUANT.findall(stem)
     if not found:
         return "?"
-    q = found[-1].upper()
+    q = found[-1]
+    if not q.upper().startswith(KEEP_CASE):
+        q = q.upper()
     return SPELLINGS.get(q, q)
 
 

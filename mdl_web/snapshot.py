@@ -281,7 +281,8 @@ def picks(models):
                 or not f or repo in have or repo in seen):
             continue
         seen.add(repo)
-        q = r.get("quant")
+        # picks saved before the name reader knew a quant say "?"
+        q = r.get("quant") if r.get("quant") not in (None, "?") else quant(f)
         # named for what lands on disk: the repo, not the model find
         # ranked it as (a fine-tune's parent, say)
         name = re.sub(r"[-_.]gguf", "", repo.split("/")[-1], flags=re.I)
