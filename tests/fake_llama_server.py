@@ -29,7 +29,9 @@ import threading
 import time
 
 MODE = os.environ.get("MDL_FAKE_MODE", "")
-COUNT = {"prompt": 0, "predicted": 0, "decode": 0}
+# tasks are numbered as llama-server numbers them: its own reads take
+# one too, and a slot keeps the number of the last reply it ran
+COUNT = {"prompt": 0, "predicted": 0, "decode": 0, "task": 0, "slot": None}
 COUNT_LOCK = threading.Lock()
 
 
@@ -65,14 +67,24 @@ def metrics():
 class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         key = flag("--api-key")
-        if (key and self.path in ("/metrics", "/props")
+        if (key and self.path in ("/metrics", "/props", "/slots")
                 and self.headers.get("Authorization") != "Bearer " + key):
             self.send_error(401)
             return
         if self.path == "/health" and MODE != "silent":
             body = b'{"status":"ok"}'
         elif self.path == "/metrics" and "--metrics" in sys.argv:
+            with COUNT_LOCK:
+                COUNT["task"] += 1
             body = metrics()
+        elif self.path == "/slots":
+            with COUNT_LOCK:
+                COUNT["task"] += 1
+                slot = {"id": 0, "n_ctx": int(flag("-c", 4096)),
+                        "is_processing": False}
+                if COUNT["slot"] is not None:
+                    slot["id_task"] = COUNT["slot"]
+            body = json.dumps([slot]).encode()
         elif self.path == "/props":
             loaded = flag("-m", "")
             if MODE == "othermodel":
@@ -137,6 +149,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def _stream(self, deltas, pause, timings=None):
         with COUNT_LOCK:
             COUNT["prompt"] += 10
+            COUNT["task"] += 1
+            COUNT["slot"] = COUNT["task"]
         for i, delta in enumerate(deltas):
             with COUNT_LOCK:
                 COUNT["predicted"] += 1

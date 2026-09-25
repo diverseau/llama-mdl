@@ -24,7 +24,9 @@ from a config file, and works out what to run and how. Two halves:
 mdl.py            the whole CLI for running servers. Standard library only.
 mdl_ui.py         optional Textual dashboard (`mdl tui`). The only dependency.
 mdl_web/          the web UI (`mdl ui`, `mdl snapshot`): stdlib server,
-                  static/ page with no build step; view.js is pure
+                  static/ page with no build step; view.js is pure.
+                  usage.py is the recorder `mdl run` starts; agents.py
+                  opens coding agents; tailnet.py wraps `tailscale serve`
 mdl_fit/          everything behind fit / eval / catalog / find / lab
 tests/            run.py drives the suites; support.py + fake_llama_server.py
 docs/fit-plan.md  the design notes for mdl fit

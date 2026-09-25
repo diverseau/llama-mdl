@@ -907,7 +907,20 @@ def spawn(name, models, binary, port=None):
         if running:
             die(f"'{name}' is already running (pid {running['pid']}, "
                 f"port {running['port']}); run 'mdl stop {name}' first")
-        return _spawn(name, models, binary, port)
+        launched = _spawn(name, models, binary, port)
+    _record()
+    return launched
+
+
+def _record():
+    """Book what the servers serve while any is up, for mdl ui's history:
+    one quiet recorder process, started here if none is. Never fails a
+    launch."""
+    try:
+        from mdl_web import usage
+    except ImportError:
+        return
+    usage.ensure()
 
 
 def _spawn(name, models, binary, port):

@@ -24,7 +24,8 @@ The `mdl_fit` package behind `mdl fit`, `mdl eval`, `mdl catalog` and
 call one of those four, so the commands you use every day load nothing extra.
 
 `mdl ui` opens the same thing in a window: your models, what is running
-and how fast, run and stop at a click. It is `mdl_web/`, standard library
+and how fast, what each has served, run and stop at a click, and a coding
+agent opened on any of them. It is `mdl_web/`, standard library
 too, serving a page that has no build step and loads nothing from the
 network. `mdl_ui.py` adds an optional terminal dashboard (`mdl tui`). It is
 the only part that needs a dependency — [Textual](https://textual.textualize.io/) —
@@ -661,14 +662,40 @@ The design, and what is left of it, is in
 `mdl ui` opens a window over the same config and the same state file as
 the CLI. Anything you do in it is visible to the CLI and vice versa.
 
-Each running model is a card: its tokens as a line, tokens a second now,
-and the tokens it has served since `mdl ui` started. Under them, every
-model that is not running, grouped by the config's `group`, each a click
-from running; a start from the page that fails says why, from its log. A model's page
-has its averages for decode and prefill, how full its context is, its
-URL and whether it wants an API key, its log, and its settings when it
-is stopped. The numbers need `--metrics` in the model's `args`, as the
-dashboard's do.
+The page is [0xSero's Local AI panel for
+Omarchy](https://github.com/0xSero/omarchy-local-ai) (MIT), drawn the
+same, row for row, over mdl's models instead of his recipes. At the top,
+your lifetime: tokens and requests, and a grid of the last 20 weeks, a
+column a week. Then each running model as a card: its tokens as a line,
+its decode speed, what it has served, and Open. Then every card that is
+free, a click from running the first model in your config, and any start
+that failed, to run again or dismiss. Each card's Config lists every
+model in your config to pick from.
+
+A running model's page has its averages for decode, prefill and the wait
+for a first token, what it served this session and this week, how long
+it has been up, which agent and folder Open uses, its weights on Hugging
+Face when the path says where they came from, and where it answers.
+
+Open starts a coding agent on the model, in a terminal, in the folder you
+picked: pi, claude, codex, opencode, omp, crush, grok, copilot or hermes,
+whichever are installed. What the agent needs to find the server is
+written under mdl's state directory, readable only by you; nothing in
+the agent's own config changes.
+
+The history comes from a recorder that `mdl run` starts alongside the
+first server and that goes 30 seconds after the last one stops, whether
+or not the page is open. Every 2 seconds it reads each server's
+`/metrics` and `/slots` and books what moved, per model and per hour, in
+`usage/` under mdl's state directory. It needs `--metrics` in the
+model's `args`; a server without it runs as usual and the page says
+what to add. Tokens and seconds are llama-server's own. Requests are
+counted from its slots and are a floor: two replies on one slot within
+2 seconds count as one. `MDL_RECORD=off` stops the recorder starting.
+
+A model can be shared on your tailnet with `tailscale serve`, but only
+when its server has an `--api-key`: anyone on the tailnet could use it
+otherwise. The page offers the share when both are there.
 
 It opens as an app window of its own when there is a Chromium browser
 (Edge, Chrome, Brave, Chromium), with a profile of its own under mdl's
@@ -683,10 +710,6 @@ another origin. The page updates as the servers do, pushed over one
 connection rather than polled.
 
 `mdl snapshot` prints what the page is drawn from, as JSON.
-
-The look - one card a model, labels a tone below values, one filled
-button a page - is from [0xSero's Local AI panel for
-Omarchy](https://github.com/0xSero/omarchy-local-ai) (MIT).
 
 ## The terminal dashboard
 

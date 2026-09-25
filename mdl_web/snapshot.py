@@ -1,25 +1,31 @@
-"""The one document the web UI draws: every model in the config, which of
-them run, how fast and on what, and the GPUs - as `mdl snapshot` prints it.
+"""The one document the web UI draws, as `mdl snapshot` prints it.
 
-A snapshot is a point in time. Speeds that need two points - tokens a
-second while a reply streams, the tokens-over-time line on a model's card
-- come from a Tracker, which the web server keeps between snapshots; a
-one-shot `mdl snapshot` has none, and gives the server's own averages.
+Its shape is the one omarchy-local-ai's panel reads, so the page's view
+model can be his, line for line: `gpus` (the cards), `kinds` (the cards
+grouped by model, each with the models it can run, best first - here,
+every model in the config), `deployments` (what runs: loading, ready,
+stopping, or a start that failed), `life` (tokens a day for 20 weeks),
+`total` and `week`, and what an agent opens with.
+
+Figures that need history - all-time averages, the token line, the
+activity grid - come from usage.py's recorder. Everything else is read
+now: the state files, each server's /health and /metrics, nvidia-smi.
 """
 
-import collections
+import datetime
 import json
-import os
 import re
 import shutil
 import subprocess
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 
-SCHEMA = 1
-SERIES_POINTS = 720             # a model card's line: 12 minutes at 1 s
+SCHEMA = 2
 GPU_TTL = 2.0                   # nvidia-smi is ~100 ms; not every snapshot
+AGENTS_TTL = 30.0               # which agents are installed changes rarely
+TAKEN = 0.6                     # a card this full with nothing of ours on it
 
 
 # ---------------------------------------------------------------- http --
@@ -27,7 +33,7 @@ GPU_TTL = 2.0                   # nvidia-smi is ~100 ms; not every snapshot
 def http_get(port, path, timeout=1.5, key=None):
     """(status, body) from a server on 127.0.0.1, or (None, None) when it
     does not answer. `key` is its --api-key: llama-server asks for it on
-    /metrics and /props, though not on /health."""
+    /metrics, /props and /slots, though not on /health."""
     req = urllib.request.Request("http://127.0.0.1:%d%s" % (port, path))
     if key:
         req.add_header("Authorization", "Bearer " + key)
@@ -89,9 +95,8 @@ _GPU = {"at": -1e9, "value": []}
 
 
 def gpus():
-    """Every NVIDIA card: name, memory used and total in bytes, temperature
-    and load. Other vendors are not read yet: an empty list, and the page
-    draws no card line rather than a wrong one."""
+    """Every NVIDIA card as the panel reads one: key, name, memory in use
+    (MiB) and in all (GB), temperature. Other vendors are not read yet."""
     now = time.monotonic()
     if now - _GPU["at"] < GPU_TTL:
         return _GPU["value"]
@@ -101,9 +106,8 @@ def gpus():
     if exe:
         try:
             raw = subprocess.run(
-                [exe, "--query-gpu=name,memory.used,memory.total,"
-                 "temperature.gpu,utilization.gpu",
-                 "--format=csv,noheader,nounits"],
+                [exe, "--query-gpu=index,name,memory.used,memory.total,"
+                 "temperature.gpu", "--format=csv,noheader,nounits"],
                 capture_output=True, text=True, timeout=4,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)
             ).stdout
@@ -111,176 +115,267 @@ def gpus():
                 parts = [p.strip() for p in line.split(",")]
                 if len(parts) != 5:
                     continue
-
-                def num(x):
-                    try:
-                        return float(x)
-                    except ValueError:
-                        return None
-                used, total = num(parts[1]), num(parts[2])
-                out.append({"name": parts[0],
-                            "used": int(used * 2**20) if used else None,
-                            "total": int(total * 2**20) if total else None,
-                            "temp": num(parts[3]), "load": num(parts[4])})
+                used, total, temp = (_num(parts[2]), _num(parts[3]),
+                                     _num(parts[4]))
+                out.append({"key": parts[0], "name": _short(parts[1]),
+                            "usedMiB": used,
+                            "vramGb": round(total / 1024) if total else None,
+                            "tempC": int(temp) if temp is not None else None})
         except (OSError, subprocess.SubprocessError):
             out = []
     _GPU["value"] = out
     return out
 
 
-# -------------------------------------------------------------- tracker --
-
-class Tracker:
-    """What a live speed needs: the last reading of each server's counters,
-    and the line of its tokens over time. Keyed by pid, so a restart under
-    the same name starts a new line rather than drawing a cliff."""
-
-    def __init__(self, points=SERIES_POINTS):
-        self.points = points
-        self.last = {}          # pid -> (time, decoded, prompt)
-        self.series = {}        # pid -> deque of [time, tokens]
-        self.props = {}         # pid -> /props, read once
-
-    def observe(self, pid, now, metrics):
-        """Tokens a second since the last reading, from n_decode_total -
-        the one counter that moves while a reply streams (the others
-        publish once the request ends). None the first time."""
-        decoded = metrics.get("llamacpp:n_decode_total")
-        prompt = metrics.get("llamacpp:prompt_tokens_total")
-        rate = None
-        prev = self.last.get(pid)
-        if prev and decoded is not None and prev[1] is not None:
-            gap = max(now - prev[0], 1e-3)
-            rate = max(0.0, (decoded - prev[1]) / gap)
-        self.last[pid] = (now, decoded, prompt)
-        total = session_tokens(metrics)
-        if total is not None:
-            line = self.series.setdefault(
-                pid, collections.deque(maxlen=self.points))
-            line.append([round(now, 1), int(total)])
-        return rate
-
-    def forget(self, alive):
-        """Drop what is kept for servers no longer running."""
-        for table in (self.last, self.series, self.props):
-            for pid in [p for p in table if p not in alive]:
-                del table[pid]
-
-
-def session_tokens(metrics):
-    """Prompt and generated tokens since the server started."""
-    p = metrics.get("llamacpp:prompt_tokens_total")
-    g = metrics.get("llamacpp:tokens_predicted_total")
-    if p is None and g is None:
-        return None
-    return (p or 0) + (g or 0)
-
-
-def _avg(metrics, tokens, seconds):
-    t, s = metrics.get(tokens), metrics.get(seconds)
-    return round(t / s, 1) if t and s else None
-
-
-# ------------------------------------------------------------- snapshot --
-
-def _size(path):
+def _num(x):
     try:
-        return os.path.getsize(path)
-    except (OSError, TypeError, ValueError):
+        return float(x)
+    except ValueError:
         return None
 
 
-def _quant(path):
+def _short(name):
+    return re.sub(r"^(NVIDIA )?(GeForce )?", "", name).strip() or name
+
+
+def machine():
+    """The cards, or - with none mdl can read - the CPU and its memory as
+    one, so a machine without a GPU still has somewhere to run."""
+    found = gpus()
+    if found:
+        return found
+    from mdl_fit import hw
+    total, avail = hw.ram()
+    used = (total - avail) / 2**20 if total and avail is not None else None
+    return [{"key": "cpu", "name": "CPU", "usedMiB": used,
+             "vramGb": round(total / 2**30) if total else None,
+             "tempC": None, "cpu": True}]
+
+
+# --------------------------------------------------------------- models --
+
+def _files(path):
+    from mdl_fit.manifest import shards
+    try:
+        return shards(str(path))
+    except Exception:           # noqa: BLE001 - a missing file: no size
+        return [str(path)]
+
+
+def size_gb(cfg):
+    total = 0
+    for key in ("model", "mmproj"):
+        if cfg.get(key):
+            for f in _files(cfg[key]):
+                try:
+                    total += Path(f).stat().st_size
+                except OSError:
+                    pass
+    return round(total / 2**30, 1) if total else 0
+
+
+def quant(path):
     from mdl_fit import catalog
     q = catalog.quant_of(str(path or ""))
     return None if q == "?" else q
 
 
-def live(state, tracker):
-    """A running server as the page shows it: loading or ready, and, once
-    ready, what its counters say."""
-    port, pid = state.get("port"), state.get("pid")
-    key = api_key(state.get("argv"))
+def family(name, path):
+    """Which logo: only the ones the page ships."""
+    text = "%s %s" % (name, Path(str(path or "")).name)
+    if re.search(r"qwen|qwq", text, re.I):
+        return "qwen"
+    if re.search(r"lfm|liquid", text, re.I):
+        return "lfm"
+    return ""
+
+
+HF_CACHE = re.compile(r"models--([^/\\]+)--([^/\\]+)[/\\]snapshots[/\\]"
+                      r"([0-9a-f]{7,40})")
+
+
+def weights(path):
+    """The Hugging Face repository a file came from, when its path says
+    so (the hub's cache, or `mdl pull`'s record beside it)."""
+    p = str(path or "")
+    m = HF_CACHE.search(p)
+    if m:
+        return [{"repository": "%s/%s" % (m.group(1), m.group(2)),
+                 "revision": m.group(3)}]
+    try:
+        rec = json.loads(Path(p).with_name(".mdl-pull.json").read_text())
+        if rec.get("repository"):
+            return [{"repository": rec["repository"],
+                     "revision": rec.get("revision") or "main"}]
+    except (OSError, ValueError, AttributeError):
+        pass
+    return []
+
+
+def recipe(name, cfg):
+    """A configured model as the panel's recipe."""
+    q = quant(cfg.get("model"))
+    return {"id": name, "name": name, "family": family(name, cfg.get("model")),
+            "format": "GGUF" + (" · " + q if q else ""),
+            "ctx": cfg.get("ctx") or 0, "sizeGb": size_gb(cfg),
+            "caps": {"vision": bool(cfg.get("mmproj"))},
+            "weights": weights(cfg.get("model")), "cards": 1,
+            "port": cfg.get("port"), "group": cfg.get("group")}
+
+
+# ---------------------------------------------------------------- usage --
+
+def _day(t):
+    d = datetime.datetime.fromtimestamp(t)
+    return "%s %d" % (d.strftime("%b"), d.day)
+
+
+def _usage(names, now):
+    from . import usage
+    everything = usage.load_all()
+    per = {n: usage.summarize(everything.get(n, {}), now) for n in names}
+    for s in per.values():
+        s["since"] = _day(s["first"]) if s["first"] else ""
+    total = sum(usage.summarize(u, now)["tokens"] for u in everything.values())
+    week_from = now - 7 * 86400
+    week = sum(int(r[0] + r[1]) for u in everything.values()
+               for h, r in u.get("hours", {}).items() if int(h) >= week_from)
+    requests = sum(int(r[4]) for u in everything.values()
+                   for r in u.get("hours", {}).values())
+    firsts = [u.get("first") for u in everything.values() if u.get("first")]
+    start, today, days = usage.days(everything, now)
+    life = {"requests": requests, "days": days, "start": int(start),
+            "today": today, "since": _day(min(firsts)) if firsts else ""}
+    loads = {n: u.get("load_s") for n, u in everything.items()}
+    return per, total, week, life, loads
+
+
+# ---------------------------------------------------------- deployments --
+
+def deployment(name, state, cfg, keys, per, loads, own, now):
+    """A running server as the panel's deployment."""
+    port, key = state.get("port"), api_key(state.get("argv"))
+    started = state.get("started") or now
+    d = {"id": name, "name": name, "family": family(name, cfg.get("model")),
+         "keys": keys, "port": port, "api_key": bool(key),
+         "startedAt": datetime.datetime.fromtimestamp(
+             started, datetime.timezone.utc).isoformat(),
+         "agent": own["agent"], "folder": own["folder"],
+         "shared": own.get("shared") if key else None,
+         "format": "GGUF" + (" · " + quant(cfg.get("model"))
+                             if quant(cfg.get("model")) else ""),
+         "ctx": cfg.get("ctx") or 0, "caps": {"vision": bool(cfg.get("mmproj"))},
+         "weights": weights(cfg.get("model")), "log": state.get("log"),
+         "session": {"tokens": 0, "all": per.get(name) or {}}}
     status, _ = http_get(port, "/health", timeout=1)
-    now = time.time()
-    out = {"pid": pid, "port": port, "started": state.get("started"),
-           "up": round(now - (state.get("started") or now)),
-           "log": state.get("log"), "api_key": bool(key),
-           "url": "http://127.0.0.1:%d/v1" % port if port else None}
     if status != 200:
         # 503 while the weights load; nothing at all before it listens
-        out["state"] = "loading"
-        return out
-    out["state"] = "ready"
-    if tracker is not None and pid not in tracker.props:
-        tracker.props[pid] = http_json(port, "/props", key=key) or {}
-    props = (tracker.props.get(pid) if tracker is not None
-             else http_json(port, "/props", key=key)) or {}
-    out["n_ctx"] = (props.get("default_generation_settings") or {}).get(
-        "n_ctx")
-    mstatus, raw = http_get(port, "/metrics", key=key)
-    if mstatus != 200:
-        # no --metrics in its args: running, but nothing to count with
-        out["metrics"] = None
-        return out
-    m = parse_metrics(raw)
-    rate = tracker.observe(pid, time.monotonic(), m) if tracker else None
-    if rate is None:
-        rate = m.get("llamacpp:predicted_tokens_seconds")
-    out["metrics"] = {
-        "tps": round(rate, 1) if rate is not None else None,
-        "decode_avg": _avg(m, "llamacpp:tokens_predicted_total",
-                           "llamacpp:tokens_predicted_seconds_total"),
-        "prefill_avg": _avg(m, "llamacpp:prompt_tokens_total",
-                            "llamacpp:prompt_seconds_total"),
-        "tokens": session_tokens(m),
-        "generated": m.get("llamacpp:tokens_predicted_total"),
-        "busy": m.get("llamacpp:requests_processing"),
-        "waiting": m.get("llamacpp:requests_deferred"),
-        "kv": m.get("llamacpp:kv_cache_usage_ratio"),
-    }
-    if tracker is not None and pid in tracker.series:
-        out["series"] = list(tracker.series[pid])
-    return out
+        d["state"], d["detail"] = "starting", "loading"
+        took = loads.get(name)
+        d["percent"] = (min(95, int((now - started) / took * 100))
+                        if took else -1)
+        return d
+    d["state"] = "ready"
+    status, raw = http_get(port, "/metrics", key=key)
+    if status == 200:
+        m = parse_metrics(raw)
+        d["session"]["tokens"] = int(
+            (m.get("llamacpp:prompt_tokens_total") or 0)
+            + (m.get("llamacpp:tokens_predicted_total") or 0))
+    else:
+        d["metrics"] = False     # no --metrics: nothing to count with
+    return d
 
 
-CFG_KEYS = ("ctx", "ngl", "n_cpu_moe", "kv_type", "flash_attn", "parallel",
-            "port", "group")
-
-
-def build(tracker=None):
-    """The snapshot. A config mdl cannot read is an `error`, not a raise:
-    the page says what is wrong rather than going blank."""
+def build(failed=None, stopping=None):
+    """The snapshot. `failed` is {name: why} for starts from the page that
+    did not come up; `stopping` the names being stopped. A config mdl
+    cannot read is an `error`, not a raise: the page says what is wrong
+    rather than going blank."""
     import mdl
-    from mdl_fit import hw
-    total, avail = hw.ram()
-    snap = {"schema": SCHEMA, "version": mdl.VERSION, "at": round(time.time()),
-            "config": str(mdl.CONFIG), "gpus": gpus(),
-            "ram": {"total": total, "free": avail}, "models": [],
-            "error": None}
+
+    from . import agents
+    failed, stopping = failed or {}, stopping or set()
+    now = time.time()
+    snap = {"schema": SCHEMA, "version": mdl.VERSION, "at": round(now),
+            "config": str(mdl.CONFIG), "error": None}
     try:
         models, _ = mdl.load_config()
     except mdl.MdlError as e:
         models, snap["error"] = {}, str(e)
     states = mdl.read_states()
-    for name, cfg in models.items():
-        path = cfg.get("model")
-        m = {"name": name, "file": str(path) if path else None,
-             "quant": _quant(path), "size": _size(path),
-             "vision": bool(cfg.get("mmproj")), "state": "stopped",
-             "own_server": bool(cfg.get("llama_server"))}
-        m.update({k: cfg.get(k) for k in CFG_KEYS if cfg.get(k) is not None})
-        m.setdefault("port", mdl.DEFAULT_PORT)
+    cards = machine()
+    everything = sorted(set(models) | set(states))
+    per, total, week, life, loads = _usage(everything, now)
+
+    on_gpu = [g["key"] for g in cards if not g.get("cpu")]
+    deps = []
+    for name in everything:
+        cfg = models.get(name, {})
         if name in states:
-            m["run"] = live(states[name], tracker)
-            m["state"] = m["run"]["state"]
-        snap["models"].append(m)
-    for name, state in states.items():
-        if name not in models:
-            # running, but gone from the config since it started
-            run = live(state, tracker)
-            snap["models"].append({"name": name, "state": run["state"],
-                                   "run": run, "unconfigured": True})
-    if tracker is not None:
-        tracker.forget({s.get("pid") for s in states.values()})
+            ngl = cfg.get("ngl", 99)
+            keys = on_gpu if on_gpu and ngl != 0 else [cards[0]["key"]]
+            d = deployment(name, states[name], cfg, keys, per, loads,
+                           agents.run_config(name, states[name]), now)
+            if name in stopping:
+                d["state"], d["detail"] = "stopping", "stopping"
+            deps.append(d)
+        elif name in failed:
+            deps.append({"id": name, "name": name,
+                         "family": family(name, cfg.get("model")),
+                         "keys": on_gpu or [cards[0]["key"]], "state": "error",
+                         "error": failed[name], "port": cfg.get("port"),
+                         "session": {"tokens": 0, "all": per.get(name) or {}}})
+    held = {k for d in deps if d["state"] != "error" for k in d["keys"]}
+
+    # the configured models, best first: the one last run, then the rest
+    # in the config's order
+    last = {n: (per.get(n) or {}).get("last") or 0 for n in models}
+    order = sorted(models, key=lambda n: -last[n])
+    if not any(last.values()):
+        order = list(models)
+    recipes = [recipe(n, models[n]) for n in order]
+    kinds = []
+    for g in cards:
+        kd = next((k for k in kinds if k["hw"] == g["name"]), None)
+        if not kd:
+            kd = {"hw": g["name"], "keys": [], "free": [], "taken": [],
+                  "models": recipes, "groups": []}
+            kinds.append(kd)
+        kd["keys"].append(g["key"])
+        if g["key"] in held:
+            continue
+        full = (g.get("usedMiB") or 0) / 1024 / (g.get("vramGb") or 1)
+        if not g.get("cpu") and full > TAKEN:
+            kd["taken"].append(g["key"])
+        else:
+            kd["free"].append(g["key"])
+    for g in cards:
+        g["busy"] = g["key"] in held
+    if not recipes:
+        kinds = []
+
+    d = agents.defaults()
+    snap.update({"gpus": cards, "kinds": kinds, "deployments": deps,
+                 "total": total, "week": week, "life": life,
+                 "agents": _installed(), "defaults": {
+                     "agent": d["agent"], "folder": d["folder"]},
+                 "folders": d["folders"], "tailnet": _tailnet(),
+                 "home": str(Path.home())})
     return snap
+
+
+_AGENTS = {"at": -1e9, "value": []}
+
+
+def _installed():
+    from . import agents
+    now = time.monotonic()
+    if now - _AGENTS["at"] > AGENTS_TTL:
+        _AGENTS["at"], _AGENTS["value"] = now, agents.installed()
+    return _AGENTS["value"]
+
+
+def _tailnet():
+    from . import tailnet
+    return tailnet.available()

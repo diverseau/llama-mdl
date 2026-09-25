@@ -11,13 +11,22 @@ Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
 ### Added
 
 - `mdl ui`: the web UI, in an app window of its own (or your browser
-  when there is no Chromium browser). A card per running model with its
-  tokens as a line, tok/s and tokens served; every other model a click
-  from running, and why a start from it failed; a page per model with its
-  averages, context use, URL, log and settings. Updates are pushed, not
-  polled. It listens on 127.0.0.1 only, with a token per start and Host
-  and Origin checks, and stops a little after its last window closes.
-  The look follows 0xSero's Local AI panel for Omarchy (MIT).
+  when there is no Chromium browser). It is 0xSero's Local AI panel for
+  Omarchy (MIT), ported row for row: your lifetime as a 20-week activity
+  grid, a card per running model with its token line, every free card a
+  click from running, a crashed start to run again or dismiss, and a
+  page per model with its averages, its weights, its log, and the agent
+  and folder Open uses. Updates are pushed, not polled. It listens on
+  127.0.0.1 only, with a token per start and Host and Origin checks, and
+  stops a little after its last window closes.
+- A usage recorder, started by `mdl run` and gone 30 s after the last
+  server stops, books each server's tokens, seconds and requests per
+  hour from its `/metrics` and `/slots`, surviving server restarts.
+  `MDL_RECORD=off` turns it off.
+- Open on a running model starts a coding agent on it in a terminal: pi,
+  claude, codex, opencode, omp, crush, grok, copilot or hermes.
+- A model whose server has an `--api-key` can be shared on your tailnet
+  (`tailscale serve`) from its page.
 - `mdl snapshot`: what the web UI shows, as JSON.
 
 - `b` in `mdl ui`, pressed while a measurement runs, stops it at once -

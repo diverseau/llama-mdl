@@ -15,7 +15,7 @@ must carry it. Past the token:
 
 The page gets the snapshot pushed over server-sent events as it changes,
 not by polling, and an action is one of a fixed few verbs on a model the
-config names.
+config names. The page itself is omarchy-local-ai's panel (see NOTICE).
 """
 
 import hmac
@@ -37,7 +37,12 @@ STATIC = Path(__file__).resolve().parent / "static"
 FILES = {"index.html": "text/html; charset=utf-8",
          "app.css": "text/css; charset=utf-8",
          "app.js": "text/javascript; charset=utf-8",
-         "view.js": "text/javascript; charset=utf-8"}
+         "view.js": "text/javascript; charset=utf-8",
+         "mono.woff2": "font/woff2",
+         "qwen.svg": "image/svg+xml", "lfm.svg": "image/svg+xml",
+         "hf.svg": "image/svg+xml"}
+# where a page may send you: the weights' pages, and mdl's own
+URLS = ("https://huggingface.co/", "https://github.com/diverseau/llama-mdl")
 COOKIE = "mdl_ui"
 BUSY_S, IDLE_S = 1.0, 2.0       # a snapshot this often while a load runs, else
 PING_S = 15.0                   # an SSE comment this often keeps it open
@@ -51,20 +56,17 @@ class Hub:
     the event streams waiting on it."""
 
     def __init__(self):
-        self.tracker = snapshot.Tracker()
         self.cond = threading.Condition()
         self.snap, self.text, self.seq = None, "null", 0
         self.clients = 0
         self.seen_client = False
         self.last_client = time.monotonic()
         self.failed = {}        # name -> why its start, from here, failed
+        self.stopping = set()   # names being stopped from here
         self.halt = threading.Event()
 
     def rebuild(self):
-        snap = snapshot.build(self.tracker)
-        for m in snap["models"]:
-            if m["state"] == "stopped" and m["name"] in self.failed:
-                m["state"], m["error"] = "failed", self.failed[m["name"]]
+        snap = snapshot.build(self.failed, set(self.stopping))
         text = json.dumps(snap, separators=(",", ":"))
         with self.cond:
             if text != self.text:
@@ -77,12 +79,14 @@ class Hub:
         while not self.halt.is_set():
             try:
                 snap = self.rebuild()
-                busy = any(m["state"] == "loading" for m in snap["models"])
+                busy = any(d["state"] in ("starting", "stopping", "download")
+                           for d in snap["deployments"])
             except Exception as e:      # noqa: BLE001 - the page says why
                 with self.cond:
                     self.text = json.dumps({"schema": snapshot.SCHEMA,
                                             "error": "snapshot failed: %s"
-                                            % e, "models": []})
+                                            % e, "gpus": [],
+                                            "deployments": []})
                     self.seq += 1
                     self.cond.notify_all()
                 busy = False
@@ -108,7 +112,10 @@ def _watch(hub, name, proc, port, cfg, binary, log):
     """A start from the page, watched to its end: ready, or failed with the
     log's last words, which the page shows on the model. Also reaps it."""
     import mdl
-    deadline = time.monotonic() + mdl.ready_timeout()
+
+    from . import usage
+    started = time.monotonic()
+    deadline = started + mdl.ready_timeout()
     while time.monotonic() < deadline:
         if proc.poll() is not None:
             hub.failed[name] = _last_words(log) or (
@@ -116,6 +123,10 @@ def _watch(hub, name, proc, port, cfg, binary, log):
             return
         if mdl.server_ready(port):
             hub.failed.pop(name, None)
+            try:
+                usage.note_load(name, time.monotonic() - started)
+            except OSError:
+                pass
             mdl.learn_from_log(name, cfg, binary, log)
             proc.wait()
             return
@@ -135,33 +146,89 @@ def _last_words(log):
     return lines[-1].strip()[:300] if lines else None
 
 
-def act(hub, verb, name):
-    """Run a verb on a model: (status, {"ok": ...}). Only these verbs, and
-    only on a name the config or the running servers have."""
+def _stop(hub, name, state):
+    """Stop a server in the background, the page showing it stopping."""
     import mdl
+
+    from . import agents, tailnet
+    try:
+        if agents.run_config(name, state).get("shared"):
+            tailnet.unshare(state["port"])
+        if not mdl.stop_one(name, state):
+            hub.failed[name] = "%s would not stop" % name
+    finally:
+        hub.stopping.discard(name)
+        hub.rebuild()
+
+
+def act(hub, req):
+    """Run one of a fixed few verbs: (status, {"ok": ...}). A model must be
+    one the config or the running servers have."""
+    import mdl
+
+    from . import agents, tailnet, usage
+    verb, name = str(req.get("verb")), str(req.get("name") or "")
+    if verb == "url":
+        url = str(req.get("url") or "")
+        if not url.startswith(URLS):
+            return 400, {"ok": False, "error": "not a page mdl opens"}
+        webbrowser.open(url)
+        return 200, {"ok": True}
+    if verb == "set":
+        states = mdl.read_states()
+        try:
+            agents.choose(str(req.get("key")), str(req.get("value") or ""),
+                          name if name in states else None, states.get(name))
+        except mdl.MdlError as e:
+            return 409, {"ok": False, "error": str(e)}
+        return 200, {"ok": True}
     try:
         models, binary = mdl.load_config()
     except mdl.MdlError as e:
         return 409, {"ok": False, "error": str(e)}
     states = mdl.read_states()
-    if verb == "run":
+    if verb in ("run", "again"):
         if name not in models:
             return 404, {"ok": False, "error": "no model named %r" % name}
+        if verb == "again" and name in states:
+            if not mdl.stop_one(name, states[name]):
+                return 500, {"ok": False, "error": "%s would not stop" % name}
         try:
             proc, log, port = mdl.spawn(name, models, binary)
         except mdl.MdlError as e:
             return 409, {"ok": False, "error": str(e)}
         hub.failed.pop(name, None)
+        usage.ensure()
         threading.Thread(target=_watch, args=(hub, name, proc, port,
                                               models[name], binary, log),
                          daemon=True).start()
         return 200, {"ok": True}
     if verb == "stop":
+        if name in hub.failed and name not in states:
+            del hub.failed[name]         # dismiss a start that failed
+            return 200, {"ok": True}
         if name not in states:
             return 409, {"ok": False, "error": "%s is not running" % name}
-        if not mdl.stop_one(name, states[name]):
-            return 500, {"ok": False, "error": "%s would not stop" % name}
-        hub.failed.pop(name, None)
+        hub.stopping.add(name)
+        threading.Thread(target=_stop, args=(hub, name, states[name]),
+                         daemon=True).start()
+        return 200, {"ok": True}
+    if verb in ("open", "share"):
+        if name not in states:
+            return 409, {"ok": False, "error": "%s is not running" % name}
+        state = states[name]
+        try:
+            if verb == "open":
+                agents.open_agent(name, state, models.get(name, {}),
+                                  agents.run_config(name, state))
+            elif not snapshot.api_key(state.get("argv")):
+                return 409, {"ok": False, "error": "a share needs the "
+                             "server to have an --api-key"}
+            else:
+                agents.remember(name, state,
+                                shared=tailnet.share(state["port"]))
+        except (mdl.MdlError, OSError) as e:
+            return 409, {"ok": False, "error": str(e)}
         return 200, {"ok": True}
     return 400, {"ok": False, "error": "unknown verb %r" % verb}
 
@@ -288,10 +355,11 @@ def make_handler(hub, token, port):
             try:
                 n = int(self.headers.get("Content-Length") or 0)
                 req = json.loads(self.rfile.read(min(n, 65536)) or b"{}")
-                verb, name = str(req.get("verb")), str(req.get("name"))
+                if not isinstance(req, dict):
+                    raise ValueError(req)
             except (ValueError, AttributeError):
                 return self._json(400, {"ok": False, "error": "bad request"})
-            code, out = act(hub, verb, name)
+            code, out = act(hub, req)
             hub.rebuild()
             return self._json(code, out)
 
@@ -304,6 +372,7 @@ def make_handler(hub, token, port):
             except OSError:
                 return self._refuse(404, "not found")
             csp = ("default-src 'self'; style-src 'self'; script-src 'self'; "
+                   "font-src 'self'; "
                    "img-src 'self' data:; connect-src 'self'; "
                    "frame-ancestors 'none'; base-uri 'none'; "
                    "form-action 'none'")
@@ -398,7 +467,7 @@ def open_window(url, profile):
             subprocess.Popen(
                 [exe, "--app=" + url, "--user-data-dir=" + str(profile),
                  "--no-first-run", "--no-default-browser-check",
-                 "--window-size=540,980"],
+                 "--window-size=520,1000"],
                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL)
             return "window"
@@ -420,6 +489,8 @@ def main(args):
             port = mdl.check_port(rest.pop(0))
         else:
             mdl.die(usage)
+    from . import usage
+    usage.ensure()              # servers started before mdl ui are booked too
     try:
         httpd, hub, url = serve(port)
     except OSError as e:

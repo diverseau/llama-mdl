@@ -19,6 +19,9 @@ sys.path.insert(0, str(ROOT))
 import mdl  # noqa: E402
 from mdl_fit import gguf  # noqa: E402
 
+# no usage recorder outliving a test's temp state dir; test_web turns it on
+os.environ.setdefault("MDL_RECORD", "off")
+
 
 class Tally:
     def __init__(self, name):
