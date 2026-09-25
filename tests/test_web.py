@@ -576,7 +576,12 @@ try:
     _, err, code = run(mdl.cmd_tui, ["--bogus"])
     check("mdl tui refuses what it does not know",
           (code, "usage: mdl tui" in err), (1, True))
+    os.environ["MDL_UPDATED_FROM"] = "0.11.0"
+    _, err, code = run(mdl.cmd_ui, ["--no-fx"])
+    check("0.11's dashboard, updated, restarts as the dashboard it was",
+          (code, calls[-1], err), (0, "off", ""))
 finally:
+    os.environ.pop("MDL_UPDATED_FROM", None)
     mdl._launch_ui = real_launch
 _, err, code = run(server.main, ["--bogus"])
 check("mdl ui refuses what it does not know", (code, "usage: mdl ui" in err),

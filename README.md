@@ -846,8 +846,8 @@ error is its last line. On Windows the running `mdl.exe` is moved aside
 first, since `uv` cannot replace an exe that is running; a leftover
 `mdl.exe.old-<pid>` is removed by the next update.
 
-**The terminal dashboard asks once a day.** When it opens, `mdl tui` checks whether
-a newer release is out - at most once a day, cached in
+**The terminal dashboard asks once a day.** When it opens, `mdl tui`
+checks whether a newer release is out - at most once a day, cached in
 `~/.cache/mdl/update.json` - and if there is one, offers it: update and
 restart, later, or skip that version. Servers keep running through the
 restart, and `u` brings the offer back. `mdl doctor` reports the same

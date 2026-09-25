@@ -32,7 +32,7 @@ def _base(env, *fallback):
 CONFIG_DIR = _base("XDG_CONFIG_HOME", ".config") / "mdl"
 CONFIG = CONFIG_DIR / "models.toml"
 STATE_DIR = _base("XDG_STATE_HOME", ".local", "state") / "mdl"
-VERSION = "0.11.0"
+VERSION = "0.12.0"
 DEFAULT_BIN = "llama-server"
 CONFIG_DATA = {}          # last parsed config, for UI-only settings
 DEFAULT_PORT = 8080
@@ -1680,6 +1680,10 @@ def cmd_ui(args):
         print("mdl: `mdl ui --tui` is now `mdl tui`; the old spelling goes "
               "in the next release", file=sys.stderr)
         cmd_tui(args[1:])
+        return
+    if os.environ.get("MDL_UPDATED_FROM", "").startswith("0.11."):
+        # 0.11's dashboard was `mdl ui`, and its update restarts that name
+        cmd_tui(args)
         return
     from mdl_web import server
     server.main(args)

@@ -2,11 +2,20 @@
 
 Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
 
-## [Unreleased]
+## [0.12.0] - 2026-09-25
+
+A web UI: `mdl ui` opens 0xSero's Local AI panel, ported, in a window
+of its own, with a usage recorder behind it and speed charted against
+context depth. `mdl pull` fetches a model from the Hub and fits it, and
+the panel runs `mdl find`'s picks the same way. The terminal dashboard
+is `mdl tui` now.
+
+### Changed
 
 - **Breaking:** `mdl ui` opens the new web UI. The terminal dashboard is
   `mdl tui`; `mdl ui --tui` runs it, with a note, until the next release.
-  Bare `mdl` still opens the terminal dashboard.
+  Bare `mdl` still opens the terminal dashboard, and updating from 0.11's
+  dashboard restarts into it.
 
 ### Added
 
@@ -40,10 +49,10 @@ Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
 - A card's Config in `mdl ui` offers `mdl find`'s picks from the Hub
   after your own models; Run on one pulls it, its card showing how much
   is down, then starts it.
-- `b` in the terminal dashboard (`mdl tui`), pressed while a measurement runs, stops it at once -
-  mid-reply or mid-load, without waiting out a full context's prefill.
-  Its server is stopped, its temp files removed, and what it measured is
-  kept.
+- `b` in the terminal dashboard, pressed while a measurement runs,
+  stops it at once - mid-reply or mid-load, without waiting out a full
+  context's prefill. Its server is stopped, its temp files removed, and
+  what it measured is kept.
 
 ### Fixed
 
@@ -55,6 +64,8 @@ Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
 - `mdl lab run` stopped with Ctrl-C says how many repetitions it kept and
   names the run for `mdl lab report`. A load in progress is stopped too:
   on Windows the lab's `mdl run` has no console to be sent Ctrl-C.
+- Prism's ternary PQ2_0 and mudler's APEX files show their quant, not a
+  bare "GGUF"; `mdl fit` no longer calls PQ2_0 "Q2_0".
 
 ## [0.11.0] - 2026-09-25
 
