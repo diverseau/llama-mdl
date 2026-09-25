@@ -235,25 +235,53 @@ class Install:
                                 self.where)
 
 
+def _installed(here):
+    """The installed distribution the running mdl.py belongs to, or None.
+
+    Every one on sys.path is looked at, not the first: `pip install .`
+    leaves a llama_mdl.egg-info in the checkout it built, which points
+    back at the checkout's own mdl.py and, the checkout being first on
+    sys.path, is found before the real install. An installed copy is a
+    .dist-info with a RECORD of its files - pip, pipx and uv all write
+    one - and a build leftover has none. That egg-info passed for an
+    install in CI and would have had pip install over a clone.
+    """
+    # Directories only. sys.path holds zips too, and on Windows the first
+    # entry is the running mdl.exe - pip's launcher is a zip archive with
+    # the script inside - which importlib.metadata then holds open for
+    # the life of the process. It could not be moved aside, pip failed on
+    # it halfway through its uninstall, and the install was left without
+    # mdl.py (measured). An installed mdl never lives in a zip.
+    dirs = [p for p in sys.path if p and os.path.isdir(p)]
+    try:
+        dists = list(importlib.metadata.distributions(name=PACKAGE,
+                                                      path=dirs))
+    except (OSError, ValueError):
+        return None
+    for dist in dists:
+        if dist.read_text("RECORD") is None:
+            continue
+        try:
+            installed = Path(dist.locate_file("mdl.py")).resolve()
+        except (OSError, TypeError, ValueError):
+            continue
+        if installed == here:
+            return dist
+    return None
+
+
 def detect():
     here = Path(mdl.__file__).resolve()
-    try:
-        dist = importlib.metadata.distribution(PACKAGE)
-    except importlib.metadata.PackageNotFoundError:
+    dist = _installed(here)
+    if dist is None:
+        # a clone run as `python mdl.py`, whether or not a copy is also
+        # installed: the one an upgrade would touch is not the one running
         return Install("source", here.parent)
     try:
         direct = json.loads(dist.read_text("direct_url.json") or "{}")
     except ValueError:
         direct = {}
     if (direct.get("dir_info") or {}).get("editable"):
-        return Install("source", here.parent)
-    try:
-        installed = Path(dist.locate_file("mdl.py")).resolve()
-    except (OSError, TypeError, ValueError):
-        installed = None
-    if installed != here:
-        # a clone run as `python mdl.py` beside an installed copy: the one
-        # an upgrade would touch is not the one running
         return Install("source", here.parent)
     prefix = Path(sys.prefix)
     if (prefix / "pipx_metadata.json").is_file():
@@ -376,8 +404,13 @@ def install(version, out=print, force=False):
         moved = exe.with_name("%s.old-%d" % (exe.name, os.getpid()))
         try:
             os.replace(exe, moved)
-        except OSError:
-            moved = None                  # the installer may manage anyway
+        except OSError as e:
+            # the installer needs this same file out of the way, and pip
+            # failing on it midway leaves the install half removed: not
+            # starting is the only safe answer
+            mdl.die("cannot move %s aside to replace it (%s); nothing was "
+                    "changed - close other programs using it and try again"
+                    % (exe, getattr(e, "strerror", None) or e))
     lines = []
     try:
         out("running: %s" % " ".join(

@@ -85,10 +85,13 @@ def fresh_cache():
 class Dist:
     """Enough of importlib.metadata.Distribution for detect()."""
 
-    def __init__(self, where, direct=None):
-        self.where, self.direct = Path(where), direct
+    def __init__(self, where, direct=None, record=True):
+        self.where, self.direct, self.record = Path(where), direct, record
 
     def read_text(self, name):
+        if name == "RECORD":
+            # an installed .dist-info lists its files; an egg-info has none
+            return "mdl.py,,\n" if self.record else None
         return json.dumps(self.direct) if self.direct else None
 
     def locate_file(self, name):
@@ -225,23 +228,44 @@ try:
     check("the tests run from a checkout", mdl_update.detect().kind, "source")
     prefix = root / "prefix"
     prefix.mkdir()
-    with patch("importlib.metadata.distribution",
-               return_value=Dist(here.parent)), \
-            patch.object(sys, "prefix", str(prefix)):
+    def dists(*found):
+        return patch("importlib.metadata.distributions",
+                     return_value=list(found))
+
+    with dists(Dist(here.parent)), patch.object(sys, "prefix", str(prefix)):
         check("pip, when the running file is the installed one",
               mdl_update.detect().kind, "pip")
         (prefix / "uv-receipt.toml").write_text("")
         check("uv tool", mdl_update.detect().kind, "uv")
         (prefix / "pipx_metadata.json").write_text("{}")
         check("pipx", mdl_update.detect().kind, "pipx")
-    with patch("importlib.metadata.distribution",
-               return_value=Dist(root / "elsewhere")):
+    with dists(Dist(root / "elsewhere")):
         check("an installed copy that is not the running one",
               mdl_update.detect().kind, "source")
-    with patch("importlib.metadata.distribution",
-               return_value=Dist(here.parent, {"url": "file:///x",
-                                               "dir_info": {"editable": True}})):
+    with dists(Dist(here.parent, {"url": "file:///x",
+                                  "dir_info": {"editable": True}})):
         check("editable", mdl_update.detect().kind, "source")
+    # what CI had: `pip install .` leaves an egg-info in the checkout,
+    # pointing at the checkout's own mdl.py, found before the install
+    with dists(Dist(here.parent, record=False), Dist(root / "site")):
+        check("a build's leftover egg-info is not an install",
+              mdl_update.detect().kind, "source")
+    with dists(Dist(root / "site", record=False), Dist(here.parent)), \
+            patch.object(sys, "prefix", str(root / "plain")):
+        check("the real install is found behind a leftover",
+              mdl_update.detect().kind, "pip")
+    # pip's mdl.exe is a zip at the head of sys.path; reading metadata out
+    # of it held it open, and the update could not move it aside
+    launcher_zip = root / "mdl.exe"
+    launcher_zip.write_bytes(b"PK\x05\x06" + bytes(18))
+    asked = []
+    with patch.object(sys, "path", [str(launcher_zip), str(root)] + sys.path), \
+            patch("importlib.metadata.distributions",
+                  lambda **kw: asked.append(kw["path"]) or []):
+        mdl_update.detect()
+    check("metadata is read from directories only, never a zip",
+          (str(launcher_zip) in asked[0], str(root) in asked[0]),
+          (False, True))
 
     # ----------------------------------------------------------- command
     Inst = mdl_update.Install
@@ -372,6 +396,18 @@ try:
             check("a failed install puts the launcher back",
                   (exe.read_bytes(), list(bindir.glob("mdl.exe.old-*"))),
                   (b"new launcher", []))
+            # a launcher that cannot be moved aside: pip would fail on the
+            # same file halfway through, so the installer never starts
+            ran = root / "installer-ran"
+            with patch.object(mdl_update, "command", return_value=[
+                    sys.executable, "-c",
+                    "open(%r, 'w').write('x')" % str(ran)]), \
+                    patch.object(mdl_update.os, "replace",
+                                 side_effect=PermissionError(13, "in use")):
+                msg = raises(mdl_update.install, NEWER, out=lambda _: None)
+            check("a launcher held open stops the update before it starts",
+                  ("nothing was changed" in (msg or ""), ran.exists()),
+                  (True, False))
         with patch.object(sys, "argv", [str(root / "mdl.py")]):
             check("python mdl.py has no launcher", mdl_update._launcher(), None)
 
