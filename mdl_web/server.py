@@ -40,7 +40,7 @@ FILES = {"index.html": "text/html; charset=utf-8",
          "view.js": "text/javascript; charset=utf-8",
          "mono.woff2": "font/woff2",
          "qwen.svg": "image/svg+xml", "lfm.svg": "image/svg+xml",
-         "hf.svg": "image/svg+xml"}
+         "hf.svg": "image/svg+xml", "icon.svg": "image/svg+xml"}
 # where a page may send you: the weights' pages, and mdl's own
 URLS = ("https://huggingface.co/", "https://github.com/diverseau/llama-mdl")
 COOKIE = "mdl_ui"

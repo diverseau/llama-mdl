@@ -349,6 +349,28 @@
     return i === 0 ? 12 * U : 0
   }
 
+  // The window's icon is the panel's mark: nine dots, faint when idle, lit when a model is ready, urgent when one
+  // failed, a diagonal ripple while working
+  var markState = null, ripple = 0, rippling = null
+  function markIcon() {
+    var link = document.querySelector("link[rel=icon]"), dots = ""
+    if (!link) return
+    for (var i = 0; i < 9; i++) {
+      var on = markState === "busy" ? (i % 3 + Math.floor(i / 3)) === ripple % 5 : !!markState
+      dots += "<circle cx='" + (6 + 10 * (i % 3)) + "' cy='" + (6 + 10 * Math.floor(i / 3)) + "' r='3' fill='" +
+        (markState === "failed" ? "#a4a4a4" : "#fff") + "' fill-opacity='" + (markState === "failed" || on ? 1 : 0.3) + "'/>"
+    }
+    link.href = "data:image/svg+xml," + encodeURIComponent("<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'>" +
+      "<rect width='32' height='32' rx='7' fill='#000'/>" + dots + "</svg>")
+  }
+  function setMark(m) {
+    if (m === markState) return
+    markState = m
+    clearInterval(rippling)
+    rippling = m === "busy" ? setInterval(function() { ripple = (ripple + 1) % 5; markIcon() }, 160) : null
+    markIcon()
+  }
+
   function render() {
     if (!snap) { root.replaceChildren(); return }
     var v
@@ -374,7 +396,8 @@
     var y = window.scrollY
     root.replaceChildren.apply(root, kids)
     window.scrollTo(0, y)
-    document.title = "mdl" + (v.mark === "failed" ? " · failed" : v.mark === "busy" ? " · working" : "")
+    document.title = "MDL" + (v.mark === "failed" ? " · failed" : v.mark === "busy" ? " · working" : "")
+    setMark(v.mark)
   }
 
   // -- actions -----------------------------------------------------------------------------------------------
