@@ -566,7 +566,7 @@ teardown(root)
 # ------------------------------------------------- the names, the window --
 calls = []
 real_launch = mdl._launch_ui
-mdl._launch_ui = lambda fx=None: calls.append(fx)
+mdl._launch_ui = lambda fx=None, args=None: calls.append(fx)
 try:
     _, err, code = run(mdl.cmd_ui, ["--tui", "--no-fx"])
     check("mdl ui --tui still opens the terminal UI, and says it moved",

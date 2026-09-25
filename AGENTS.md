@@ -3,7 +3,7 @@
 Working notes for coding agents in the `mdl` repo. This is the canonical
 file; `CLAUDE.md` points here and adds only Claude Code specifics.
 
-Written against **0.10.0**. Where a fact is likely to drift, this says how to
+Written against **0.11.0**. Where a fact is likely to drift, this says how to
 re-derive it instead of quoting it.
 
 ## What this is
@@ -23,6 +23,7 @@ from a config file, and works out what to run and how. Two halves:
 ```
 mdl.py            the whole CLI for running servers. Standard library only.
 mdl_ui.py         optional Textual dashboard (`mdl tui`). The only dependency.
+mdl_update.py     `mdl update`, the daily check, the dashboard's restart
 mdl_web/          the web UI (`mdl ui`, `mdl snapshot`): stdlib server,
                   static/ page with no build step; view.js is pure.
                   usage.py is the recorder `mdl run` starts; agents.py
@@ -91,7 +92,9 @@ worse, silently.
    `>=3,<9` — a tested floor, not a guess). The CLI must never import it
    except inside the `tui` handler. `mdl_web` is standard library, and
    its page loads nothing from the network: no CDN, no build step.
-3. **`mdl_fit` is standard library too.** Keep it that way.
+3. **`mdl_fit` and `mdl_update` are standard library too.** Keep them
+   that way. `mdl_update` is reached lazily, like `mdl_fit`: by
+   `mdl update`, `mdl doctor` and the dashboard, never by `run` or `ps`.
 4. **Errors are one line on stderr and exit 1. Never a traceback.** Raise
    `mdl.MdlError` (or call `die()`); `main()` catches it and prints
    `mdl: <message>`. There is a CI job whose entire purpose is checking that
@@ -106,6 +109,10 @@ worse, silently.
    get a *second* module object whose `MdlError` the handler cannot catch, and
    every error becomes a traceback. If you see a traceback where you expected
    one line, suspect a double import.
+7. **No test may reach the real PyPI.** `tests/support.py` sets
+   `MDL_NO_UPDATE_CHECK=1` for every suite; `test_update.py` turns it back
+   on against a fake index (`MDL_PYPI_URL`). A new suite that does not
+   import `support` has to do the same.
 
 ## Style
 
@@ -123,7 +130,7 @@ workflow via OIDC.
 ```sh
 # bump VERSION in mdl.py and add a CHANGELOG.md entry, commit, push main,
 # wait for CI to pass, then
-git tag -a v0.10.0 -m "0.10.0" && git push origin v0.10.0
+git tag -a v0.11.0 -m "0.11.0" && git push origin v0.11.0
 ```
 
 ### Versions
@@ -191,6 +198,7 @@ suite, the 3.10 rejection, and a wheel+sdist install check.
 ~/.config/mdl/hashes.json     model sha256s, kept against size and mtime
 ~/.local/state/mdl/           pids, ports, logs
 ~/.cache/mdl/catalog.sqlite   the pulled catalog snapshot
+~/.cache/mdl/update.json      the daily update check, and a skipped version
 ```
 
 `$XDG_CONFIG_HOME` / `$XDG_STATE_HOME` / `$XDG_CACHE_HOME` are honoured, and
@@ -273,6 +281,22 @@ adapters, speculative drafts (`-draft-`, `DFlash`) and MTP heads (`mtp-…`,
 `MTP/`). `remote.auxiliary()` drops them by name, because size cannot - a
 real Q1_0 is as small per weight as a draft. `-mtp` as a *suffix* is a whole
 model with its MTP layers, and stays.
+
+## Updating, if you touch it
+
+`mdl update` upgrades through whatever installed mdl (pipx, uv tool, pip),
+pinned to the version it offered where the tool allows, and believes a
+fresh interpreter rather than the installer's exit status. Measured on
+Windows before it was built: pip and pipx replace a running `mdl.exe`;
+`uv tool upgrade` fails with os error 32, so the running launcher is
+renamed aside first (Windows allows that) and put back if the install
+fails. `uv tool upgrade` also honours a version pinned at install time,
+which is why a no-op upgrade says the install may be pinned.
+
+The dashboard restarts through `mdl._after_ui` once Textual has handed
+the terminal back: `os.execve` on POSIX, a waited-on child on Windows
+(where exec is not a real replace), always `python -P -m mdl` so a stray
+`mdl.py` in the working directory is never the one that starts.
 
 ## Non-goals
 

@@ -32,7 +32,7 @@ def _base(env, *fallback):
 CONFIG_DIR = _base("XDG_CONFIG_HOME", ".config") / "mdl"
 CONFIG = CONFIG_DIR / "models.toml"
 STATE_DIR = _base("XDG_STATE_HOME", ".local", "state") / "mdl"
-VERSION = "0.10.0"
+VERSION = "0.11.0"
 DEFAULT_BIN = "llama-server"
 CONFIG_DATA = {}          # last parsed config, for UI-only settings
 DEFAULT_PORT = 8080
@@ -57,7 +57,8 @@ USAGE = ("usage: mdl {init|config [--path|--undo|--history]|"
          "fit <gguf|hf:repo|name> [--help]|eval <name> [--help]|"
          "find [--help]|pull <org/repo[:quant]> [--run]|manifest <name>|"
          "lab {run|report|compare} [--help]|"
-         "catalog {pull|build|tree|search|stats}} [--version]")
+         "catalog {pull|build|tree|search|stats}|update [--check]} "
+         "[--version]")
 
 # The model path mdl init leaves behind. check knows to treat it as a
 # to-do rather than a fault; tests keep the two in step.
@@ -1523,6 +1524,22 @@ def _doctor_model(name, cfg, binary, states, help_cache):
     return notes
 
 
+def _doctor_update(notes):
+    """Whether a newer mdl is out, from the dashboard's daily cache. Says
+    nothing when checks are off or PyPI cannot be reached: neither is a
+    fault in this install."""
+    import mdl_update
+    if mdl_update.disabled():
+        return
+    latest = mdl_update.check()
+    if latest and mdl_update.is_newer(latest):
+        _doctor_note(notes, "warn", "update", "mdl %s is out (you have %s); "
+                     "run: mdl update" % (latest, VERSION))
+    elif latest:
+        _doctor_note(notes, "ok", "update", "mdl %s is the newest release"
+                     % VERSION)
+
+
 def _doctor_print(report, as_json):
     findings = report["global"] + [f for notes in report["models"].values()
                                    for f in notes]
@@ -1595,6 +1612,7 @@ def cmd_doctor(args):
     except (OSError, ValueError) as e:
         _doctor_note(notes, "warn", "runtime", "cannot read state: %s" % e)
         states = {}
+    _doctor_update(notes)
     help_cache = {}
     for name in rest or sorted(models):
         report["models"][name] = _doctor_model(
@@ -1628,19 +1646,27 @@ def cmd_logs(args):
                 time.sleep(0.3)
 
 
-def _launch_ui(fx=None):
+def _launch_ui(fx=None, args=("tui",)):
     try:
         from mdl_ui import run_ui
     except ImportError as e:
         die("mdl tui needs textual: pip install \"llama-mdl[ui]\" ({})"
             .format(e))
-    run_ui(fx)
+    _after_ui(run_ui(fx), args)
+
+
+def _after_ui(result, args):
+    """A dashboard that updated mdl exits asking for the new one; it is
+    started here, once Textual has given the terminal back."""
+    import mdl_update
+    if result == mdl_update.RESTART:
+        mdl_update.restart(list(args))
 
 
 def cmd_tui(args):
     """The terminal dashboard (Textual)."""
     if args == ["--no-fx"]:
-        _launch_ui("off")
+        _launch_ui("off", ["tui", "--no-fx"])
         return
     if args:
         die("usage: mdl tui [--no-fx]")
@@ -1668,13 +1694,18 @@ def cmd_snapshot(args):
     print(json.dumps(snapshot.build(), indent=1))
 
 
+def cmd_update(args):
+    import mdl_update
+    mdl_update.main(args)
+
+
 COMMANDS = {"init": cmd_init, "config": cmd_config,
             "add": cmd_add, "check": cmd_check, "doctor": cmd_doctor,
             "ui": cmd_ui, "tui": cmd_tui, "snapshot": cmd_snapshot,
             "run": cmd_run, "stop": cmd_stop, "ps": cmd_ps, "list": cmd_list,
             "logs": cmd_logs, "fit": cmd_fit, "eval": cmd_eval,
             "catalog": cmd_catalog, "find": cmd_find, "pull": cmd_pull,
-            "manifest": cmd_manifest, "lab": cmd_lab}
+            "manifest": cmd_manifest, "lab": cmd_lab, "update": cmd_update}
 
 
 def _dispatch():
@@ -1685,7 +1716,7 @@ def _dispatch():
         except ImportError:
             print(USAGE)
             sys.exit(2)
-        run_ui()
+        _after_ui(run_ui(), [])
         return
     if sys.argv[1] in ("-h", "--help"):
         print(USAGE)

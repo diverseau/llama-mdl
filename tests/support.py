@@ -13,6 +13,10 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+# No suite may ask the real PyPI whether mdl is out of date, which the
+# dashboard and doctor would otherwise do. test_update turns it back on
+# against a fake index of its own.
+os.environ["MDL_NO_UPDATE_CHECK"] = "1"
 FAKE = Path(__file__).resolve().parent / "fake_llama_server.py"
 sys.path.insert(0, str(ROOT))
 

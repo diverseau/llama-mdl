@@ -47,12 +47,16 @@ pipx install llama-mdl          # or: pip install llama-mdl
 pipx install "llama-mdl[ui]"    # with the terminal dashboard
 ```
 
-To update, ask for it: pip leaves an installed package alone otherwise,
-and `mdl --version` says which one you are running.
+To update:
 
 ```sh
-pipx upgrade llama-mdl          # or: pip install -U "llama-mdl[ui]"
+mdl update                      # the newest release, the way you installed it
 ```
+
+It works out whether this copy came from pipx, `uv tool` or pip and has
+that tool upgrade it, so nothing changes but the version. See
+[Updating](#updating) for what it checks and what it refuses.
+`mdl --version` says which one you are running.
 
 The package is `llama-mdl`; the command it installs is `mdl`. (Plain `mdl`
 on PyPI is an unrelated project.) Nothing but the dashboard has a
@@ -188,6 +192,9 @@ mdl doctor [--json] [name]
 mdl init         Write a starter config, if you do not have one.
 mdl config       Open models.toml in your editor; --path prints its location.
 mdl --version    The version, for bug reports.
+mdl update [--check]
+                 Upgrade to the newest release, the way mdl was installed.
+                 --check only says whether there is one.
 mdl ui           The web UI, in an app window. --no-open prints its URL
                  instead; --port N picks the port.
 mdl tui          The terminal dashboard. Bare `mdl` opens it too.
@@ -773,6 +780,7 @@ sparkline, busy slots, and a colour-coded log tail.
  b            measure the selected config with mdl lab; b again stops it
  l            focus the log, / filters it
  g            reload the config
+ u            update mdl, when a newer release is out
  ?            help
  q            quit the UI - the server keeps running
 ```
@@ -811,6 +819,48 @@ The wordmark drifts its gradient by default. Set `ui_fx = "off"` at the
 top level of the config to paint it flat, or pass `mdl tui --no-fx` for a
 one-off.
 
+## Updating
+
+`mdl update` asks PyPI for the newest release this Python can run, then
+has the tool that installed mdl upgrade it:
+
+| installed with | runs |
+|---|---|
+| pipx | `pipx upgrade llama-mdl` |
+| `uv tool` | `uv tool upgrade llama-mdl` |
+| pip, into any environment | `python -m pip install -U "llama-mdl[ui]==<newest>"`, with `[ui]` only if Textual is there and `--user` if mdl is |
+
+It then starts a fresh interpreter to check that the new version is the
+one that imports, and says so if the `mdl` first on your `PATH` is a
+different install it did not touch. It refuses, and changes nothing:
+
+- **In a source checkout** (`python mdl.py`, or `pip install -e`). Update
+  that with `git pull`.
+- **While `mdl eval` is running, or a server is starting.** Replacing the
+  files under a running mdl mixes two versions in one process. `--force`
+  goes ahead anyway. (`mdl lab` holds no lock, so it is not seen: do not
+  update in the middle of one.)
+
+If the installer fails, you are still on the version you had, and the
+error is its last line. On Windows the running `mdl.exe` is moved aside
+first, since `uv` cannot replace an exe that is running; a leftover
+`mdl.exe.old-<pid>` is removed by the next update.
+
+**The terminal dashboard asks once a day.** When it opens, `mdl tui` checks whether
+a newer release is out - at most once a day, cached in
+`~/.cache/mdl/update.json` - and if there is one, offers it: update and
+restart, later, or skip that version. Servers keep running through the
+restart, and `u` brings the offer back. `mdl doctor` reports the same
+check. The request is a plain GET of PyPI's JSON for `llama-mdl`; nothing
+about you or your models is sent. To turn it off, set
+`MDL_NO_UPDATE_CHECK=1`, or put this at the top of the config:
+
+```toml
+update_check = false
+```
+
+`mdl update` itself always asks, whatever that says.
+
 ## Files
 
 ```
@@ -820,9 +870,11 @@ one-off.
 ~/.local/state/mdl/<name>.log.1  the previous run, and .2 before that
 ~/.local/state/mdl/ui-marks.json which models the UI has seen start or fail
 ~/.local/state/mdl/lab/          mdl lab's records, and the samples behind them
+~/.cache/mdl/update.json         when mdl last asked PyPI, and a skipped version
 ```
 
-`$XDG_CONFIG_HOME` and `$XDG_STATE_HOME` are honoured if set. On Windows the
+`$XDG_CONFIG_HOME`, `$XDG_STATE_HOME` and `$XDG_CACHE_HOME` are honoured
+if set. On Windows the
 same layout lives under `%USERPROFILE%`.
 
 ## Behaviour notes

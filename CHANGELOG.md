@@ -40,15 +40,14 @@ Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
 - A card's Config in `mdl ui` offers `mdl find`'s picks from the Hub
   after your own models; Run on one pulls it, its card showing how much
   is down, then starts it.
-
-- `b` in `mdl ui`, pressed while a measurement runs, stops it at once -
+- `b` in the terminal dashboard (`mdl tui`), pressed while a measurement runs, stops it at once -
   mid-reply or mid-load, without waiting out a full context's prefill.
   Its server is stopped, its temp files removed, and what it measured is
   kept.
 
 ### Fixed
 
-- Quitting `mdl ui` during a `b` measurement closed the dashboard but
+- Quitting `mdl tui` during a `b` measurement closed the dashboard but
   left the process waiting out the whole run behind it, looking hung;
   a second Ctrl-C there could leave the lab's server running where
   `mdl ps` cannot see it. Quitting stops the measurement first, and says
@@ -56,6 +55,26 @@ Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
 - `mdl lab run` stopped with Ctrl-C says how many repetitions it kept and
   names the run for `mdl lab report`. A load in progress is stopped too:
   on Windows the lab's `mdl run` has no console to be sent Ctrl-C.
+
+## [0.11.0] - 2026-09-25
+
+mdl updates itself: `mdl update` upgrades through whatever installed
+it, and the dashboard offers a newer release once a day and restarts
+onto it. Updating from 0.10.0 is by hand, one last time.
+
+### Added
+
+- `mdl update` upgrades mdl to the newest release, through whatever
+  installed it - pipx, `uv tool` or pip - and checks with a fresh
+  interpreter that the new version is the one that imports.
+  `mdl update --check` only says whether there is one. It refuses in a
+  source checkout (that is `git pull`), and while `mdl eval` is running
+  or a server is starting, unless `--force`.
+- The dashboard asks PyPI once a day whether a newer mdl is out, and
+  offers it: update and restart, later, or skip that version. Servers
+  keep running through the restart; `u` brings the offer back. Off with
+  `MDL_NO_UPDATE_CHECK=1` or `update_check = false` in models.toml.
+- `mdl doctor` says when a newer release is out.
 
 ## [0.10.0] - 2026-09-24
 
