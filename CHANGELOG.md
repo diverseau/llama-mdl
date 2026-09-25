@@ -4,7 +4,21 @@ Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
 
 ## [Unreleased]
 
+- **Breaking:** `mdl ui` opens the new web UI. The terminal dashboard is
+  `mdl tui`; `mdl ui --tui` runs it, with a note, until the next release.
+  Bare `mdl` still opens the terminal dashboard.
+
 ### Added
+
+- `mdl ui`: the web UI, in an app window of its own (or your browser
+  when there is no Chromium browser). A card per running model with its
+  tokens as a line, tok/s and tokens served; every other model a click
+  from running, and why a start from it failed; a page per model with its
+  averages, context use, URL, log and settings. Updates are pushed, not
+  polled. It listens on 127.0.0.1 only, with a token per start and Host
+  and Origin checks, and stops a little after its last window closes.
+  The look follows 0xSero's Local AI panel for Omarchy (MIT).
+- `mdl snapshot`: what the web UI shows, as JSON.
 
 - `b` in `mdl ui`, pressed while a measurement runs, stops it at once -
   mid-reply or mid-load, without waiting out a full context's prefill.

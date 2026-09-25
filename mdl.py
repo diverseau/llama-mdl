@@ -52,7 +52,8 @@ SIMPLE = (("ngl", "-ngl"), ("n_cpu_moe", "--n-cpu-moe"), ("ctx", "-c"),
 USAGE = ("usage: mdl {init|config [--path|--undo|--history]|"
          "add <model.gguf>|check|list|"
          "doctor [--json] [name]|run <name> [--port N]|"
-         "stop [<name>|--all]|ps [--json]|logs [-f] [name]|ui [--no-fx]|"
+         "stop [<name>|--all]|ps [--json]|logs [-f] [name]|"
+         "ui [--no-open] [--port N]|tui [--no-fx]|snapshot|"
          "fit <gguf|hf:repo|name> [--help]|eval <name> [--help]|"
          "find [--help]|manifest <name>|lab {run|report|compare} [--help]|"
          "catalog {pull|build|tree|search|stats}} [--version]")
@@ -1612,22 +1613,45 @@ def _launch_ui(fx=None):
     try:
         from mdl_ui import run_ui
     except ImportError as e:
-        die("mdl ui needs textual: pip install \"llama-mdl[ui]\" ({})".format(e))
+        die("mdl tui needs textual: pip install \"llama-mdl[ui]\" ({})"
+            .format(e))
     run_ui(fx)
 
 
-def cmd_ui(args):
+def cmd_tui(args):
+    """The terminal dashboard (Textual)."""
     if args == ["--no-fx"]:
         _launch_ui("off")
         return
     if args:
-        die("usage: mdl ui [--no-fx]")
+        die("usage: mdl tui [--no-fx]")
     _launch_ui()
+
+
+def cmd_ui(args):
+    """The web UI: the page in an app window, served on 127.0.0.1."""
+    if args and args[0] == "--tui":
+        # the terminal dashboard's old name, kept for one release
+        print("mdl: `mdl ui --tui` is now `mdl tui`; the old spelling goes "
+              "in the next release", file=sys.stderr)
+        cmd_tui(args[1:])
+        return
+    from mdl_web import server
+    server.main(args)
+
+
+def cmd_snapshot(args):
+    """What the web UI draws, as JSON: the config's models, which run and
+    how fast, the GPUs. One reading, so speeds are the servers' averages."""
+    if args not in ([], ["--json"]):
+        die("usage: mdl snapshot [--json]")
+    from mdl_web import snapshot
+    print(json.dumps(snapshot.build(), indent=1))
 
 
 COMMANDS = {"init": cmd_init, "config": cmd_config,
             "add": cmd_add, "check": cmd_check, "doctor": cmd_doctor,
-            "ui": cmd_ui,
+            "ui": cmd_ui, "tui": cmd_tui, "snapshot": cmd_snapshot,
             "run": cmd_run, "stop": cmd_stop, "ps": cmd_ps, "list": cmd_list,
             "logs": cmd_logs, "fit": cmd_fit, "eval": cmd_eval,
             "catalog": cmd_catalog, "find": cmd_find,

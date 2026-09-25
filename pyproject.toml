@@ -42,7 +42,10 @@ mdl = "mdl:main"
 
 [tool.setuptools]
 py-modules = ["mdl", "mdl_ui"]
-packages = ["mdl_fit"]
+packages = ["mdl_fit", "mdl_web"]
+
+[tool.setuptools.package-data]
+mdl_web = ["static/*"]
 
 [tool.setuptools.dynamic]
 version = { attr = "mdl.VERSION" }

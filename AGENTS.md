@@ -22,7 +22,9 @@ from a config file, and works out what to run and how. Two halves:
 
 ```
 mdl.py            the whole CLI for running servers. Standard library only.
-mdl_ui.py         optional Textual dashboard (`mdl ui`). The only dependency.
+mdl_ui.py         optional Textual dashboard (`mdl tui`). The only dependency.
+mdl_web/          the web UI (`mdl ui`, `mdl snapshot`): stdlib server,
+                  static/ page with no build step; view.js is pure
 mdl_fit/          everything behind fit / eval / catalog / find / lab
 tests/            run.py drives the suites; support.py + fake_llama_server.py
 docs/fit-plan.md  the design notes for mdl fit
@@ -85,7 +87,8 @@ worse, silently.
    `dependencies = []`; only the `ui` extra has one.
 2. **`mdl_ui.py` is the only file allowed a dependency** (Textual, pinned
    `>=3,<9` — a tested floor, not a guess). The CLI must never import it
-   except inside the `ui` handler.
+   except inside the `tui` handler. `mdl_web` is standard library, and
+   its page loads nothing from the network: no CDN, no build step.
 3. **`mdl_fit` is standard library too.** Keep it that way.
 4. **Errors are one line on stderr and exit 1. Never a traceback.** Raise
    `mdl.MdlError` (or call `die()`); `main()` catches it and prints

@@ -23,9 +23,12 @@ The `mdl_fit` package behind `mdl fit`, `mdl eval`, `mdl catalog` and
 `mdl find` is standard library too, and `mdl.py` imports it only when you
 call one of those four, so the commands you use every day load nothing extra.
 
-`mdl_ui.py` adds an optional terminal dashboard (`mdl ui`). It is the only
-part that needs a dependency — [Textual](https://textual.textualize.io/) —
-and the CLI never imports it, so every command but `ui` stays
+`mdl ui` opens the same thing in a window: your models, what is running
+and how fast, run and stop at a click. It is `mdl_web/`, standard library
+too, serving a page that has no build step and loads nothing from the
+network. `mdl_ui.py` adds an optional terminal dashboard (`mdl tui`). It is
+the only part that needs a dependency — [Textual](https://textual.textualize.io/) —
+and the CLI never imports it, so every command but `tui` stays
 dependency-free.
 
 In practice it does two jobs. It manages llama.cpp servers through named
@@ -184,7 +187,10 @@ mdl doctor [--json] [name]
 mdl init         Write a starter config, if you do not have one.
 mdl config       Open models.toml in your editor; --path prints its location.
 mdl --version    The version, for bug reports.
-mdl ui           The dashboard. Bare `mdl` opens it too.
+mdl ui           The web UI, in an app window. --no-open prints its URL
+                 instead; --port N picks the port.
+mdl tui          The terminal dashboard. Bare `mdl` opens it too.
+mdl snapshot     What the web UI shows, as JSON.
 mdl logs [-f] [name]
                  Print or follow a server's log. Takes a name when more than
                  one is up, or to read a stopped one's log.
@@ -199,8 +205,8 @@ mdl manifest <name>
                  as JSON. --redact cuts paths and secrets for a bug report.
 ```
 
-Without textual installed, `mdl ui` fails with one line and bare `mdl` prints
-the usage string, exactly as it always did.
+Without textual installed, `mdl tui` fails with one line and bare `mdl`
+prints the usage string, exactly as it always did.
 
 ```console
 $ mdl list
@@ -650,10 +656,42 @@ server is stopped, its temp files removed, and what it measured is kept.
 The design, and what is left of it, is in
 [docs/mdl-lab.md](docs/mdl-lab.md).
 
-## The UI
+## The web UI
 
-`mdl ui` (or just `mdl`) opens a dashboard over the same config and the same
-state file. Anything you do in it is visible to the CLI and vice versa.
+`mdl ui` opens a window over the same config and the same state file as
+the CLI. Anything you do in it is visible to the CLI and vice versa.
+
+Each running model is a card: its tokens as a line, tokens a second now,
+and the tokens it has served since `mdl ui` started. Under them, every
+model that is not running, grouped by the config's `group`, each a click
+from running; a start from the page that fails says why, from its log. A model's page
+has its averages for decode and prefill, how full its context is, its
+URL and whether it wants an API key, its log, and its settings when it
+is stopped. The numbers need `--metrics` in the model's `args`, as the
+dashboard's do.
+
+It opens as an app window of its own when there is a Chromium browser
+(Edge, Chrome, Brave, Chromium), with a profile of its own under mdl's
+state directory, and in your default browser otherwise. It stops a
+little after its last window closes, or at Ctrl-C.
+
+Only this machine can reach it, and only the window mdl opened. It
+listens on 127.0.0.1, makes a new token each start, and refuses any
+request without it, any that names another host (so a page elsewhere
+cannot reach it by pointing a name at 127.0.0.1), and any change from
+another origin. The page updates as the servers do, pushed over one
+connection rather than polled.
+
+`mdl snapshot` prints what the page is drawn from, as JSON.
+
+The look - one card a model, labels a tone below values, one filled
+button a page - is from [0xSero's Local AI panel for
+Omarchy](https://github.com/0xSero/omarchy-local-ai) (MIT).
+
+## The terminal dashboard
+
+`mdl tui` (or just `mdl`) opens a dashboard over the same config and the
+same state file. `mdl ui --tui` still works for one more release.
 
 Idle, it lists your models with a status dot, shows the selected model's
 parameters, and previews the exact `llama-server` command it would run.
@@ -709,7 +747,7 @@ you whether a long context is hurting.
 ### Animation
 
 The wordmark drifts its gradient by default. Set `ui_fx = "off"` at the
-top level of the config to paint it flat, or pass `mdl ui --no-fx` for a
+top level of the config to paint it flat, or pass `mdl tui --no-fx` for a
 one-off.
 
 ## Files

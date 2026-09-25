@@ -15,7 +15,10 @@ mdl passes:
 
 /props says what it loaded and its context, as llama-server does, and
 /tokenize counts four characters to a token. A chat request with
-ignore_eos streams max_tokens chunks, as mdl lab asks for.
+ignore_eos streams max_tokens chunks, as mdl lab asks for. /metrics has
+llama-server's counters, counting what this fake streamed; with --api-key,
+/metrics and /props want it as a Bearer token and /health does not, as
+llama-server has it.
 """
 import http.server
 import json
@@ -26,6 +29,8 @@ import threading
 import time
 
 MODE = os.environ.get("MDL_FAKE_MODE", "")
+COUNT = {"prompt": 0, "predicted": 0, "decode": 0}
+COUNT_LOCK = threading.Lock()
 
 
 def flag(name, default=None):
@@ -39,12 +44,35 @@ def port_from_argv():
     return int(flag("--port", 8080))
 
 
+def metrics():
+    with COUNT_LOCK:
+        c = dict(COUNT)
+    lines = ["# HELP llamacpp:prompt_tokens_total Number of prompt tokens",
+             "# TYPE llamacpp:prompt_tokens_total counter",
+             "llamacpp:prompt_tokens_total %d" % c["prompt"],
+             "llamacpp:prompt_seconds_total %.3f" % (c["prompt"] / 900.0),
+             "llamacpp:tokens_predicted_total %d" % c["predicted"],
+             "llamacpp:tokens_predicted_seconds_total %.3f"
+             % (c["predicted"] / 50.0),
+             "llamacpp:n_decode_total %d" % c["decode"],
+             "llamacpp:predicted_tokens_seconds 50",
+             "llamacpp:requests_processing 0",
+             "llamacpp:requests_deferred 0",
+             "llamacpp:kv_cache_usage_ratio 0.25"]
+    return ("\n".join(lines) + "\n").encode()
+
+
 class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
+        key = flag("--api-key")
+        if (key and self.path in ("/metrics", "/props")
+                and self.headers.get("Authorization") != "Bearer " + key):
+            self.send_error(401)
+            return
         if self.path == "/health" and MODE != "silent":
             body = b'{"status":"ok"}'
-        elif self.path == "/metrics":
-            body = b"llamacpp:kv_cache_usage_ratio 0.25\n"
+        elif self.path == "/metrics" and "--metrics" in sys.argv:
+            body = metrics()
         elif self.path == "/props":
             loaded = flag("-m", "")
             if MODE == "othermodel":
@@ -107,7 +135,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self._stream(deltas, pause)
 
     def _stream(self, deltas, pause, timings=None):
+        with COUNT_LOCK:
+            COUNT["prompt"] += 10
         for i, delta in enumerate(deltas):
+            with COUNT_LOCK:
+                COUNT["predicted"] += 1
+                COUNT["decode"] += 1
             chunk = {"choices": [{"delta": delta}]}
             if i == len(deltas) - 1:
                 chunk["timings"] = dict({"predicted_per_second": 42.5},
@@ -135,7 +168,7 @@ def main():
         return
     if "--help" in sys.argv:
         print("-m --mmproj -ngl --n-cpu-moe -c -np --port -fa "
-              "--cache-type-k --cache-type-v --metrics")
+              "--cache-type-k --cache-type-v --metrics --api-key")
         return
     print("args: " + " ".join(sys.argv[1:]), flush=True)
     if MODE == "fail":
