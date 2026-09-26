@@ -263,10 +263,15 @@ def _adopt(hub, pool):
     hub.add_error = ""
     hub.rebuild()
     for f in pool:
+        name = hub.adding[str(f.path)]
         try:
-            setup.add(f, hub.adding[str(f.path)])
+            why = setup.add(f, name)
         except (SystemExit, Exception) as e:     # noqa: BLE001
             hub.add_error = "%s: %s" % (f.path.name, e)
+            continue
+        if why:                 # added, but with defaults: say so
+            hub.add_error = "%s as a fitted preset (%s has mdl add's " \
+                "defaults): %s" % (f.path.name, name, why)
     hub.adding.clear()
     hub.found_at = 0.0
     hub.rebuild()

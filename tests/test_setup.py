@@ -130,6 +130,31 @@ out, err, code = run(setup.main, ["--yes", "--dir", str(OWN)])
 check("--dir looks somewhere else too",
       (code, sorted(mdl.load_config()[0])), (0, ["big", "mine", "one", "two"]))
 
+# a model the fit cannot place here (too big for a small machine): added
+# with mdl add's defaults, and said so - not reported as fitted
+from mdl_fit import cli                                      # noqa: E402
+
+huge = TMP / "huge"
+huge.mkdir()
+support.llama(huge / "Huge-Q8_0.gguf")
+real_fit = cli.main
+
+
+def no_fit(args, out=None):
+    raise mdl.MdlError("nothing fits: the model needs 40 G, this machine has 4")
+
+
+cli.main = no_fit
+try:
+    out, err, code = run(setup.main, ["--yes", "--dir", str(huge)])
+finally:
+    cli.main = real_fit
+check("a model the fit cannot place is added with defaults, and says why",
+      (code, "huge" in mdl.load_config()[0],
+       "defaults, not fitted: nothing fits: the model needs 40 G" in out,
+       "every layer on the GPU" in out, "mdl fit NAME --explain" in out),
+      (0, True, True, False, True))
+
 out, err, code = run(setup.main, ["--help"])
 check("--help says where it looks", (code, "LM Studio" in out), (0, True))
 out, err, code = run(setup.main, ["--nope"])

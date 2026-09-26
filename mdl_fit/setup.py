@@ -80,12 +80,13 @@ def ask(prompt):
 
 def add(found, name):
     """One found file as the preset `name`, fitted to this machine
-    (pull's way: mdl fit --write, a free port, --metrics)."""
+    (pull's way: mdl fit --write, a free port, --metrics). Returns None,
+    or why the fit could not place it and it has mdl add's defaults."""
     import mdl
 
     from . import pull
-    pull._add(name, found.path, found.mmproj,
-              mdl.load_config(missing_ok=True)[0])
+    return pull._add(name, found.path, found.mmproj,
+                     mdl.load_config(missing_ok=True)[0])
 
 
 def describe(name):
@@ -131,7 +132,7 @@ def main(args):
 
     where = [("--dir", d) for d in dirs] + scan.places()
     found = scan.found(where, known=scan.configured(models))
-    added = []
+    added, unfitted = [], 0
     if found:
         say("found", "%d GGUF%s on this machine, not in the config yet:"
             % (len(found), "" if len(found) == 1 else "s"))
@@ -162,10 +163,12 @@ def main(args):
             name = names[i]
             if sys.stdout.isatty():     # the fit takes a few seconds
                 print("adding     %s ..." % f.path.name, end="\r", flush=True)
-            add(f, name)
+            why = add(f, name)
             added.append(name)
-            print("added      %-*s %s" % (width, name, describe(name)),
-                  flush=True)
+            print("added      %-*s %s" % (
+                width, name, describe(name) if not why else
+                "defaults, not fitted: %s" % why), flush=True)
+            unfitted += bool(why)
     else:
         say("found", "no GGUFs on this machine that the config does not "
             "already run")
@@ -179,6 +182,11 @@ def main(args):
             find.main([])
             return
     print()
+    if unfitted:
+        say("note", "%d could not be fitted to this machine, most often "
+            "because %s too big for it; mdl fit NAME --explain says why, "
+            "and what would fit" % (unfitted, "it is" if unfitted == 1
+                                    else "they are"))
     if not have_llama:
         say("next", "install llama.cpp (%s), then mdl run NAME"
             % mdl.llama_hint())

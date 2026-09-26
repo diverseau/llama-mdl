@@ -201,10 +201,15 @@ def fetched_words(status, need):
         files, progress.size_words(total))
 
 
-def added_words(name):
+def added_words(name, unfitted=None):
     """'added [x] to ~/.config/mdl/models.toml: 40k context, q8_0 KV, all
-    layers on the GPU'."""
+    layers on the GPU'; or, when the fit could not place it, that it has
+    mdl add's defaults and why."""
     import mdl
+    if unfitted:
+        return ("added [%s] to %s with mdl add's defaults, not fitted: %s "
+                "(mdl fit %s --explain says more)" % (
+                    name, mdl.short(mdl.CONFIG), unfitted, name))
     cfg = mdl.load_config(missing_ok=True)[0].get(name, {})
     bits = []
     if cfg.get("ctx"):
@@ -457,8 +462,8 @@ def pull(repo, selector=None, name=None, keys=(), run=False, quiet=False):
             model = where[0]
             mmproj = where[-1] if _is_mm(need[-1]) else None
             status.spin("fitting a preset to this machine")
-            _add(name, model, mmproj, models)
-            status.say(added_words(name))
+            status.say(added_words(name, _add(name, model, mmproj,
+                                              models)))
         status.clear()
     except (PullError, remote.RemoteError, OSError) as e:
         status("error", "", 0, str(e))
@@ -603,7 +608,10 @@ def _adopt(src, dest):
 
 def _add(name, model, mmproj, models):
     """A preset fitted to this machine, on a free port, with --metrics;
-    mdl add's plain one when the fit cannot run."""
+    mdl add's plain one when the fit cannot run. Returns None when it
+    was fitted, else why not - the fit's own last words - so the caller
+    can say the preset is defaults, not a fit: a model too big for this
+    machine got ngl 99 and 8k context, and was reported as fitted."""
     import contextlib
 
     import mdl
@@ -612,19 +620,26 @@ def _add(name, model, mmproj, models):
     if mmproj:
         args += ["--mmproj", str(mmproj)]
     sink = io.StringIO()
+    why = None
     try:
         from . import cli
         with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
             cli.main(args, out=sink)
-    except (SystemExit, mdl.MdlError, Exception):     # noqa: BLE001
-        pass
-    if name not in mdl.load_config()[0]:
-        with contextlib.redirect_stdout(sink):
+    except (SystemExit, mdl.MdlError, Exception) as e:     # noqa: BLE001
+        why = str(e) if isinstance(e, mdl.MdlError) else None
+    if name in mdl.load_config()[0]:
+        why = None
+    else:
+        lines = [x.strip() for x in sink.getvalue().splitlines() if x.strip()]
+        why = (why or (lines[-1] if lines else "") or "the fit could not run")
+        why = why[len("mdl: "):] if why.startswith("mdl: ") else why
+        with contextlib.redirect_stdout(io.StringIO()):
             mdl.cmd_add([str(model), name, str(port)])
     keys = {"port": port}
     if mmproj:                  # whichever wrote it, the projector pulled
         keys["mmproj"] = str(mmproj).replace(chr(92), "/")
     mdl.patch_params(name, keys)
+    return why
 
 
 def free_port(models):

@@ -119,6 +119,11 @@ Getting started, made shorter: from installing to a model answering.
   that nothing fits: the compute buffer a GPU build keeps on the card at
   `-ngl 0` was booked against 0 G of VRAM. A card-less machine now plans
   every model at `-ngl 0`, all of it in RAM.
+- A model the fit could not place on this machine - most often one too
+  big for it - was added by `mdl pull` (and now `mdl setup` and the web
+  page) with `mdl add`'s defaults, all layers on the GPU and 8k context,
+  and reported as if it had been fitted. It says it has the defaults, and
+  the fit's reason.
 - `mdl pull` of a model partly in the Hugging Face cache hashed the cached
   part twice, the second time with no progress shown.
 - `mdl doctor` with no models said nothing about a missing llama-server;
