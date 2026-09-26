@@ -89,6 +89,7 @@ class Cand:
         self.reject = None
         self.header_error = None
         self.hash = None
+        self.base = None         # (repo, key, shards) the catalog may hold
 
     @property
     def why(self):
@@ -116,9 +117,11 @@ class Cand:
 # ------------------------------------------------------------- headers --
 
 def fetch(c, cache_only=False):
-    """The candidate's own header (cached by content hash)."""
+    """The candidate's own header (cached by content hash, or carried by
+    the catalog)."""
     if cache_only and not remote._cache_path(c.repo, c.key,
-                                             c.shards).is_file():
+                                             c.shards).is_file() \
+            and remote.stored(c.repo, c.key, c.shards) is None:
         return None
     return remote.inventory(c.repo, c.key, c.shards)
 
@@ -313,6 +316,26 @@ def pick_quants(rows, mach, params, dropped=None):
     return out
 
 
+class _NoCard:
+    vram_usable = 0
+
+
+def header_quant(rows, params):
+    """The quant of a model whose header find reads first: in the repo
+    with the most downloads, the biggest pick_quants keeps (it comes
+    first, and the rest are sized from it). What the catalog stores a
+    header of, so that it is the one find finds there. None if none."""
+    rows = [r for r in rows if r["size"]]
+    if not rows:
+        return None
+    dl = {}
+    for r in rows:
+        dl[r["repo"]] = max(dl.get(r["repo"], 0), r["downloads"] or 0)
+    repo = max(dl, key=dl.get)
+    return pick_quants([r for r in rows if r["repo"] == repo], _NoCard,
+                       params)[0]
+
+
 def catalog_cands(cat, qm, mach, profile, binary, o, notes, since=None,
                   decisions=None):
     decisions = decisions if decisions is not None else []
@@ -374,6 +397,11 @@ def catalog_cands(cat, qm, mach, profile, binary, o, notes, since=None,
                      "with everything spare in RAM" % dropped["size"])
     cands = []
     for _, nid, rows in rated + unrated:
+        # the quant the catalog stores a header of, which may be too big
+        # to be a candidate here and still size the ones that are
+        hq = header_quant(by_node[nid], qm.nodes[nid]["params"])
+        base = (hq["repo"], hq["file"], json.loads(hq["shards"] or "[]")
+                ) if hq else None
         dl = {}
         for r in rows:
             dl[r["repo"]] = max(dl.get(r["repo"], 0), r["downloads"] or 0)
@@ -382,8 +410,10 @@ def catalog_cands(cat, qm, mach, profile, binary, o, notes, since=None,
                "another quant repository has more downloads")
         for r in pick_quants([r for r in rows if r["repo"] == repo], mach,
                              qm.nodes[nid]["params"], decisions):
-            cands.append(Cand(nid, nid, r["quant"], r["size"], r["repo"],
-                              r["file"], json.loads(r["shards"])))
+            c = Cand(nid, nid, r["quant"], r["size"], r["repo"], r["file"],
+                     json.loads(r["shards"]))
+            c.base = base
+            cands.append(c)
     return cands
 
 
@@ -434,9 +464,18 @@ def fit_all(cands, qm, mach, opts, profile, binary, cache_only, notes,
     for c in cands:
         if not c.inv:
             first.setdefault(c.node, c)
+    # a model whose stored header is of a quant too big to be a candidate
+    # here: sized from that, as from any sibling's, instead of the Hub
+    for c in first.values():
+        if (c.base and c.base[0] == c.repo and c.base[1] != c.key
+                and remote.stored(c.repo, c.key, c.shards) is None):
+            inv = remote.stored(*c.base)
+            if inv is not None and same_model(inv, qm, c.node):
+                c.inv = rescale(inv, c.size, "hf:%s/%s" % (c.repo, c.key))
     failed = 0
     with concurrent.futures.ThreadPoolExecutor(WORKERS) as pool:
-        jobs = {pool.submit(fetch, c, cache_only): c for c in first.values()}
+        jobs = {pool.submit(fetch, c, cache_only): c for c in first.values()
+                if c.inv is None}
         for n, job in enumerate(concurrent.futures.as_completed(jobs), 1):
             if spin:
                 spin.label = ("reading model headers from the Hub: %d of %d"
@@ -577,19 +616,24 @@ def refine(rows, qm, mach, opts, profile, binary, cache_only):
     sized from a sibling's. Each is tried once, so a header that cannot
     be had does not stop the rows from settling."""
     todo = [c for c in rows if not c.exact and c.repo and not c.refined]
-    for c in todo:
-        c.refined = True
-        try:
-            inv = fetch(c, cache_only)
-        except (remote.RemoteError, gguf.NotGGUF, gguf.Truncated,
-                ValueError, OSError) as e:
-            c.header_error = " ".join(str(e).splitlines())
-            continue
-        if inv is None:
-            c.header_error = "header not cached (--no-fetch)"
-        if inv is not None:
-            c.inv, c.exact = inv, True
-            evaluate(c, qm, mach, opts, profile, binary)
+    # fetched together, as fit_all does: one at a time, 13 rows were the
+    # larger part of a first find
+    with concurrent.futures.ThreadPoolExecutor(WORKERS) as pool:
+        jobs = {pool.submit(fetch, c, cache_only): c for c in todo}
+        for job in concurrent.futures.as_completed(jobs):
+            c = jobs[job]
+            c.refined = True
+            try:
+                inv = job.result()
+            except (remote.RemoteError, gguf.NotGGUF, gguf.Truncated,
+                    ValueError, OSError) as e:
+                c.header_error = " ".join(str(e).splitlines())
+                continue
+            if inv is None:
+                c.header_error = "header not cached (--no-fetch)"
+            if inv is not None:
+                c.inv, c.exact = inv, True
+                evaluate(c, qm, mach, opts, profile, binary)
     return bool(todo)
 
 
@@ -951,6 +995,7 @@ def main(args, out=None):
             notes.append("could not fetch the catalog: %s" % e)
     try:
         cat = catalog.Catalog(o.get("catalog"))
+        remote.STORE = cat.header         # headers the crawl already read
         meta = cat.meta()
         if meta.get("complete") is False:
             notes.append("catalog crawl " + catalog.progress(meta))

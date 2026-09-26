@@ -45,7 +45,9 @@ Getting started, made shorter: from installing to a model answering.
 - `mdl find` reads a model's header from the Hub in one request, stopping
   as soon as it parses, instead of 4 MiB and then again from the start
   (most headers are 4-8 MiB), and reads 12 at once instead of 6. A first
-  `find` here went from 138 s to 62 s. A second one, with the headers
+  `find` here went from 138 s to 62 s, and to 40 s once the headers of
+  the rows it shows were read together too, not one after another. A
+  second one, with the headers
   cached, from 12.4 s to 8 s: whether llama.cpp loads an architecture is
   asked once, not once a model, and a local model's header is parsed once.
 - `mdl update` shows one line while the installer runs instead of pip's
@@ -75,6 +77,12 @@ Getting started, made shorter: from installing to a model answering.
   `--run N` / `--pull N` fetch row N (and start it).
 - `mdl find` fetches the catalog when there is none, and checks for a
   newer one once a week; `--no-fetch` does neither.
+- `mdl catalog headers` stores in the snapshot the GGUF header `find`
+  reads first for each model, a few kilobytes compressed where the Hub
+  sends 4-8 MiB, keyed by the file's content hash. `find` takes headers
+  from there before asking the Hub; the nightly workflow runs it after
+  the crawl, 10 minutes a run. Measured here, a first `find` with them
+  took 14 s instead of 40.
 - `mdl update` ends with what is new: the headline of each changelog
   entry since the version you had, read from the changelog at the new
   release's tag. The dashboard shows the first few after its restart.

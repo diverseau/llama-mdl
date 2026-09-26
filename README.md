@@ -632,8 +632,25 @@ after completion. Unchanged repositories reuse their file inventories.
 can resume its committed pages from the adjacent `.building` file, but a
 cancelled Actions run cannot upload work that never reached Publish.
 
-The workflow gives the crawl 40 minutes and the job 60, leaving time to
-publish a partial. A manual dispatch can run while the nightly switch
+**Headers.** Sizing a model needs its GGUF header, and a header is 4-8
+MiB, mostly vocabulary, for the few kilobytes `find` keeps of it. So
+`mdl catalog headers` stores, in the snapshot, the header of the quant
+`find` reads first for each model (the biggest under 8.6 bpw, in the
+repository with the most downloads), compressed, keyed by the file's
+content hash so a new upload is never mistaken for the old one. `find`
+takes a header from there before asking the Hub; one of a quant too big
+for this machine still sizes the smaller quants of that model. Measured
+here, with them, a first `find` took 14 s instead of 40. They average
+8 KB each, so a header for all 1,712 models with GGUFs in today's
+snapshot adds about 14 MB to its 25. It is incremental, most downloaded
+first, and drops headers no quant names any more.
+
+```sh
+mdl catalog headers --in catalog.sqlite --budget-minutes 10
+```
+
+The workflow gives the crawl 40 minutes, the headers 10, and the job 60,
+leaving time to publish a partial. A manual dispatch can run while the nightly switch
 stays off, with separate inputs for both seed sizes and the time budget.
 It reports the publishing account and API quota without printing the token.
 

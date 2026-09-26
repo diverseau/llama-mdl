@@ -7,7 +7,9 @@ LIMIT in one request, parses at 1 MiB and at each doubling after, and
 closes the connection once the header parses. (Asking for 4 MiB and again
 for more took twice as long: most headers are 4-8 MiB, and each request
 waits on the Hub's redirect.) Parsed inventories are cached by repo, file
-and content hash, so the second look at a repo costs nothing.
+and content hash, so the second look at a repo costs nothing; and the
+catalog carries the headers of the quants find looks at first, under the
+same key, so a first look at those costs nothing either.
 """
 
 import hashlib
@@ -228,11 +230,32 @@ def manifest(shards):
                             s.get("oid", "")] for s in shards]
 
 
-def _cache_path(repo, key, shards):
+def cache_key(repo, key, shards):
+    """A header's name in the cache: its repo, quant, and a hash of every
+    shard's path, size and content id - a new upload is a new key."""
     digest = hashlib.sha256(json.dumps(manifest(shards)).encode()).hexdigest()
-    safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", "%s__%s__%s" % (
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", "%s__%s__%s" % (
         repo, key, digest[:32]))
-    return hw.cache_dir() / "gguf" / (safe + ".json")
+
+
+def _cache_path(repo, key, shards):
+    return hw.cache_dir() / "gguf" / (cache_key(repo, key, shards) + ".json")
+
+
+# Somewhere else a header may already be: find points this at the
+# catalog's. STORE(cache key) -> Inventory JSON, or None.
+STORE = None
+
+
+def stored(repo, key, shards):
+    """The Inventory STORE holds of exactly this file, or None."""
+    if STORE is None or not shards or not all(s.get("oid") for s in shards):
+        return None
+    try:
+        text = STORE(cache_key(repo, key, shards))
+        return gguf.Inventory.from_json(text) if text else None
+    except (ValueError, KeyError, TypeError):
+        return None
 
 
 def inventory(repo, key, shards, revision="main", cache=True):
@@ -245,9 +268,11 @@ def inventory(repo, key, shards, revision="main", cache=True):
             return gguf.Inventory.from_json(path.read_text(encoding="utf-8"))
         except (OSError, ValueError, KeyError):
             pass
-    pieces = [(fetch_header(repo, s["path"], s["size"], revision), s["size"])
-              for s in shards]
-    inv = gguf.merge("hf:%s/%s" % (repo, key), pieces)
+    inv = stored(repo, key, shards) if cache else None
+    if inv is None:
+        pieces = [(fetch_header(repo, s["path"], s["size"], revision),
+                   s["size"]) for s in shards]
+        inv = gguf.merge("hf:%s/%s" % (repo, key), pieces)
     if cache:
         import mdl
         try:
