@@ -472,6 +472,73 @@ def check_cfg(name, cfg):
                 f"'{OWNED[flag]}' key, which mdl reads; set the key instead")
 
 
+# What the dashboards edit, as typed text: mdl tui's form and mdl ui's
+# page read it through the same two functions, so they cannot disagree
+# on what a field takes. model and llama_server are not in it - one is
+# what the table is for, the other a program mdl runs - and neither
+# belongs in a form a page can post.
+FORM = ("ngl", "n_cpu_moe", "ctx", "kv_type", "parallel", "port", "group",
+        "mmproj", "flash_attn", "args")
+FORM_TEXT = {"kv_type", "mmproj", "group"}   # the rest are whole numbers
+FLASH_SHOWN = {True: "on", False: "off"}
+FLASH_TYPED = {"on": True, "true": True, "yes": True, "1": True,
+               "off": False, "false": False, "no": False, "0": False}
+
+
+def form_values(cfg):
+    """A table's editable keys as the text a form shows; "" for unset."""
+    out = {}
+    for f in FORM:
+        v = cfg.get(f)
+        if f == "flash_attn":
+            out[f] = FLASH_SHOWN.get(v, "")
+        elif f == "args" and isinstance(v, list):
+            out[f] = shlex.join(str(a) for a in v)
+        else:
+            out[f] = "" if v is None else str(v)
+    return out
+
+
+def form_read(fields):
+    """Typed text in, (changes, cleared) out: the values to set, and the
+    keys emptied, which a save removes. One line on what is wrong, else."""
+    if not isinstance(fields, dict):
+        die("a form is a set of fields")
+    changes, cleared = {}, []
+    for f, raw in fields.items():
+        if f not in FORM:
+            die(f"{f} is not a field mdl edits here")
+        raw = str(raw).strip()
+        if not raw:
+            cleared.append(f)
+        elif f in FORM_TEXT:
+            changes[f] = raw.replace(chr(92), "/") if f == "mmproj" else raw
+        elif f == "ngl" and raw.lower() in ("all", "auto"):
+            changes[f] = raw.lower()     # what llama.cpp and the config take
+        elif f == "flash_attn":
+            if raw.lower() not in FLASH_TYPED:
+                die("flash_attn must be on, off, or empty for the "
+                    "build's default")
+            changes[f] = FLASH_TYPED[raw.lower()]
+        elif f == "args":
+            if os.name == "nt" and chr(92) in raw:
+                # shlex would eat them, and a path that quietly lost its
+                # separators is worse than being told to type it the
+                # other way
+                die("args: use forward slashes in paths")
+            try:
+                changes[f] = shlex.split(raw)
+            except ValueError as e:              # an unbalanced quote
+                die("args: %s" % e)
+        else:
+            try:
+                changes[f] = int(raw)
+            except ValueError:
+                die(f"{f} must be a whole number"
+                    + (', "all" or "auto"' if f == "ngl" else ""))
+    return changes, cleared
+
+
 def build_argv(name, cfg, binary):
     check_name(name)
     check_cfg(name, cfg)
