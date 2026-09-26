@@ -42,6 +42,9 @@ Getting started, made shorter: from installing to a model answering.
   was. Its two "writable" lines say which directory is which.
 - `mdl catalog pull` says the snapshot's date and size in models, not its
   path and "crawl complete; 0 tasks pending; complete".
+- `mdl update` shows one line while the installer runs instead of pip's
+  or uv's output, which it prints only if the install fails (`-v` shows
+  it as it goes), and says how long the update took.
 
 ### Added
 
@@ -66,6 +69,11 @@ Getting started, made shorter: from installing to a model answering.
   `--run N` / `--pull N` fetch row N (and start it).
 - `mdl find` fetches the catalog when there is none, and checks for a
   newer one once a week; `--no-fetch` does neither.
+- `mdl update` ends with what is new: the headline of each changelog
+  entry since the version you had, read from the changelog at the new
+  release's tag. The dashboard shows the first few after its restart.
+- `mdl ui` offers a newer mdl on the page, installs it with one click,
+  and restarts on the same address; the open window reloads itself.
 - `mdl run` and `mdl pull --run` end, on a terminal, with where to chat
   with the model, its OpenAI API URL, and how to stop it. `pull --run`
   prints the `ready:` line `run` does.

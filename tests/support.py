@@ -17,6 +17,8 @@ ROOT = Path(__file__).resolve().parents[1]
 # dashboard and doctor would otherwise do. test_update turns it back on
 # against a fake index of its own.
 os.environ["MDL_NO_UPDATE_CHECK"] = "1"
+# nor GitHub for the changelog `mdl update` shows; test_update serves one
+os.environ["MDL_CHANGELOG_URL"] = "file:///nonexistent/%s/CHANGELOG.md"
 FAKE = Path(__file__).resolve().parent / "fake_llama_server.py"
 sys.path.insert(0, str(ROOT))
 

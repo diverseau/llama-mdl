@@ -103,6 +103,26 @@ check("an empty config: what is missing, and where to read how",
       [["soon", "No models in your config yet", "url|https://github.com/diverseau/llama-mdl#readme"]]);
 check("no snapshot yet: the title, nothing else", View.build(null, {}).rows, []);
 
+// -- a newer mdl ------------------------------------------------------------------
+const upd = u => View.build(Object.assign({}, snap, { update: u }), {}).rows.filter(r => r.icon === "download" || r.type === "error"
+  && /update/.test(r.label)).map(r => [r.type, r.label, r.value || "", r.action || ""]);
+check("update: offered, one click",
+      upd({ latest: "0.13.0", state: "offer", detail: "" }),
+      [["field", "mdl 0.13.0 is out", "update ›", "update"]]);
+check("update: installing says how far",
+      upd({ latest: "0.13.0", state: "installing", detail: "Collecting llama-mdl" }),
+      [["field", "updating to 0.13.0", "Collecting llama-mdl", ""]]);
+check("update: failed says why, and offers it again",
+      upd({ latest: "0.13.0", state: "failed", detail: "pip failed (exit 1)" }),
+      [["error", "the update failed: pip failed (exit 1)", "", ""], ["field", "mdl 0.13.0", "try again ›", "update"]]);
+check("update: after the restart, what is new",
+      upd({ latest: "0.13.0", state: "updated", detail: "0.12.0" }),
+      [["field", "updated to mdl 0.13.0", "what's new ›", "url|https://github.com/diverseau/llama-mdl/blob/main/CHANGELOG.md"]]);
+check("update: none, no row", upd(undefined), []);
+check("update: on the empty page too",
+      View.build(Object.assign({}, snap, { kinds: [], deployments: [], update: { latest: "0.13.0", state: "offer" } }), {})
+        .rows.map(r => r.type), ["field", "soon"]);
+
 // -- a running model's page ---------------------------------------------------
 const run = View.build(snap, { view: "run", id: "qwen" });
 check("run: name and what it is", [run.hero.name, run.hero.chips.map(c => c.text)],

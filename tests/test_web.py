@@ -417,6 +417,42 @@ try:
               action("url", extra={"url": "https://evil.example/"})[0], 400)
     finally:
         server.webbrowser.open = real_open
+    # -- a newer mdl: offered, installed from the page, then restarted -------
+    check("update: nothing to install until one is offered",
+          action("update"), (409, {"ok": False, "error": "no update to install"}))
+    import mdl_update
+    real_install = mdl_update.install
+    installs = []
+
+    def fake_install(version, out=print, force=False):
+        installs.append(version)
+        out("running: pip install llama-mdl==" + version)
+        out("Collecting llama-mdl==" + version)
+        if len(installs) == 1:
+            raise mdl.MdlError("pip failed (exit 1)")
+        return version
+
+    mdl_update.install = fake_install
+    try:
+        hub.update = {"latest": "9.9.9", "state": "offer", "detail": ""}
+        hub.rebuild()
+        check("update: the snapshot offers it", snap().get("update"),
+              {"latest": "9.9.9", "state": "offer", "detail": ""})
+        check("update: install it", action("update"), (200, {"ok": True}))
+        check("update: a failed install says why, and is offered again",
+              until(lambda: hub.update.get("state") == "failed", 5)
+              and hub.update["detail"], "pip failed (exit 1)")
+        check("update: and not restarted", hub.restart, False)
+        check("update: try again", action("update"), (200, {"ok": True}))
+        check("update: installed, main() restarts it",
+              until(lambda: hub.restart, 5) and hub.update["state"], "restarting")
+        check("update: the version offered is the one installed", installs,
+              ["9.9.9", "9.9.9"])
+        check("update: once only while it restarts", action("update")[0], 409)
+    finally:
+        mdl_update.install = real_install
+        hub.update, hub.restart = {}, False
+        hub.rebuild()
     check("url: and only the one asked for", opened,
           ["https://huggingface.co/a/b"])
 

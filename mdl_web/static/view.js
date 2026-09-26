@@ -181,6 +181,7 @@ function homeView(s, ui) {
   if (!(s.kinds || []).length && !(s.deployments || []).length) return soonView(s, ui)
   var rows = ui.problem ? [{ type: "error", label: ui.problem }] : [], life = s.life || {}
   if (s.error) rows.push({ type: "error", label: s.error })
+  rows = rows.concat(updateRows(s.update))
   if (life.requests > 0) rows.push(activity(s))
   ;(s.deployments || []).filter(function(d) { return d.state === "ready" })
     .concat((s.deployments || []).filter(function(d) { return working(d) })).forEach(function(d) { rows.push(card(s, d)) })
@@ -243,9 +244,24 @@ function gpusView(s, ui) {
 }
 
 // nothing to run: one line on what is missing, and where to read how to add a model
+// A newer mdl: offered, being installed, failed (and offered again), installed and
+// restarting, or - after the restart - just updated to
+function updateRows(u) {
+  if (!u || !u.latest) return []
+  if (u.state === "updated") return [{ type: "field", icon: "download", label: "updated to mdl " + u.latest,
+    value: "what's new ›", action: "url|https://github.com/diverseau/llama-mdl/blob/main/CHANGELOG.md" }]
+  if (u.state === "offer") return [{ type: "field", icon: "download", label: "mdl " + u.latest + " is out", value: "update ›", action: "update" }]
+  if (u.state === "failed")
+    return [{ type: "error", label: "the update failed: " + (u.detail || "see mdl update") },
+      { type: "field", icon: "download", label: "mdl " + u.latest, value: "try again ›", action: "update" }]
+  return [{ type: "field", icon: "download", label: u.state === "restarting" ? "mdl " + u.latest + ": restarting" : "updating to " + u.latest,
+    value: u.detail || "" }]
+}
+
 function soonView(s, ui) {
   var rows = ui && ui.problem ? [{ type: "error", label: ui.problem }] : []
   if (s.error) rows.push({ type: "error", label: s.error })
+  rows = rows.concat(updateRows(s.update))
   rows.push({ type: "soon", head: "No models in your config yet", button: "How to add one ›", action: ADD })
   return { title: "MDL", version: s.version, rows: rows }
 }

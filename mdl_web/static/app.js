@@ -508,6 +508,7 @@
     case "home": goHome(); break
     case "log": nav({ view: "log", id: a[1] }); break
     case "url": post({ verb: "url", url: a.slice(1).join("|") }); break
+    case "update": post({ verb: "update" }); break
     case "copy":
       navigator.clipboard.writeText(a.slice(1).join("|")).catch(function() {})
       copied = true; render()
@@ -536,10 +537,14 @@
     ready.then(render)
     return
   }
-  var es = new EventSource("/api/events")
+  var es = new EventSource("/api/events"), version = null
   es.addEventListener("snapshot", function(e) {
     var s = View.parse(e.data)
     if (!s) return
+    // mdl updated and started again under this page: its files may have
+    // changed too, so load them afresh (the cookie still holds the token)
+    if (version && s.version && s.version !== version) { location.replace(location.pathname); return }
+    version = version || s.version
     snap = s
     document.body.classList.remove("offline")
     // a row being typed in is not redrawn under the cursor

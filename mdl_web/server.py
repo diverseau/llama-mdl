@@ -65,9 +65,16 @@ class Hub:
         self.failed = {}        # name -> why its start, from here, failed
         self.stopping = set()   # names being stopped from here
         self.halt = threading.Event()
+        # a newer mdl: {"latest", "state": offer | installing | failed |
+        # restarting, "detail"}; empty when there is none to offer
+        self.update = {}
+        self.restart = False    # updated: main() starts the new code
+        self.token = None
 
     def rebuild(self):
         snap = snapshot.build(self.failed, set(self.stopping))
+        if self.update:
+            snap["update"] = dict(self.update)
         text = json.dumps(snap, separators=(",", ":"))
         with self.cond:
             if text != self.text:
@@ -162,6 +169,52 @@ def _stop(hub, name, state):
         hub.rebuild()
 
 
+def update_loop(hub):
+    """Whether a newer mdl is out, for the page to offer: the dashboard's
+    check, cached a day, off where it is off (MDL_NO_UPDATE_CHECK,
+    update_check = false, a source checkout)."""
+    import mdl_update
+    while not hub.halt.is_set():
+        try:
+            if not mdl_update.disabled():
+                latest = mdl_update.offer()
+                if latest and hub.update.get("state") in (None, "offer"):
+                    hub.update = {"latest": latest, "state": "offer",
+                                  "detail": ""}
+                    hub.rebuild()
+        except Exception:               # noqa: BLE001 - a courtesy, no more
+            pass
+        hub.halt.wait(6 * 3600)
+
+
+def _update(hub, version):
+    """Install `version` the way mdl was installed, saying how far on the
+    page, then have main() start the new code in this one's place."""
+    import mdl
+
+    import mdl_update
+
+    def out(line):
+        line = " ".join(line.split())
+        if line and not line.startswith("running: "):
+            hub.update = dict(hub.update, detail=line[:80])
+            hub.rebuild()
+
+    hub.update = {"latest": version, "state": "installing",
+                  "detail": "starting the installer"}
+    hub.rebuild()
+    try:
+        now = mdl_update.install(version, out=out)
+    except mdl.MdlError as e:
+        hub.update = {"latest": version, "state": "failed", "detail": str(e)}
+        hub.rebuild()
+        return
+    hub.update = {"latest": now, "state": "restarting",
+                  "detail": "updated to %s; restarting" % now}
+    hub.rebuild()
+    hub.restart = True
+
+
 def act(hub, req):
     """Run one of a fixed few verbs: (status, {"ok": ...}). A model must be
     one the config or the running servers have."""
@@ -169,6 +222,12 @@ def act(hub, req):
 
     from . import agents, tailnet, usage
     verb, name = str(req.get("verb")), str(req.get("name") or "")
+    if verb == "update":
+        if hub.update.get("state") not in ("offer", "failed"):
+            return 409, {"ok": False, "error": "no update to install"}
+        threading.Thread(target=_update, args=(hub, hub.update["latest"]),
+                         daemon=True).start()
+        return 200, {"ok": True}
     if verb == "url":
         url = str(req.get("url") or "")
         if not url.startswith(URLS):
@@ -471,6 +530,7 @@ def serve(port=0, token=None):
     """(server, hub, url): listening, with the snapshot thread running."""
     token = token or secrets.token_urlsafe(24)
     hub = Hub()
+    hub.token = token
     httpd = Server(("127.0.0.1", port), lambda *a: None)
     real_port = httpd.server_address[1]
     httpd.RequestHandlerClass = make_handler(hub, token, real_port)
@@ -547,11 +607,19 @@ def main(args):
             mdl.die(usage)
     from . import usage
     usage.ensure()              # servers started before mdl ui are booked too
+    # a restart after an update keeps the port and the token, so the
+    # window already open reconnects to the new code by itself
+    token = os.environ.pop("MDL_UI_TOKEN", None)
+    came = os.environ.pop("MDL_UPDATED_FROM", None)
     try:
-        httpd, hub, url = serve(port)
+        httpd, hub, url = serve(port, token)
     except OSError as e:
         mdl.die("cannot listen on 127.0.0.1:%s: %s" % (port or "any", e))
+    if came:
+        hub.update = {"latest": mdl.VERSION, "state": "updated",
+                      "detail": came}
     threading.Thread(target=picks_loop, args=(hub,), daemon=True).start()
+    threading.Thread(target=update_loop, args=(hub,), daemon=True).start()
     how = open_window(url, mdl.STATE_DIR / "ui-browser") if opening else None
     print({"window": "mdl ui: opened in an app window",
            "browser": "mdl ui: opened in your browser"}.get(
@@ -566,6 +634,8 @@ def main(args):
             with hub.cond:
                 clients, seen = hub.clients, hub.seen_client
                 quiet = time.monotonic() - hub.last_client
+            if hub.restart:
+                break
             if clients == 0 and seen and quiet > IDLE_EXIT_S:
                 break
             if not seen and time.monotonic() - started > FIRST_PAGE_S:
@@ -580,3 +650,9 @@ def main(args):
             hub.cond.notify_all()
         httpd.shutdown()
         httpd.server_close()
+    if hub.restart:
+        import mdl_update
+        os.environ["MDL_UI_TOKEN"] = hub.token
+        print("mdl ui: updated; starting the new version", flush=True)
+        mdl_update.restart(["ui", "--no-open", "--port",
+                            str(httpd.server_address[1])])

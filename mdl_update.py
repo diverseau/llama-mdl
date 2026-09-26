@@ -31,6 +31,11 @@ import mdl
 PACKAGE = "llama-mdl"
 PYPI = "https://pypi.org/pypi/%s/json" % PACKAGE
 CHANGES = "https://github.com/diverseau/llama-mdl/blob/main/CHANGELOG.md"
+# The changelog as released: the file at the tag, so an entry still being
+# written on main is not announced as shipped. MDL_CHANGELOG_URL, with %s
+# for the version, points the tests somewhere that is not GitHub.
+CHANGELOG_RAW = ("https://raw.githubusercontent.com/diverseau/llama-mdl/"
+                 "v%s/CHANGELOG.md")
 CHECK_EVERY = 24 * 3600          # seconds between the dashboard's checks
 UA = "mdl/%s (+https://github.com/diverseau/llama-mdl)"
 
@@ -216,6 +221,60 @@ def disabled():
         # top of someone's working tree would be worse than no offer
         return "running from a source checkout"
     return None
+
+
+# ------------------------------------------------------------ changes --
+
+def changes(old, new, timeout=3):
+    """[(version, [headline, ...])] for the releases after `old` up to
+    `new`, newest first, read from the changelog at `new`'s tag. [] when
+    it cannot be had: the update stands, and the link says the rest."""
+    url = os.environ.get("MDL_CHANGELOG_URL") or CHANGELOG_RAW
+    if "%s" in url:
+        url %= new
+    req = urllib.request.Request(url, headers={"User-Agent": UA % mdl.VERSION})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            text = r.read().decode("utf-8", "replace")
+    except (urllib.error.URLError, OSError, ValueError):
+        return []
+    return parse_changes(text, old, new)
+
+
+def parse_changes(text, old, new):
+    """The changelog's sections between two versions, each bullet cut to
+    its first sentence - the headline; the rest is a click away."""
+    lo, hi = parse(old), parse(new)
+    if lo is None or hi is None:
+        return []
+    out = []
+    for block in re.split(r"(?m)^## \[", text)[1:]:
+        v = parse(block.split("]", 1)[0])
+        if v is None or not _padded(lo) < _padded(v) <= _padded(hi):
+            continue
+        heads = []
+        for bullet in re.findall(r"(?ms)^- (.+?)(?=^- |^#|\Z)", block):
+            words = re.sub(r"\*\*|`", "", " ".join(bullet.split()))
+            first = re.split(r"(?<=[.;])\s", words, maxsplit=1)[0]
+            heads.append(first.rstrip(".;"))
+        out.append((".".join(map(str, v)), heads))
+    return out
+
+
+def changes_lines(entries, width=100, limit=8):
+    """What `mdl update` prints of them: a line a headline, up to `limit`,
+    then how many more and where."""
+    lines, total = [], sum(len(h) for _, h in entries)
+    for version, heads in entries:
+        for head in heads:
+            if len(lines) == limit:
+                break
+            room = width - 12
+            lines.append("  %-8s  %s" % (version, head if len(head) <= room
+                                         else head[:room - 3] + "..."))
+    if total > len(lines):
+        lines.append("  and %d more: %s" % (total - len(lines), CHANGES))
+    return lines
 
 
 # ------------------------------------------------------------- install --
@@ -523,11 +582,40 @@ def restart(args):
 
 # ----------------------------------------------------------------- cli --
 
-USAGE = "usage: mdl update [--check] [--force]"
+USAGE = "usage: mdl update [--check] [--force] [-v]"
+
+
+def _quietly(inst, version, force):
+    """install(), with the installer's lines kept rather than printed: a
+    spinner says what it is doing, and the lines are shown only if it
+    fails, where they are the evidence."""
+    from mdl_fit import progress
+    kept = []
+    spin = progress.Spinner("installing with %s" % inst.kind)
+
+    def out(line):
+        kept.append(line)
+        if not line.startswith("running: "):
+            short = " ".join(line.split())
+            spin.label = "installing with %s: %s" % (
+                inst.kind, short if len(short) <= 60 else short[:59] + "…")
+
+    spin.start()
+    try:
+        return install(version, out=out, force=force)
+    except mdl.MdlError:
+        spin.stop()
+        if kept:
+            print("the installer said:", file=sys.stderr)
+            for line in kept[-20:]:
+                print("  " + line, file=sys.stderr)
+        raise
+    finally:
+        spin.stop()
 
 
 def main(args):
-    if any(a not in ("--check", "--force") for a in args):
+    if any(a not in ("--check", "--force", "-v") for a in args):
         mdl.die(USAGE)
     sweep()
     latest = fetch()
@@ -552,9 +640,21 @@ def main(args):
         mdl.die("mdl %s is out, but this is running from %s; update it with "
                 "git pull" % (latest, inst.describe()))
     print("mdl %s -> %s (%s)" % (mdl.VERSION, latest, inst.describe()))
-    now = install(latest, force="--force" in args)
-    print("updated mdl %s -> %s" % (mdl.VERSION, now))
-    print("what changed: %s" % CHANGES)
+    started = time.monotonic()
+    if "-v" in args:
+        now = install(latest, force="--force" in args)
+    else:
+        now = _quietly(inst, latest, "--force" in args)
+    print("updated mdl %s -> %s in %.0fs" % (mdl.VERSION, now,
+                                             time.monotonic() - started))
+    entries = changes(mdl.VERSION, now)
+    if entries:
+        print("what's new:")
+        for line in changes_lines(entries, shutil.get_terminal_size(
+                (100, 24)).columns):
+            print(line)
+    else:
+        print("what changed: %s" % CHANGES)
     note = path_note(now)
     if note:
         print(note)

@@ -1322,9 +1322,27 @@ class MdlApp(App):
         came_from = os.environ.pop("MDL_UPDATED_FROM", None)
         if came_from:
             self.status_line = "updated mdl %s -> %s" % (came_from, mdl.VERSION)
+            self._whats_new(came_from)
         self.set_interval(POLL_SECONDS, self._tick)
         self._tick()
         self._check_update()
+
+    @work(thread=True, group="news")
+    def _whats_new(self, came_from):
+        """After an update, the headlines of what it brought, from the
+        changelog at the new tag. A courtesy, like the check: nothing
+        that goes wrong here may reach the app."""
+        try:
+            entries = mdl_update.changes(came_from, mdl.VERSION)
+        except Exception:
+            return
+        heads = [h for _, hs in entries for h in hs]
+        if heads:
+            more = len(heads) - 3
+            self.call_from_thread(
+                self.notify, "\n".join("· " + h for h in heads[:3])
+                + ("\nand %d more in the changelog" % more if more > 0 else ""),
+                title="new in mdl %s" % mdl.VERSION, timeout=20)
 
     # ---- config / table ----
     def _load_config(self):

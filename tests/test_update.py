@@ -436,7 +436,41 @@ try:
             patch.object(mdl_update, "path_note", return_value=None):
         out, err, code = run(mdl.cmd_update, [])
     check("an update, start to finish",
-          (code, "updated mdl %s -> %s" % (CUR, NEWER) in out), (0, True))
+          (code, "updated mdl %s -> %s in " % (CUR, NEWER) in out), (0, True))
+    check("with the installer kept quiet, and a link when the changelog "
+          "cannot be had", ("ok" in out, "what changed: " in out),
+          (False, True))
+    with pip_here, fake("Collecting llama-mdl", "ERROR: no such version",
+                        code=1), \
+            patch.object(mdl_update, "path_note", return_value=None):
+        out, err, code = run(mdl.cmd_update, [])
+    check("a failed install shows what the installer said, then the reason",
+          (code, "the installer said:" in err, "  ERROR: no such version" in err,
+           "exited with status 1" in err.strip().splitlines()[-1]),
+          (1, True, True, True))
+
+    # what's new, from the changelog at the new version's tag
+    log = root / "CHANGELOG.md"
+    log.write_text("# Changelog\n\n## [Unreleased]\n\n- Not out yet.\n\n"
+                   "## [%s] - 2026-10-01\n\n### Added\n\n- **Breaking:** "
+                   "`mdl x` does y now. And more\n  that wraps.\n- A second "
+                   "thing; with detail.\n\n## [%s] - 2026-09-01\n\n- Old.\n"
+                   % (NEWER, CUR), encoding="utf-8")
+    parsed = mdl_update.parse_changes(log.read_text(encoding="utf-8"), CUR,
+                                      NEWER)
+    check("what's new: the releases after this one, a headline a bullet",
+          parsed, [(NEWER, ["Breaking: mdl x does y now", "A second thing"])])
+    check("and more than fits is counted, with the link",
+          mdl_update.changes_lines(parsed, limit=1)[-1].startswith(
+              "  and 1 more: "), True)
+    with patch.dict(os.environ, {"MDL_CHANGELOG_URL": log.as_uri()}), \
+            pip_here, fake("ok"), \
+            patch.object(mdl_update, "installed_version", return_value=NEWER), \
+            patch.object(mdl_update, "path_note", return_value=None):
+        out, err, code = run(mdl.cmd_update, [])
+    check("an update prints what is new in it",
+          (code, "what's new:" in out, "Breaking: mdl x does y now" in out,
+           "Not out yet" in out), (0, True, True, False))
     check("the dashboard's cache learns from it",
           json.loads(mdl_update.cache_path().read_text())["latest"], NEWER)
     check("usage lists update", "update [--check]" in mdl.USAGE, True)
@@ -633,14 +667,21 @@ try:
         # off, or broken: never a popup, never a crash
         asked = []
         os.environ["MDL_UPDATED_FROM"] = "0.9.0"
+        news = [(CUR, ["A headline", "Another", "A third", "A fourth"])]
         with patch.multiple(mdl_update, disabled=lambda: "off",
-                            offer=lambda: asked.append(1)):
+                            offer=lambda: asked.append(1),
+                            changes=lambda old, new: news):
             app = MdlApp(fx="off")
             async with app.run_test(size=(120, 40)) as pilot:
-                await pilot.pause(0.3)
+                await until(pilot, lambda: app._notifications)
                 check("off means not asked", asked, [])
                 check("a restart says it updated",
                       "updated mdl 0.9.0 -> %s" % CUR in status(app), True)
+                told = [str(n.message) for n in app._notifications]
+                check("and what it brought: three headlines and a count",
+                      any("· A headline" in m and "· A third" in m
+                          and "A fourth" not in m and "and 1 more" in m
+                          for m in told), True)
                 check("and does not pass that on",
                       "MDL_UPDATED_FROM" in os.environ, False)
 

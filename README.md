@@ -869,8 +869,12 @@ has the tool that installed mdl upgrade it:
 | `uv tool` | `uv tool upgrade llama-mdl` |
 | pip, into any environment | `python -m pip install -U "llama-mdl==<newest>"`, with `--user` if mdl is |
 
-It then starts a fresh interpreter to check that the new version is the
-one that imports, and says so if the `mdl` first on your `PATH` is a
+While the installer runs, one line says what it is doing; its own output
+is kept and shown only if it fails (`-v` shows it as it goes). It then
+starts a fresh interpreter to check that the new version is the one that
+imports, says how long it took, and lists what is new: the first line of
+each changelog entry between the two versions, read from the changelog at
+the new version's tag. It says so if the `mdl` first on your `PATH` is a
 different install it did not touch. It refuses, and changes nothing:
 
 - **In a source checkout** (`python mdl.py`, or `pip install -e`). Update
@@ -880,8 +884,8 @@ different install it did not touch. It refuses, and changes nothing:
   goes ahead anyway. (`mdl lab` holds no lock, so it is not seen: do not
   update in the middle of one.)
 
-If the installer fails, you are still on the version you had, and the
-error is its last line. On Windows the running `mdl.exe` is moved aside
+If the installer fails, you are still on the version you had, and its
+last lines are printed under the error. On Windows the running `mdl.exe` is moved aside
 first, since `uv` cannot replace an exe that is running; a leftover
 `mdl.exe.old-<pid>` is removed by the next update.
 
@@ -889,7 +893,11 @@ first, since `uv` cannot replace an exe that is running; a leftover
 checks whether a newer release is out - at most once a day, cached in
 `~/.cache/mdl/update.json` - and if there is one, offers it: update and
 restart, later, or skip that version. Servers keep running through the
-restart, and `u` brings the offer back. `mdl doctor` reports the same
+restart, and `u` brings the offer back; after the restart it shows the
+first few things that are new. **The web page offers it too**: a row on
+the page says the new version is out, and one click installs it, shows
+the installer's progress, and restarts `mdl ui` on the same address - the
+open window reconnects and reloads itself. `mdl doctor` reports the same
 check. The request is a plain GET of PyPI's JSON for `llama-mdl`; nothing
 about you or your models is sent. To turn it off, set
 `MDL_NO_UPDATE_CHECK=1`, or put this at the top of the config:
