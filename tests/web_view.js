@@ -103,6 +103,29 @@ check("an empty config: what is missing, and where to read how",
       [["soon", "No models in your config yet", "url|https://github.com/diverseau/llama-mdl#readme"]]);
 check("no snapshot yet: the title, nothing else", View.build(null, {}).rows, []);
 
+// -- GGUFs already on this machine, while the config has none -----------------------
+const found = [{ name: "qwen3-8b", path: "/m/Qwen3-8B-Q4_K_M.gguf", sizeGb: 5, vision: false },
+               { name: "gemma", path: "/lms/gemma.gguf", sizeGb: 3.2, vision: true }];
+const empty = Object.assign({}, snap, { kinds: [], deployments: [], found: found });
+const fr = View.build(empty, {}).rows;
+check("found: under the empty config's message, each with add, then all",
+      fr.map(r => [r.type, r.label || r.head, r.value || "", r.action || ""]),
+      [["soon", "No models in your config yet", "", "url|https://github.com/diverseau/llama-mdl#readme"],
+       ["sec", "ON THIS MACHINE", "", ""],
+       ["field", "qwen3-8b", "5 GB · add ›", "adopt|/m/Qwen3-8B-Q4_K_M.gguf"],
+       ["field", "gemma", "3.2 GB · vision · add ›", "adopt|/lms/gemma.gguf"],
+       ["field", "all 2", "add all ›", "adopt|*"]]);
+const busyFound = View.build(Object.assign({}, empty, { found: [Object.assign({}, found[0], { adding: true }), found[1]] }),
+  {}).rows.filter(r => r.icon === "download");
+check("found: while one is added, nothing else is offered",
+      busyFound.map(r => [r.value, r.action]), [["adding…", ""], ["3.2 GB · vision", ""]]);
+check("found: an add that failed says why",
+      View.build(Object.assign({}, empty, { foundError: "x.gguf: no" }), {}).rows.filter(r => r.type === "error")
+        .map(r => r.label), ["could not add x.gguf: no"]);
+check("found: with find's picks on the home page, at its end",
+      View.build(Object.assign({}, snap, { deployments: [], found: [found[0]] }), {}).rows.slice(-2).map(r => r.type),
+      ["sec", "field"]);
+
 // -- a newer mdl ------------------------------------------------------------------
 const upd = u => View.build(Object.assign({}, snap, { update: u }), {}).rows.filter(r => r.icon === "download" || r.type === "error"
   && /update/.test(r.label)).map(r => [r.type, r.label, r.value || "", r.action || ""]);

@@ -1354,6 +1354,18 @@ class MdlApp(App):
             return
         if not self.models:
             self.status_line = mdl.NO_MODELS
+            # a first model may be on disk already, from LM Studio or a
+            # pull by another tool: say so, and what adds them
+            try:
+                from mdl_fit import scan
+                n = len(scan.found())
+            except OSError:
+                n = 0
+            if n:
+                self.status_line = (
+                    "no models yet, but %d GGUF%s on this machine: quit (q) "
+                    "and run `mdl setup` to add %s" % (
+                        n, "" if n == 1 else "s", "it" if n == 1 else "them"))
         marks = self._marks_path()
         try:
             self.marks = json.loads(marks.read_text())

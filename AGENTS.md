@@ -114,7 +114,11 @@ worse, silently.
 7. **No test may reach the real PyPI.** `tests/support.py` sets
    `MDL_NO_UPDATE_CHECK=1` for every suite; `test_update.py` turns it back
    on against a fake index (`MDL_PYPI_URL`). A new suite that does not
-   import `support` has to do the same.
+   import `support` has to do the same. Nor GitHub (`MDL_CHANGELOG_URL`
+   points at nothing), nor the developer's own models: `support` makes
+   `scan.places()` return nothing, so `mdl setup` and an empty config's
+   web page never list someone's LM Studio folder; `test_setup.py` gives
+   it folders of its own.
 
 ## Style
 

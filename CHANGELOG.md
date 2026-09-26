@@ -34,6 +34,9 @@ Getting started, made shorter: from installing to a model answering.
   report a problem, and the last 30 lines of the log if the start fails.
   `mdl run -v`, or output that is not a terminal, prints the log as
   before.
+- A vision projector named after its model (LM Studio's
+  `<model>-mmproj-<type>.gguf`) is found by `mdl add` too, not only one
+  named `mmproj-*`.
 - `mdl --help` lists every command, grouped by what you are doing, one
   line each, and starts with what to type first. An unknown command says
   to see `--help` instead of printing the whole usage line.
@@ -86,6 +89,15 @@ Getting started, made shorter: from installing to a model answering.
 - `mdl update` ends with what is new: the headline of each changelog
   entry since the version you had, read from the changelog at the new
   release's tag. The dashboard shows the first few after its restart.
+- `mdl setup`: the first minute in one command. It says whether
+  llama.cpp is installed and what it runs on, makes the config, and finds
+  the GGUFs already on this machine - `~/models`, the Hugging Face cache,
+  llama.cpp's `-hf` cache, LM Studio - to add as presets fitted here, one
+  file however many paths reach it, a split model once, projectors
+  attached. With none, it offers `mdl find`. `--yes` for scripts.
+- The web page lists those GGUFs while the config has no models, each
+  with an add button and one for all; the terminal dashboard's status
+  line says how many there are and that `mdl setup` adds them.
 - `mdl ui` offers a newer mdl on the page, installs it with one click,
   and restarts on the same address; the open window reloads itself.
 - `mdl run` and `mdl pull --run` end, on a terminal, with where to chat

@@ -48,6 +48,7 @@ COOKIE = "mdl_ui"
 BUSY_S, IDLE_S = 1.0, 2.0       # a snapshot this often while a load runs, else
 PING_S = 15.0                   # an SSE comment this often keeps it open
 IDLE_EXIT_S = 20.0              # no page for this long after one was: done
+FOUND_S = 30.0                  # an empty config's page looks on disk this often
 FIRST_PAGE_S = 300.0            # and none ever arrived within this: done
 LOG_LINES = 400
 
@@ -70,11 +71,19 @@ class Hub:
         self.update = {}
         self.restart = False    # updated: main() starts the new code
         self.token = None
+        # GGUFs already on disk, offered while the config has no models
+        self.found, self.found_at, self.adding, self.add_error = [], 0.0, {}, ""
 
     def rebuild(self):
         snap = snapshot.build(self.failed, set(self.stopping))
         if self.update:
             snap["update"] = dict(self.update)
+        if not snap.get("deployments"):
+            found = self.found_models()
+            if found:
+                snap["found"] = found
+            if self.add_error:
+                snap["foundError"] = self.add_error
         text = json.dumps(snap, separators=(",", ":"))
         with self.cond:
             if text != self.text:
@@ -82,6 +91,32 @@ class Hub:
                 self.seq += 1
                 self.cond.notify_all()
         return snap
+
+    def found_models(self):
+        """The GGUFs on this machine for the page to offer, while the
+        config has no models (or some are being added from here), looked
+        for at most every FOUND_S. [] otherwise."""
+        import mdl
+
+        from mdl_fit import scan
+        models = mdl.load_config(missing_ok=True)[0]
+        if models and not self.adding:
+            return []
+        if time.monotonic() - self.found_at > FOUND_S:
+            try:
+                self.found = scan.found(known=scan.configured(models))
+            except OSError:
+                self.found = []
+            self.found_at = time.monotonic()
+        taken, out = set(models), []
+        for f in self.found[:12]:
+            name = self.adding.get(str(f.path)) or scan.name_for(f.path, taken)
+            taken.add(name)
+            out.append({"name": name, "path": str(f.path),
+                        "sizeGb": round(f.size / 1e9, 1), "place": f.place,
+                        "vision": bool(f.mmproj),
+                        "adding": str(f.path) in self.adding})
+        return out
 
     def loop(self):
         while not self.halt.is_set():
@@ -215,6 +250,28 @@ def _update(hub, version):
     hub.restart = True
 
 
+def _adopt(hub, pool):
+    """Add found GGUFs as presets fitted here (mdl setup's way), saying
+    on the page which are being added until they all are."""
+    import mdl
+
+    from mdl_fit import scan, setup
+    taken = set(mdl.load_config(missing_ok=True)[0])
+    for f in pool:
+        hub.adding[str(f.path)] = scan.name_for(f.path, taken)
+        taken.add(hub.adding[str(f.path)])
+    hub.add_error = ""
+    hub.rebuild()
+    for f in pool:
+        try:
+            setup.add(f, hub.adding[str(f.path)])
+        except (SystemExit, Exception) as e:     # noqa: BLE001
+            hub.add_error = "%s: %s" % (f.path.name, e)
+    hub.adding.clear()
+    hub.found_at = 0.0
+    hub.rebuild()
+
+
 def act(hub, req):
     """Run one of a fixed few verbs: (status, {"ok": ...}). A model must be
     one the config or the running servers have."""
@@ -222,6 +279,16 @@ def act(hub, req):
 
     from . import agents, tailnet, usage
     verb, name = str(req.get("verb")), str(req.get("name") or "")
+    if verb == "adopt":
+        # only a file the scan found: never a path the page makes up
+        path = str(req.get("path") or "")
+        pool = [f for f in hub.found if path in ("*", str(f.path))]
+        if hub.adding:
+            return 409, {"ok": False, "error": "already adding"}
+        if not pool:
+            return 404, {"ok": False, "error": "not a model found here"}
+        threading.Thread(target=_adopt, args=(hub, pool), daemon=True).start()
+        return 200, {"ok": True}
     if verb == "update":
         if hub.update.get("state") not in ("offer", "failed"):
             return 409, {"ok": False, "error": "no update to install"}

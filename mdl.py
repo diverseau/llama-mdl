@@ -66,10 +66,12 @@ USAGE = ("usage: mdl {init|config [--path|--undo|--history]|"
 HELP = """\
 mdl - run local llama.cpp servers, and work out which model to run and how
 
-new here? `mdl find` shows what fits this machine, then
-`mdl find --run 1` fetches the best of it and starts it.
+new here? `mdl setup` checks llama.cpp and adds the GGUFs you already
+have; `mdl find --run 1` fetches the best model this machine can run and
+starts it.
 
 get a model
+  setup [--yes]          check llama.cpp, add the GGUFs already here
   find [--run N]         the best models this machine can run, ranked
   pull org/repo[:quant]  download a GGUF, check it, add a preset fitted here
   add file.gguf          add a GGUF you already have
@@ -136,9 +138,9 @@ STARTER = '''# mdl config. One table per model; the table name is what you
 '''
 
 # What to do with no models yet, for everything that finds none.
-NO_MODELS = ("no models yet: `mdl find` shows what fits this machine, "
-             "`mdl pull org/repo` fetches one, `mdl add file.gguf` adds "
-             "one you have")
+NO_MODELS = ("no models yet: `mdl setup` adds the GGUFs already on this "
+             "machine, `mdl find` shows what fits it, `mdl pull org/repo` "
+             "fetches one")
 
 
 class MdlError(Exception):
@@ -1243,6 +1245,11 @@ def cmd_pull(args):
     pull.main(args)
 
 
+def cmd_setup(args):
+    from mdl_fit import setup
+    setup.main(args)
+
+
 def cmd_manifest(args):
     from mdl_fit import manifest
     manifest.main(args)
@@ -1398,13 +1405,14 @@ def find_mmproj(model):
     """The vision projector sitting beside a model, if there is exactly one.
 
     Multimodal repos ship it as mmproj-<something>.gguf next to the
-    weights, and without it llama-server loads the text half and says
-    nothing about the missing eyes. Two candidates is a choice, not a
-    default, so it declines to guess.
+    weights (LM Studio's as <model>-mmproj-<type>.gguf), and without it
+    llama-server loads the text half and says nothing about the missing
+    eyes. Two candidates is a choice, not a default, so it declines to
+    guess.
     """
     try:
         found = sorted(p for p in model.parent.glob("*.gguf")
-                       if p.name.lower().startswith("mmproj"))
+                       if "mmproj" in p.name.lower())
     except OSError:
         return None
     return found[0] if len(found) == 1 else None
@@ -1510,8 +1518,8 @@ def cmd_init(args):
     if not shutil.which(DEFAULT_BIN):
         print("llama-server is not on your PATH: install llama.cpp (%s), "
               "or set llama_server in it" % llama_hint())
-    print("next: `mdl find` shows what fits this machine, `mdl pull "
-          "org/repo` fetches a model, `mdl add file.gguf` adds one you have")
+    print("next: `mdl setup` adds the GGUFs already on this machine, "
+          "`mdl find` shows what fits it, `mdl pull org/repo` fetches one")
 
 
 def cmd_add(args):
@@ -1953,7 +1961,8 @@ COMMANDS = {"init": cmd_init, "config": cmd_config,
             "run": cmd_run, "stop": cmd_stop, "ps": cmd_ps, "list": cmd_list,
             "logs": cmd_logs, "fit": cmd_fit, "eval": cmd_eval,
             "catalog": cmd_catalog, "find": cmd_find, "pull": cmd_pull,
-            "manifest": cmd_manifest, "lab": cmd_lab, "update": cmd_update}
+            "manifest": cmd_manifest, "lab": cmd_lab, "update": cmd_update,
+            "setup": cmd_setup}
 
 
 def _dispatch():

@@ -91,14 +91,25 @@ python ~/src/mdl/mdl.py --help
 Then get a model and start it:
 
 ```sh
+mdl setup                       # check llama.cpp, add the GGUFs you already have
 mdl find                        # what fits this machine, best first
 mdl find --run 1                # fetch #1, fit a preset to it, start it
 mdl pull unsloth/Qwen3-8B-GGUF --run   # or a repo you already know
 ```
 
-There is no config to write first: the first model you pull or add
-creates `~/.config/mdl/models.toml`, with `llama-server` set to the one on
-your PATH. `mdl add file.gguf` adds a GGUF you already have. `mdl init`
+`mdl setup` says whether llama.cpp is installed and which GPU it runs
+on, then looks for GGUFs already on this machine - in `~/models` (or
+`$MDL_MODELS`), the Hugging Face cache, llama.cpp's `-hf` cache and LM
+Studio's models folder - and adds the ones you pick as presets fitted to
+this machine, each on a port of its own, with its vision projector when
+one sits beside it. `--yes` adds them all without asking. With none
+there, it offers to run `mdl find`. Run again, it adds only what is new.
+The web page offers the same list, with an add button each, while the
+config has no models.
+
+There is no config to write first: the first model you set up, pull or
+add creates `~/.config/mdl/models.toml`, with `llama-server` set to the
+one on your PATH. `mdl add file.gguf` adds a GGUF from anywhere else. `mdl init`
 writes the same starter config on its own, with a commented example to
 copy from.
 
@@ -213,8 +224,12 @@ mdl check        Validate every model in the config without launching
                  anything. Exits non-zero if it finds a problem.
 mdl doctor [--json] [name]
                  Diagnose the environment and all presets, or just one.
+mdl setup [--yes]
+                 Check llama.cpp, then add the GGUFs already on this
+                 machine (models folder, HF cache, LM Studio) as fitted
+                 presets. --dir PATH looks somewhere else too.
 mdl init         Write a starter config, if you do not have one. (The
-                 first pull or add writes it too.)
+                 first setup, pull or add writes it too.)
 mdl config       Open models.toml in your editor; --path prints its location.
 mdl --version    The version, for bug reports.
 mdl update [--check]

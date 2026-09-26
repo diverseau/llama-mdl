@@ -509,6 +509,7 @@
     case "log": nav({ view: "log", id: a[1] }); break
     case "url": post({ verb: "url", url: a.slice(1).join("|") }); break
     case "update": post({ verb: "update" }); break
+    case "adopt": post({ verb: "adopt", path: a.slice(1).join("|") }); break
     case "copy":
       navigator.clipboard.writeText(a.slice(1).join("|")).catch(function() {})
       copied = true; render()

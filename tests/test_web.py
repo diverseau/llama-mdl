@@ -417,6 +417,38 @@ try:
               action("url", extra={"url": "https://evil.example/"})[0], 400)
     finally:
         server.webbrowser.open = real_open
+    # -- GGUFs on disk: only one the scan found can be added ----------------
+    from mdl_fit import scan, setup
+    adopted = []
+    real_add = setup.add
+    setup.add = lambda f, name: adopted.append((f.path.name, name))
+    try:
+        hub.found = [scan.Found(Path("/m/One-Q4_K_M.gguf"), 5 << 30, "LM Studio"),
+                     scan.Found(Path("/m/Two-Q8_0.gguf"), 9 << 30, "LM Studio")]
+        hub.found_at = time.monotonic()         # the made-up list is fresh
+        check("adopt: not a path the page made up",
+              action("adopt", extra={"path": "/etc/passwd"}),
+              (404, {"ok": False, "error": "not a model found here"}))
+        check("adopt: one the scan found", action(
+            "adopt", extra={"path": str(Path("/m/One-Q4_K_M.gguf"))}),
+            (200, {"ok": True}))
+        check("adopt: added as setup adds it, named from its file",
+              until(lambda: adopted and not hub.adding, 5) and adopted,
+              [("One-Q4_K_M.gguf", "one")])
+        adopted.clear()
+        hub.found_at = time.monotonic()         # keep the made-up list
+        check("adopt: all of them", action("adopt", extra={"path": "*"}),
+              (200, {"ok": True}))
+        check("adopt: each, named apart",
+              until(lambda: len(adopted) == 2 and not hub.adding, 5)
+              and sorted(adopted),
+              [("One-Q4_K_M.gguf", "one"), ("Two-Q8_0.gguf", "two")])
+        check("adopt: and the page looks on disk again after",
+              hub.found_at, 0.0)
+    finally:
+        setup.add = real_add
+        hub.found, hub.adding = [], {}
+
     # -- a newer mdl: offered, installed from the page, then restarted -------
     check("update: nothing to install until one is offered",
           action("update"), (409, {"ok": False, "error": "no update to install"}))

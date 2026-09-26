@@ -33,7 +33,7 @@ FAST = ["test_cli.py", "test_commands.py", "test_doctor.py",
         "test_lab.py",
         "test_manifest.py",
         "test_web.py", "test_update.py",
-        "test_journey.py", "test_progress.py"]
+        "test_journey.py", "test_progress.py", "test_setup.py"]
 LIVE = ["test_live.py"]
 
 

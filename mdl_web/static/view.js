@@ -189,7 +189,23 @@ function homeView(s, ui) {
   if (free.length) rows = rows.concat([{ type: "sec", label: "AVAILABLE" }], flat(free))
   if (s.gpus.length > free.filter(function(x) { return !x.group }).length)
     rows.push({ type: "field", icon: "gpu", label: "all GPUs", value: String(s.gpus.length), action: "gpus" })
+  rows = rows.concat(foundRows(s))
   return { title: "MDL", version: s.version, rows: rows }
+}
+
+// GGUFs already on this machine, while the config has none: each one, or all, added as a preset fitted here
+function foundRows(s) {
+  var f = s.found || [], busy = f.some(function(m) { return m.adding })
+  if (!f.length) return []
+  var rows = [{ type: "sec", label: "ON THIS MACHINE" }]
+  if (s.foundError) rows.push({ type: "error", label: "could not add " + s.foundError })
+  f.forEach(function(m) {
+    rows.push({ type: "field", icon: "download", label: m.name,
+      value: m.adding ? "adding…" : gb(m.sizeGb) + (m.vision ? " · vision" : "") + (busy ? "" : " · add ›"),
+      action: busy ? "" : "adopt|" + m.path })
+  })
+  if (f.length > 1 && !busy) rows.push({ type: "field", icon: "download", label: "all " + f.length, value: "add all ›", action: "adopt|*" })
+  return rows
 }
 
 // Your lifetime as an activity grid: a column a week, a row a weekday, each day shaded in four steps by its tokens
@@ -263,6 +279,7 @@ function soonView(s, ui) {
   if (s.error) rows.push({ type: "error", label: s.error })
   rows = rows.concat(updateRows(s.update))
   rows.push({ type: "soon", head: "No models in your config yet", button: "How to add one ›", action: ADD })
+  rows = rows.concat(foundRows(s))
   return { title: "MDL", version: s.version, rows: rows }
 }
 
