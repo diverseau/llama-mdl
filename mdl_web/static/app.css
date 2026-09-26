@@ -158,6 +158,15 @@ button, input { font: inherit; color: inherit; }
               font-size: var(--caption); padding: 0 7px; outline: none; }
 .path input::placeholder { color: var(--label); }
 
+/* a key to type: its name where a field's label is, and the path's box from the meters' column to the gutter */
+.input { height: calc(27 * var(--u)); }
+.input .left { position: absolute; left: var(--gutter); top: 50%; transform: translateY(-50%); }
+.input input { position: absolute; left: calc(var(--gutter) + 104 * var(--u)); right: var(--gutter); top: 50%; transform: translateY(-50%);
+               height: calc(22 * var(--u)); background: transparent; border: 1.45px solid var(--rule); color: var(--ink);
+               font-size: var(--caption); padding: 0 7px; outline: none; }
+.input input::placeholder { color: var(--label); }
+.path input:focus, .input input:focus { border-color: var(--label); }
+
 /* your lifetime: the totals, then the activity grid, then its months */
 .life { display: flex; flex-direction: column; gap: calc(10 * var(--u)); }
 .life .top { position: relative; display: flex; gap: calc(10 * var(--u)); padding-left: var(--gutter); }

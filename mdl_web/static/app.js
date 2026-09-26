@@ -8,7 +8,8 @@
   var U = 1.4615                        // the panel's Style.space(1), in px, as its screenshots measure it
   var G = 20 * U                        // the gutter
   var root = document.getElementById("app")
-  var snap = null, ui = { view: "home", id: "", open: "", key: "", problem: "", model: "" }
+  var snap = null, ui = { view: "home", id: "", open: "", key: "", problem: "", model: "", draft: {} }
+  var editFrom = null                   // the page an edit was opened from, to go back to
   var copied = false, revealed = false, copiedTimer = 0, logTimer = 0
   var T = View.tones({ r: 1, g: 1, b: 1, a: 1 }, { r: 0, g: 0, b: 0, a: 1 }, { r: 1, g: 1, b: 1, a: 0.06 },
     { r: 0xa4 / 255, g: 0xa4 / 255, b: 0xa4 / 255, a: 1 })
@@ -316,7 +317,7 @@
 
   function fieldRow(r) {
     var row = click(el("div", "row field"), r.secret ? "" : r.action)
-    var left = el("div", "left", [r.icon ? el("span", "glyph", [icon(r.icon)]) : null, logo(r.logo, 12), label(r.label, "label")])
+    var left = el("div", "left", [r.icon ? el("span", "glyph", [icon(r.icon)]) : null, logo(r.logo, 12), label(r.label, r.changed ? "ink" : "label")])
     row.appendChild(left)
     var text = r.secret ? (copied ? "copied" : "copy") : r.value
     var val = el("span", "l val " + (r.open ? "ink" : "value"), [text])
@@ -361,6 +362,23 @@
     return el("div", "row path", [input])
   }
 
+  // A key to type: its name on the left, lit once it differs from the config, and a box like the folder's path.
+  // What is typed goes to the draft as it is typed, so a redraw puts it back; enter does the page's main action.
+  function inputRow(r) {
+    var name = label(r.label, r.changed ? "ink" : "label"), input = el("input")
+    input.value = r.value || ""
+    input.placeholder = r.hint || ""
+    input.spellcheck = false
+    input.addEventListener("input", function() {
+      ui.draft[r.key] = input.value
+      name.className = "l " + (input.value !== r.base ? "ink" : "label")
+    })
+    input.addEventListener("keydown", function(e) {
+      if (e.key === "Enter" && r.submit) activate(r.submit)
+    })
+    return el("div", "row input", [el("div", "left", [name]), input])
+  }
+
   function logRow(r) {
     var pre = el("pre", "log", ["reading..."])
     function load() {
@@ -401,7 +419,7 @@
   }
 
   var ROWS = { life: lifeRow, run: runRow, slot: slotRow, links: linksRow, soon: soonRow, grid: gridRow, gpu: gpuRow,
-    field: fieldRow, opt: optRow, path: pathRow, acts: linksRow, log: logRow }
+    field: fieldRow, opt: optRow, path: pathRow, input: inputRow, acts: linksRow, log: logRow }
 
   // The space above row i: a group opens a gap, a surface follows a surface closely, rows in a group touch
   function gapBefore(v, i) {
@@ -468,7 +486,7 @@
   function nav(patch) {
     var moved = patch.view !== undefined || patch.id !== undefined
     ui = Object.assign({ view: ui.view, id: ui.id, open: "", key: ui.key, problem: "", model: moved ? "" : ui.model || "",
-      curve: ui.curve || "" }, patch)
+      curve: ui.curve || "", draft: moved ? {} : ui.draft || {} }, patch)
     revealed = false
     if (moved) {
       var hash = ui.view === "home" ? "" : "#" + [ui.view, ui.id, ui.key].map(encodeURIComponent).join("/")
@@ -478,16 +496,31 @@
     render()
   }
   function goHome() { nav({ view: "home", id: "", key: "" }) }
-  function post(body) {
+  function send(body) {
     return fetch("/api/action", { method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body) })
       .then(function(r) { return r.json().catch(function() { return { ok: false, error: "HTTP " + r.status } }) },
         function() { return { ok: false, error: "mdl ui is not answering" } })
-      .then(function(res) {
-        // a verb that fails says why, on the home page, as the panel does
-        if (!res.ok) nav({ view: "home", id: "", key: "", problem: res.error || "that did not work (see the log)" })
-        return res
-      })
+  }
+  function post(body) {
+    return send(body).then(function(res) {
+      // a verb that fails says why, on the home page, as the panel does
+      if (!res.ok) nav({ view: "home", id: "", key: "", problem: res.error || "that did not work (see the log)" })
+      return res
+    })
+  }
+  function back() { nav(editFrom || { view: "home", id: "", key: "" }) }
+  // Only the fields that differ from the config go, so a hand edit to any other key meanwhile is kept. A save that
+  // is refused says why on the edit page, with what was typed still there to fix.
+  function save(id, restart) {
+    var base = (snap.configs || {})[id] || {}, form = {}, draft = ui.draft || {}
+    Object.keys(draft).forEach(function(f) { if (draft[f] !== base[f]) form[f] = draft[f] })
+    send({ verb: "save", name: id, form: form }).then(function(res) {
+      if (!res.ok) return nav({ problem: res.error || "that did not save" })
+      var d = (snap.deployments || []).filter(function(x) { return x.id === id })[0]
+      if (restart && d) { post({ verb: "again", name: id, keys: d.keys.join(",") }); goHome() }
+      else back()
+    })
   }
   function activate(action) {
     var a = (action || "").split("|")
@@ -507,6 +540,10 @@
     case "pick": nav({ open: ui.open === a[1] ? "" : a[1] }); break
     case "home": goHome(); break
     case "log": nav({ view: "log", id: a[1] }); break
+    case "edit": editFrom = { view: ui.view, id: ui.id, key: ui.key }; nav({ view: "edit", id: a[1], key: "" }); break
+    case "draft": ui.draft[a[1]] = a.slice(2).join("|"); nav({ open: "" }); break
+    case "save": save(a[1], a[2] === "restart"); break
+    case "back": back(); break
     case "url": post({ verb: "url", url: a.slice(1).join("|") }); break
     case "update": post({ verb: "update" }); break
     case "adopt": post({ verb: "adopt", path: a.slice(1).join("|") }); break
@@ -519,7 +556,8 @@
   }
   function fromHash() {
     var p = location.hash.slice(1).split("/").map(decodeURIComponent)
-    ui = Object.assign({}, ui, { view: p[0] || "home", id: p[1] || "", key: p[2] || "", open: "", model: "", problem: "" })
+    ui = Object.assign({}, ui, { view: p[0] || "home", id: p[1] || "", key: p[2] || "", open: "", model: "", problem: "",
+      draft: {} })
     render()
   }
   window.addEventListener("popstate", fromHash)

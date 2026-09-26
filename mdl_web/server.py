@@ -319,6 +319,8 @@ def act(hub, req):
     except mdl.MdlError as e:
         return 409, {"ok": False, "error": str(e)}
     states = mdl.read_states()
+    if verb == "save":
+        return _save(hub, name, models, req.get("form"))
     if verb in ("run", "again") and name.startswith("hf:"):
         return _pull(name, str(req.get("keys") or ""), states)
     if verb in ("run", "again") and name not in models:
@@ -373,6 +375,27 @@ def act(hub, req):
             return 409, {"ok": False, "error": str(e)}
         return 200, {"ok": True}
     return 400, {"ok": False, "error": "unknown verb %r" % verb}
+
+
+def _save(hub, name, models, form):
+    """The page's edit of a model: only the fields it changed, patched into
+    the table as it is on disk now, so a hand edit made while the page was
+    open survives. Held to what `mdl run` holds the config to, and backed
+    up like every other write (mdl config --undo)."""
+    import mdl
+    if name not in models:
+        return 404, {"ok": False, "error": "no model named %r" % name}
+    try:
+        changes, cleared = mdl.form_read(form)
+        cfg = {k: v for k, v in models[name].items() if k not in cleared}
+        cfg.update(changes)
+        mdl.check_cfg(name, cfg)
+        if changes or cleared:
+            mdl.patch_params(name, changes, drop=cleared)
+    except (mdl.MdlError, OSError) as e:
+        return 409, {"ok": False, "error": str(e)}
+    hub.rebuild()
+    return 200, {"ok": True}
 
 
 def _pull(spec, keys, states):

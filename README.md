@@ -789,6 +789,18 @@ what it served this session and this week, how long it has been up,
 which agent and folder Open uses, its weights on Hugging Face when the
 path says where they came from, and where it answers.
 
+Edit config, on any model in your config, opens its keys as a page: the
+numbers and names to type, the KV cache type and flash attention to pick
+from, and `args` as one line, the way `mdl tui`'s edit form reads them.
+Save writes only the keys you changed, into the table as it is on disk
+at that moment, so comments, the order and anything you edited by hand
+meanwhile stay as they were. It is held to the same rules as `mdl run`,
+a save that breaks one says why on the page, and every save is backed up
+for `mdl config --undo`. `model` and `llama_server` are not on it: the
+first is what the table is for, the second a program mdl runs. A model
+that is running has Save and restart as well; saved without a restart,
+its page says its config has changed and offers the restart.
+
 Open starts a coding agent on the model, in a terminal, in the folder you
 picked: pi, claude, codex, opencode, omp, crush, grok, copilot or hermes,
 whichever are installed. What the agent needs to find the server is
