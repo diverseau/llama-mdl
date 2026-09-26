@@ -29,8 +29,29 @@ Getting started, made shorter: from installing to a model answering.
   can hold here" - which sent people looking for memory that would not
   help.
 
+- `mdl run` on a terminal shows the load as one line (layers on the GPU,
+  seconds so far) instead of llama.cpp's log, printing only lines that
+  report a problem, and the last 30 lines of the log if the start fails.
+  `mdl run -v`, or output that is not a terminal, prints the log as
+  before.
+- `mdl --help` lists every command, grouped by what you are doing, one
+  line each, and starts with what to type first. An unknown command says
+  to see `--help` instead of printing the whole usage line.
+- `mdl doctor` shows paths with `~` for the home directory, and cuts a
+  long finding in the middle rather than at the end, where the file name
+  was. Its two "writable" lines say which directory is which.
+- `mdl catalog pull` says the snapshot's date and size in models, not its
+  path and "crawl complete; 0 tasks pending; complete".
+
 ### Added
 
+- Progress for everything that makes you wait: `mdl pull` shows a bar per
+  file with size, speed and time left (the page's card shows the same),
+  a spinner while it asks the Hub, picks a quant and fits the preset, and
+  finishes with what came down, how fast, and the preset it added.
+  `mdl catalog pull` and `mdl find`'s first fetch show a bar; `find` says
+  how many headers it has read. Off a terminal a bar prints a plain line
+  every tenth of the way. (`mdl_fit/progress.py`)
 - `mdl doctor` says what the llama-server on your PATH runs on - its GPU
   and backend, as llama.cpp lists them - and warns about a CPU-only build
   on a machine with an NVIDIA GPU.

@@ -26,8 +26,8 @@ import sys
 import time
 from pathlib import Path
 
-from . import (catalog, evalrun, evalsuite, gguf, hw, quality, remote,
-               search)
+from . import (catalog, evalrun, evalsuite, gguf, hw, progress, quality,
+               remote, search)
 
 # Floors on top of the profile's own: an agent turn slower than this
 # is not an agent you will use; a chat below this is not a chat.
@@ -425,9 +425,11 @@ def local_cands(models, qm, decisions=None):
     return out, links
 
 
-def fit_all(cands, qm, mach, opts, profile, binary, cache_only, notes):
+def fit_all(cands, qm, mach, opts, profile, binary, cache_only, notes,
+            spin=None):
     """Headers for one quant per model (in parallel), the rest sized
-    from it; then the fit engine and the quality estimate on each."""
+    from it; then the fit engine and the quality estimate on each.
+    `spin`, a progress.Spinner, is told how far the headers are."""
     first = {}
     for c in cands:
         if not c.inv:
@@ -435,7 +437,10 @@ def fit_all(cands, qm, mach, opts, profile, binary, cache_only, notes):
     failed = 0
     with concurrent.futures.ThreadPoolExecutor(WORKERS) as pool:
         jobs = {pool.submit(fetch, c, cache_only): c for c in first.values()}
-        for job in concurrent.futures.as_completed(jobs):
+        for n, job in enumerate(concurrent.futures.as_completed(jobs), 1):
+            if spin:
+                spin.label = ("reading model headers from the Hub: %d of %d"
+                              % (n, len(jobs)))
             c = jobs[job]
             try:
                 c.inv = job.result()
@@ -460,6 +465,8 @@ def fit_all(cands, qm, mach, opts, profile, binary, cache_only, notes):
                              if cache_only else "no header returned"))
     if failed:
         notes.append("%d headers could not be fetched" % failed)
+    if spin:
+        spin.label = "fitting %d quants to this machine" % len(cands)
     for c in cands:
         if c.inv is not None and c.why is None:
             evaluate(c, qm, mach, opts, profile, binary)
@@ -938,7 +945,8 @@ def main(args, out=None):
         # without the catalog there is nothing to find but models.toml,
         # which on a first run is nothing at all
         try:
-            catalog.ensure(say=lambda line: sys.stderr.write(line + "\n"))
+            catalog.ensure(say=lambda line: sys.stderr.write(line + "\n"),
+                           bar=True)
         except catalog.CatalogError as e:
             notes.append("could not fetch the catalog: %s" % e)
     try:
@@ -963,13 +971,28 @@ def main(args, out=None):
     if cat is not None:
         cands += catalog_cands(cat, qm, mach, profile, binary, o, notes,
                                since, decisions)
-    fit_all(cands, qm, mach, opts, profile, binary, o.get("no-fetch"), notes)
-    main_rows, explore = choose(cands, qm)
-    # a row that fails on its own header drops out and lets another in,
-    # which may itself only be sized from a sibling - so until it settles
-    while refine(main_rows[:ROWS] + explore[:5], qm, mach, opts, profile,
-                 binary, o.get("no-fetch")):
+    # the first run reads a header per model from the Hub, which is the
+    # slow part; the spinner says how far it is, on stderr
+    spin = progress.Spinner("sizing %d models against this machine" % len(
+        {c.node for c in cands}), line=progress.Line()
+    ) if sys.stderr.isatty() else None
+    if spin:
+        spin.start()
+    try:
+        fit_all(cands, qm, mach, opts, profile, binary, o.get("no-fetch"),
+                notes, spin)
         main_rows, explore = choose(cands, qm)
+        # a row that fails on its own header drops out and lets another
+        # in, which may itself only be sized from a sibling - so until it
+        # settles
+        if spin:
+            spin.label = "reading the headers of the rows to show"
+        while refine(main_rows[:ROWS] + explore[:5], qm, mach, opts, profile,
+                     binary, o.get("no-fetch")):
+            main_rows, explore = choose(cands, qm)
+    finally:
+        if spin:
+            spin.stop()
     if o.get("new"):
         seen_path().parent.mkdir(parents=True, exist_ok=True)
         mdl.write_atomic(seen_path(), json.dumps({"seen": time.strftime(

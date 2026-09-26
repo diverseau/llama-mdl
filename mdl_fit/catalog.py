@@ -31,6 +31,7 @@ import urllib.request
 from pathlib import Path
 
 from . import hw, remote
+from . import progress as bars
 
 SCHEMA_VERSION = 1
 FILE = "catalog.sqlite"
@@ -545,7 +546,7 @@ def build(path, bases=(), prev=None, log=None, **kw):
 REFRESH_S = 7 * 24 * 3600   # how stale a pulled snapshot find tolerates
 
 
-def ensure(say=None, max_age=REFRESH_S):
+def ensure(say=None, max_age=REFRESH_S, bar=False):
     """The pulled snapshot, for find: fetched when there is none, and asked
     for again when the last check is over a week old (a 304 when nothing
     changed, so that costs a request). Returns 'fresh', 'unchanged' or
@@ -560,14 +561,15 @@ def ensure(say=None, max_age=REFRESH_S):
     if say:
         say("fetching the model catalog, once" if age is None else
             "the model catalog is over a week old; checking for a newer one")
-    state = pull(path)
+    state = pull(path, shown=bar)
     if state == "unchanged":
         os.utime(path)          # checked now: the next week asks nothing
     return state
 
 
-def pull(path=None, repo=None):
-    """Fetch the published snapshot if it changed. 'fresh', 'unchanged'."""
+def pull(path=None, repo=None, shown=False):
+    """Fetch the published snapshot if it changed. 'fresh', 'unchanged'.
+    `shown` puts a bar on stderr while it comes down."""
     path = Path(path or default_path())
     repo = repo or repo_name()
     etag_file = path.with_suffix(".etag")
@@ -580,12 +582,21 @@ def pull(path=None, repo=None):
     try:
         with urllib.request.urlopen(req, timeout=120) as r:
             path.parent.mkdir(parents=True, exist_ok=True)
+            size = int(r.headers.get("Content-Length") or 0)
+            bar = (bars.Bar("model catalog", size) if shown and size
+                   else None)
+            got = 0
             with open(tmp, "wb") as f:
                 while True:
                     chunk = r.read(1 << 20)
                     if not chunk:
                         break
                     f.write(chunk)
+                    got += len(chunk)
+                    if bar:
+                        bar.update(got)
+            if bar:
+                bar.finish()
             etag = r.headers.get("X-Linked-Etag") or r.headers.get("ETag")
         con = sqlite3.connect(str(tmp))
         try:
@@ -777,15 +788,18 @@ def main(args, out=None):
     cmd, rest = args[0], args[1:]
     try:
         if cmd == "pull":
-            state = pull()
-            w("catalog  %s (%s)\n" % (state, default_path()))
+            state = pull(shown=True)
             cat = Catalog()
             try:
-                detail = progress(cat.meta())
+                meta = cat.meta()
             finally:
                 cat.db.close()
-            if detail:
-                w("crawl    %s\n" % detail)
+            w("catalog  %s · %s models (%s)\n" % (
+                str(meta.get("built_at", "?"))[:10],
+                "{:,}".format(meta.get("nodes", 0)),
+                "new" if state == "fresh" else "already the newest"))
+            if meta.get("complete") is False:
+                w("crawl    %s\n" % progress(meta))
             return state
         if cmd == "build":
             o, _ = _opts(rest, {"--org", "--base", "--per-org", "--max-nodes",

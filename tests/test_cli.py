@@ -219,6 +219,24 @@ check("dead server: one line, no traceback", (err.count("\n"), "Traceback" in er
       (1, False))
 check("dead server: state cleaned up", mdl.state_path("demo").exists(),
       False)
+
+
+def compact_run():
+    """What a terminal gets: the load in one line, not the log."""
+    models, binary = mdl.load_config()
+    proc, log, p = mdl.spawn("demo", models, binary)
+    mdl.tail_until_ready(proc, log, "demo", p, verbose=False)
+
+
+out, err, code = run(compact_run)
+check("compact: a failed start shows the problem line and the log's end",
+      (code, "error loading model" in out, "the last " in out,
+       "exited with status 1" in err), (1, True, True, True))
+del os.environ["MDL_FAKE_MODE"]
+out, err, code = run(compact_run)
+check("compact: a start that works prints no log at all",
+      (code, "offloaded" in out, out.strip()), (0, False, ""))
+run(mdl.cmd_stop, ["--all"])
 teardown(root)
 
 # ------------------------------------- listening but never reporting ready ---
@@ -274,6 +292,10 @@ _, err, code = run(fresh.cmd_init, ["x"])
 check("init takes no arguments", (err.strip(), code), ("mdl: usage: mdl init", 1))
 
 check("version is set", bool(fresh.VERSION), True)
+check("--help names every command, one line each",
+      [c for c in fresh.COMMANDS if "\n  %s " % c not in fresh.HELP], [])
+check("and every line fits 80 columns",
+      [x for x in fresh.HELP.splitlines() if len(x) > 80], [])
 for name in ("XDG_CONFIG_HOME", "XDG_STATE_HOME"):
     del os.environ[name]
 import shutil as _sh  # noqa: E402

@@ -60,6 +60,48 @@ USAGE = ("usage: mdl {init|config [--path|--undo|--history]|"
          "catalog {pull|build|tree|search|stats}|update [--check]} "
          "[--version]")
 
+# `mdl --help`: every command, grouped by what you are doing, one line
+# each. USAGE above is the terse form, kept for scripts and tests that
+# grep it.
+HELP = """\
+mdl - run local llama.cpp servers, and work out which model to run and how
+
+new here? `mdl find` shows what fits this machine, then
+`mdl find --run 1` fetches the best of it and starts it.
+
+get a model
+  find [--run N]         the best models this machine can run, ranked
+  pull org/repo[:quant]  download a GGUF, check it, add a preset fitted here
+  add file.gguf          add a GGUF you already have
+  catalog ...            the Hub's models, fine-tunes and quants, offline
+
+run it
+  run NAME [-v]          start NAME and wait until it answers
+  stop [NAME|--all]      stop a server
+  ps [--json]            what is running
+  logs [-f] [NAME]       a server's log
+  ui                     the web dashboard, in a window
+  tui                    the terminal dashboard (bare `mdl` too)
+
+tune and measure
+  fit FILE|NAME|hf:repo  what a model will do here, and with which flags
+  eval NAME              score a model on a private, auto-graded suite
+  lab ...                the same prompt through variants of a config
+  manifest NAME          exactly what NAME runs as, for a bug report
+
+look after it
+  list                   the models in your config
+  config [--path]        open models.toml in your editor
+  check                  validate every model without starting any
+  doctor [NAME]          diagnose the setup: llama-server, GPU, presets
+  init                   write a starter config (the first pull does too)
+  update [--check]       upgrade mdl, the way it was installed
+  snapshot               what the web UI shows, as JSON
+
+`mdl COMMAND --help` for more on fit, eval, find, pull, lab and catalog.
+The README has the rest: https://github.com/diverseau/llama-mdl
+"""
+
 # The model path the starter config's example uses, and mdl init wrote
 # as a live table before 0.13. check treats it as a to-do rather than a
 # fault; tests keep the two in step.
@@ -132,6 +174,14 @@ def load_config(missing_ok=False):
 # ., starting with a letter or digit. A dot needs quoting in TOML, which
 # toml_key does; a slash or a space is never allowed.
 NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+
+
+def short(path):
+    """A path for people to read: the home directory as ~."""
+    text, home = str(path), str(Path.home())
+    if text == home or text.startswith(home + os.sep):
+        return "~" + text[len(home):]
+    return text
 
 
 def starter():
@@ -702,37 +752,105 @@ def uptime(seconds):
     return f"{s}s"
 
 
-def _drain(fh, pending):
-    """Echo whole lines from the log, returning the partial remainder."""
+def _drain(fh, pending, lines):
+    """Whole lines from the log onto `lines`, returning the partial
+    remainder."""
     pending += fh.read()
     while chr(10) in pending:
         line, pending = pending.split(chr(10), 1)
-        print(line, flush=True)
+        lines.append(line)
     return pending
 
 
-def tail_until_ready(proc, log, name, port):
-    """Echo the log until /health answers. Fatal if it dies or times out."""
+# What a person watching a load wants from llama.cpp's log, which runs to
+# hundreds of lines: how far the layers are, and anything that went wrong.
+LAYERS = re.compile(r"offloaded (\d+)/(\d+) layers")
+PROBLEM = re.compile(r"\b(error|failed|cannot|unsupported|missing tensor)\b",
+                     re.I)
+TAIL_ON_FAILURE = 30     # log lines shown when a start fails
+
+
+class _Echo:
+    """Where tail_until_ready puts the log: all of it (a pipe, or -v), or
+    one line redrawn on the terminal, with the lines that report a
+    problem printed above it and the last few kept for a failure."""
+
+    def __init__(self, name, verbose):
+        self.name, self.verbose = name, verbose
+        self.started = time.monotonic()
+        self.layers = None
+        self.last = []
+        self.line = None
+        if not verbose:
+            from mdl_fit import progress
+            self.line, self.words = progress.Line(), progress.time_words
+
+    def lines(self, lines):
+        for text in lines:
+            self.last = (self.last + [text])[-TAIL_ON_FAILURE:]
+            m = LAYERS.search(text)
+            if m:
+                self.layers = "%s/%s layers on the GPU" % m.groups()
+            if self.verbose:
+                print(text, flush=True)
+            elif PROBLEM.search(text):
+                with self.line.lock:
+                    self.line.clear()
+                    print(text, flush=True)
+        if self.line and self.line.tty:
+            self.line.draw("loading %s · %s · %s" % (
+                self.name, self.layers or "reading the model",
+                self.words(time.monotonic() - self.started)))
+
+    def failed(self, log):
+        """The end of the log, for a start that did not come up."""
+        if self.line:
+            self.line.clear()
+            if self.last:
+                print("the last %d lines of %s:" % (len(self.last),
+                                                   short(log)))
+                print(chr(10).join("  " + x for x in self.last), flush=True)
+
+    def done(self):
+        if self.line:
+            self.line.clear()
+
+
+def tail_until_ready(proc, log, name, port, verbose=None):
+    """Follow the log until /health answers. Fatal if it dies or times out.
+
+    A terminal gets one line saying how the load is going, and the log's
+    last lines if it fails; a pipe, or verbose, gets every line, as it
+    always did - a script reading `mdl run` sees what it saw before.
+    """
+    if verbose is None:
+        verbose = not sys.stdout.isatty()
+    echo = _Echo(name, verbose)
     limit = ready_timeout()
     deadline = time.monotonic() + limit
     with open(log, "r", errors="replace") as fh:
         pending = ""
         while True:
-            pending = _drain(fh, pending)
+            got = []
+            pending = _drain(fh, pending, got)
+            echo.lines(got)
             if server_ready(port):
                 time.sleep(0.2)          # let the last writes land, then show them
-                pending = _drain(fh, pending)
-                if pending:
-                    print(pending, flush=True)
+                got = []
+                pending = _drain(fh, pending, got)
+                echo.lines(got + ([pending] if pending else []))
+                echo.done()
                 return
             if proc.poll() is not None:
-                pending = _drain(fh, pending)
-                if pending:
-                    print(pending, flush=True)
+                got = []
+                pending = _drain(fh, pending, got)
+                echo.lines(got + ([pending] if pending else []))
+                echo.failed(log)
                 state_path(name).unlink(missing_ok=True)
                 die(f"{name} exited with status {proc.returncode} "
                     f"during startup; see {log}")
             if time.monotonic() > deadline:
+                echo.failed(log)
                 die(f"{name} not ready after {limit:g}s; it may still be "
                     f"loading - see {log}, or run 'mdl stop {name}'")
             time.sleep(0.2)
@@ -1053,12 +1171,16 @@ def _launch(name, argv, binary, port):
 
 
 def cmd_run(args):
+    verbose = None
+    if "-v" in args:
+        verbose = True
+        args = [a for a in args if a != "-v"]
     port = None
     if len(args) == 3 and args[1] == "--port":
         port = check_port(args[2])
         args = args[:1]
     if len(args) != 1:
-        die("usage: mdl run <name> [--port N]")
+        die("usage: mdl run <name> [--port N] [-v]")
     name = args[0]
     models, binary = load_config(missing_ok=True)
     if name not in models:
@@ -1066,8 +1188,8 @@ def cmd_run(args):
             f"no model named '{name}': {NO_MODELS}")
     # spawn() says if it is already running, under the launch lock
     proc, log, port = spawn(name, models, binary, port)
-    print(f"starting {name} (pid {proc.pid}), log {log}", flush=True)
-    tail_until_ready(proc, log, name, port)
+    print(f"starting {name} (pid {proc.pid}), log {short(log)}", flush=True)
+    tail_until_ready(proc, log, name, port, verbose)
     print(f"ready: {name} on http://127.0.0.1:{port} (pid {proc.pid})")
     if sys.stdout.isatty():
         # for a person; a script reads the ready line, and it stays last
@@ -1651,13 +1773,24 @@ def _doctor_print(report, as_json):
                             *report["models"].items()]:
             print(" ".join(name.split()) + ":")
             for f in notes:
-                message = f["message"]
-                if len(message) > 90:
-                    message = message[:87] + "..."
-                print("  %-4s  %s" % (f["level"], message))
+                print("  %-4s  %s" % (f["level"], _fit_line(f["message"])))
         print(summary)
     if fails:
         die(summary)
+
+
+def _fit_line(message, width=90):
+    """A finding for the terminal: the home directory as ~, and a long one
+    cut in the middle, where a path's least telling part is - cutting the
+    end took the name that made two findings different."""
+    home = str(Path.home())
+    message = message.replace(home + os.sep, "~" + os.sep)
+    # models.toml paths are written with forward slashes on Windows too
+    message = message.replace(home.replace(chr(92), "/") + "/", "~/")
+    if len(message) <= width:
+        return message
+    head = width * 2 // 5
+    return message[:head] + "…" + message[-(width - head - 1):]
 
 
 def cmd_doctor(args):
@@ -1685,12 +1818,14 @@ def cmd_doctor(args):
                      "models yet: %s" % CONFIG)
     else:
         _doctor_note(notes, "ok", "config", "config parses: %s" % CONFIG)
-    for directory in (STATE_DIR, run_dir()):
+    for what, directory in (("state dir", STATE_DIR),
+                            ("run dir", run_dir())):
         try:
             directory.mkdir(parents=True, exist_ok=True)
             with tempfile.TemporaryFile(dir=directory):
                 pass
-            _doctor_note(notes, "ok", "writable", "writable: %s" % directory)
+            _doctor_note(notes, "ok", "writable", "%s writable: %s"
+                         % (what, directory))
         except OSError as e:
             _doctor_note(notes, "fail", "writable", e)
     ports = {}
@@ -1824,19 +1959,20 @@ def _dispatch():
         try:
             from mdl_ui import run_ui
         except ImportError:
-            print(USAGE)
+            print(HELP, end="")
             sys.exit(2)
         _after_ui(run_ui(), [])
         return
-    if sys.argv[1] in ("-h", "--help"):
-        print(USAGE)
+    if sys.argv[1] in ("-h", "--help", "help"):
+        print(HELP, end="")
         return
     if sys.argv[1] in ("-V", "--version"):
         print("mdl " + VERSION)
         return
     command = COMMANDS.get(sys.argv[1])
     if not command:
-        die("unknown command '{}'".format(sys.argv[1]) + chr(10) + USAGE)
+        die("unknown command '{}'; `mdl --help` lists them".format(
+            sys.argv[1]))
     command(sys.argv[2:])
 
 

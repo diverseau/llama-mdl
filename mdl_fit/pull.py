@@ -34,7 +34,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-from . import remote
+from . import progress, remote
 
 CHUNK = 1 << 20
 EVERY_S = 1.0                   # the status file at most this often
@@ -158,11 +158,13 @@ def example(groups):
     return by_size[len(by_size) // 2]
 
 
-def chooser(binary, say):
+def chooser(binary, status):
     """plan()'s `choose`: the quant find would pick for this machine,
-    said in one line through `say`."""
+    said in one line through the status."""
     def choose(repo, groups, sha):
         from . import find, gguf
+        status.spin("choosing among %d quants for this machine (reading "
+                    "one header)" % len(groups))
         try:
             key, why, _ = find.choose_quant(repo, groups, binary,
                                             revision=sha)
@@ -173,14 +175,48 @@ def chooser(binary, say):
                             "%s:%s" % (repo, len(groups), e, repo,
                                        _quant(example(groups)))) from None
         size = sum(s["size"] for s in groups[key])
-        say("picked %s (%s): %s; another: mdl pull %s:QUANT"
-            % (_quant(key), _size(size), why, repo))
+        status.say("picked %s (%s): %s; another: mdl pull %s:QUANT"
+                   % (_quant(key), _size(size), why, repo))
         return key
     return choose
 
 
 def _size(n):
-    return "%.1f GB" % (n / GiB) if n >= GiB else "%d MB" % (n >> 20)
+    return progress.size_words(n)
+
+
+def fetched_words(status, need):
+    """The line a finished fetch leaves: what came down, how fast, and
+    that it was checked."""
+    total = sum(f["size"] for f in need)
+    files = "%d files" % len(need) if len(need) > 1 else Path(
+        need[0]["path"]).name
+    if status.downloaded:
+        secs = max(0.1, time.monotonic() - status.fetch_started)
+        return ("downloaded %s in %s (%s/s), checked against the Hub's "
+                "sha256" % (progress.size_words(status.downloaded),
+                            progress.time_words(secs),
+                            progress.size_words(status.downloaded / secs)))
+    return "already here: %s (%s), checked against the Hub's sha256" % (
+        files, progress.size_words(total))
+
+
+def added_words(name):
+    """'added [x] to ~/.config/mdl/models.toml: 40k context, q8_0 KV, all
+    layers on the GPU'."""
+    import mdl
+    cfg = mdl.load_config(missing_ok=True)[0].get(name, {})
+    bits = []
+    if cfg.get("ctx"):
+        bits.append("%dk context" % (cfg["ctx"] // 1024))
+    if cfg.get("kv_type"):
+        bits.append("%s KV" % cfg["kv_type"])
+    if cfg.get("n_cpu_moe"):
+        bits.append("the experts of %d layers on the CPU" % cfg["n_cpu_moe"])
+    elif cfg.get("ngl", 99) >= 99:
+        bits.append("all layers on the GPU")
+    return "added [%s] to %s%s" % (name, mdl.short(mdl.CONFIG),
+                                   ": " + ", ".join(bits) if bits else "")
 
 
 # ------------------------------------------------------------ the files --
@@ -221,7 +257,7 @@ def download(repo, rev, f, dest, seen):
         with open(part, "rb") as fh:
             for b in iter(lambda: fh.read(CHUNK * 8), b""):
                 h.update(b)
-        seen(have)
+        seen(have, "resumed")          # on disk already, not downloaded now
     if have < f["size"]:
         url = "%s/%s/resolve/%s/%s" % (remote.endpoint(), repo, rev,
                                        urllib.parse.quote(f["path"]))
@@ -244,7 +280,7 @@ def download(repo, rev, f, dest, seen):
                 f["path"], getattr(e, "reason", e))) from None
         with r:
             if have and r.status != 206:     # the Range was ignored
-                seen(-have)
+                seen(-have, "resumed")
                 have, h = 0, hashlib.sha256()
             with open(part, "ab" if have else "wb") as fh:
                 try:
@@ -271,7 +307,9 @@ def download(repo, rev, f, dest, seen):
 # ------------------------------------------------------------ progress --
 
 class Status:
-    """STATE_DIR/pull/<name>.json: what the web UI shows for a pull."""
+    """How far a pull is: STATE_DIR/pull/<name>.json for the web UI's
+    card, and bars and a spinner on the terminal (none when quiet, the
+    web UI's pulls having no terminal)."""
 
     def __init__(self, name, repo, keys=(), quiet=False, spec=None):
         self.path = status_path(name) if name else None
@@ -279,17 +317,19 @@ class Status:
                      "keys": list(keys),
                      "pid": os.getpid(), "started": time.time()}
         self.quiet, self.last = quiet, 0.0
+        # quiet still keeps a bar, off screen, for the card's speed and ETA
+        self.line = progress.Line(io.StringIO() if quiet else None)
+        self.bar = self.spinner = None
+        self.downloaded, self.started = 0, time.monotonic()
 
     def __call__(self, state, detail="", percent=0, error="", force=True):
+        """The card's state: download (with how far) or error (with why)."""
         now = time.monotonic()
         if not force and now - self.last < EVERY_S:
             return
         self.last = now
         if state == "error":
             self.clear()            # the error is printed on a line of its own
-        if not self.quiet and state == "download":
-            sys.stderr.write("\r%-40s" % ("%s  %d%%" % (detail, percent)))
-            sys.stderr.flush()
         if not self.path:
             return
         import mdl
@@ -298,16 +338,50 @@ class Status:
             self.base, state=state, detail=detail, percent=int(percent),
             error=error, at=time.time())))
 
+    def spin(self, label):
+        """A wait with no size, on the terminal: asking the Hub, fitting."""
+        self._stop_spin()
+        if not self.quiet:
+            self.spinner = progress.Spinner(label, line=self.line).start()
+
+    def _stop_spin(self):
+        if self.spinner:
+            self.spinner.stop()
+            self.spinner = None
+
+    def progress(self, what, label, done, total):
+        """Bytes moving, `what` being downloading or checking; a new bar
+        when either changes."""
+        self._stop_spin()
+        if self.bar is None or self.bar.what != what:
+            if self.bar:
+                self.bar.finish()
+            self.bar = progress.Bar(label, total, line=self.line)
+            self.bar.what = what
+        self.bar.update(done, label)
+        detail = self.bar.words() if what == "downloading" else \
+            "checking the files"
+        self("download", detail, self.bar.percent(), force=False)
+
     def clear(self):
         """Take the progress line off the terminal, for what is printed next."""
-        if not self.quiet:
-            sys.stderr.write("\r" + " " * 40 + "\r")
-            sys.stderr.flush()
+        self._stop_spin()
+        if self.bar:
+            self.bar.finish()
+            self.bar = None
+        self.line.clear()
 
     def say(self, line):
-        """A line of its own, under the progress line rather than over it."""
-        if not self.quiet:
-            self.clear()
+        """A line of its own, above the progress line rather than over it."""
+        if self.quiet:
+            return
+        if self.bar:
+            self.bar.finish()
+            self.bar = None
+        # on stdout, where results go; a spinner carries on under it, and
+        # holding its line keeps it from drawing between the two
+        with self.line.lock:
+            self.line.clear()
             print(line, flush=True)
 
     def done(self):
@@ -369,18 +443,23 @@ def pull(repo, selector=None, name=None, keys=(), run=False, quiet=False):
     spec = "hf:%s" % repo + (":" + selector if selector else "")
     status = Status(name, repo, keys, quiet, spec)
     status("download", "checking the files", 0)
+    status.spin("asking the Hub about %s" % repo)
     try:
         sha, key, need = plan(repo, selector,
-                              choose=chooser(binary, status.say))
+                              choose=chooser(binary, status))
         total = sum(f["size"] for f in need) or 1
         if name in models and not _same(models[name], repo, sha, need):
             raise PullError("%s is already in %s; pick another name with "
                             "--name" % (name, mdl.CONFIG))
         where = _fetch(repo, sha, need, total, status)
+        status.say(fetched_words(status, need))
         if name not in models:
             model = where[0]
             mmproj = where[-1] if _is_mm(need[-1]) else None
+            status.spin("fitting a preset to this machine")
             _add(name, model, mmproj, models)
+            status.say(added_words(name))
+        status.clear()
     except (PullError, remote.RemoteError, OSError) as e:
         status("error", "", 0, str(e))
         raise PullError(str(e)) from None
@@ -456,16 +535,28 @@ def _fetch(repo, sha, need, total, status):
     """Every file checked, from the cache or downloaded. Returns their
     paths, in `need`'s order."""
     done = [0]
+    label = [""]
+    status.fetch_started = time.monotonic()
 
     def seen(n, what="downloading"):
         done[0] += n
-        status("download", "%d of %d GB" % (done[0] >> 30, -(-total // GiB))
-               if what == "downloading" else "checking the files",
-               done[0] * 100 // total, force=False)
+        if what == "downloading":
+            status.downloaded += n
+        elif what == "resumed":         # a .part from before: progress,
+            what = "downloading"        # but not speed
+            status.fetch_started = time.monotonic()
+        status.progress(what, ("checking " if what != "downloading" else "")
+                        + label[0], done[0], total)
+
+    def naming(i, f):
+        # the count first: a long name is clipped at its end
+        label[0] = ("%d/%d " % (i + 1, len(need)) if len(need) > 1
+                    else "") + Path(f["path"]).name
 
     # everything already in the cache: use it where it is
     hits = []
-    for f in need:
+    for i, f in enumerate(need):
+        naming(i, f)
         src = cached(repo, sha, f["path"])
         if not good(src, f, lambda n: seen(n, "checking")):
             break
@@ -475,7 +566,8 @@ def _fetch(repo, sha, need, total, status):
     done[0] = 0
     folder = models_dir() / repo.replace("/", "--")
     out = []
-    for f in need:
+    for i, f in enumerate(need):
+        naming(i, f)
         dest = folder / f["path"]
         dest.parent.mkdir(parents=True, exist_ok=True)
         if not good(dest, f, lambda n: seen(n, "checking")):

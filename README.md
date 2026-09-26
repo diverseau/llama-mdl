@@ -197,9 +197,10 @@ away. To keep it off a full GPU, add `--no-mmproj-offload` to `args`.
 ## Commands
 
 ```
-mdl run <name>   Start <name> in the background, tail its log until the
+mdl run <name>   Start <name> in the background, follow its log until the
                  server answers /health, and exit. The server keeps running
                  after mdl exits. --port N overrides the config for one run.
+                 On a terminal the load is one line; -v prints the log.
 mdl stop [name]  SIGTERM the server, SIGKILL after 10s, clean up. Takes a
                  name when more than one is up, or --all for every one.
 mdl ps [--json]  name, pid, port and uptime per server, or "nothing
@@ -249,11 +250,10 @@ ornith      /srv/models/Ornith-1.5-35B-A3B-Q4_K_M.gguf
 qwen-small  /srv/models/Qwen3-8B-Q5_K_M.gguf
 
 $ mdl run ornith
-starting ornith (pid 48812), log /home/leon/.local/state/mdl/ornith.log
-load_tensors: offloaded 43/43 layers to GPU
-llama_context: n_ctx = 65536
-main: server is listening on http://127.0.0.1:8080
+starting ornith (pid 48812), log ~/.local/state/mdl/ornith.log
 ready: ornith on http://127.0.0.1:8080 (pid 48812)
+  chat in a browser: http://127.0.0.1:8080  ·  OpenAI API: http://127.0.0.1:8080/v1
+  dashboard: mdl ui  ·  stop it: mdl stop ornith
 
 $ mdl ps
 ornith      pid 48812  port 8080  up 1h04m
@@ -929,8 +929,14 @@ same layout lives under `%USERPROFILE%`.
   binary or a busy port is one line in milliseconds, not a failed model load.
 - **Stale state self-heals.** If the pid in `run/<name>.json` is gone (crash,
   reboot, `kill -9`) the file is removed and `ps` no longer lists that server.
+- **The load is one line on a terminal.** While it loads, `run` redraws
+  `loading ornith · 43/43 layers on the GPU · 12s`, and prints only the log
+  lines that report a problem. `-v` prints the whole log, and so does any
+  `run` whose output is not a terminal - a script sees the log as before,
+  and the `ready:` line stays last.
 - **If the server exits during startup,** `run` reports its exit status, removes
-  the state file, and exits 1. The log has the reason.
+  the state file, and exits 1. On a terminal it shows the last 30 lines of
+  the log, which is where the reason is.
 - **If it does not report ready in time,** `run` exits 1 but leaves the server
   running, since it may still be loading. Check the log, or `mdl stop`. Raise
   `ready_timeout` if 300s is genuinely not enough.
