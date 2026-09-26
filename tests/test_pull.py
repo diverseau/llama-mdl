@@ -218,6 +218,28 @@ from mdl_web import snapshot                                   # noqa: E402
 check("and the page knows its weights from the cache's path",
       snapshot.weights(cfg.get("model")), [{"repository": REPO, "revision": SHA}])
 
+# some of it cached: that part adopted, hashed once, the rest downloaded
+pull.cached(REPO, SHA, "mmproj-F16.gguf").unlink()
+HITS.clear()
+hashed, real_sha = [], pull.sha256
+pull.sha256 = lambda path, seen=None: hashed.append(Path(path).name) or real_sha(
+    path, seen)
+config_before = mdl.CONFIG.read_text(encoding="utf-8")
+os.environ["MDL_MODELS"] = str(TMP / "models-adopt")    # nothing there yet
+try:
+    out, err, code = run(pull.main, ["%s:Q8_0" % REPO, "--name", "adopted"])
+    cfg = mdl.load_config()[0].get("adopted", {})
+finally:
+    pull.sha256 = real_sha
+    os.environ["MDL_MODELS"] = str(TMP / "models")
+    mdl.CONFIG.write_text(config_before, encoding="utf-8")
+check("partly cached: only what is missing is downloaded",
+      (code, [h[0] for h in HITS]), (0, ["mmproj-F16.gguf"]))
+check("and the cached part is hashed once, not again once adopted",
+      hashed.count("Tiny-Model-Q8_0.gguf"), 1)
+check("the preset points at the models folder, where both now are",
+      Path(cfg.get("model", "")).parent.name, REPO.replace("/", "--"))
+
 # -- what the page shows of a pull -------------------------------------------------
 st = pull.Status("going", REPO, ["0"], quiet=True, spec="hf:%s:Q8_0" % REPO)
 st("download", "3 of 14 GB", 21)

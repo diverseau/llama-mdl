@@ -554,11 +554,12 @@ def _fetch(repo, sha, need, total, status):
                     else "") + Path(f["path"]).name
 
     # everything already in the cache: use it where it is
-    hits = []
+    hits, checked = [], {}              # cache path -> whether it was good
     for i, f in enumerate(need):
         naming(i, f)
         src = cached(repo, sha, f["path"])
-        if not good(src, f, lambda n: seen(n, "checking")):
+        checked[src] = good(src, f, lambda n: seen(n, "checking"))
+        if not checked[src]:
             break
         hits.append(src)
     if len(hits) == len(need):
@@ -571,10 +572,14 @@ def _fetch(repo, sha, need, total, status):
         dest = folder / f["path"]
         dest.parent.mkdir(parents=True, exist_ok=True)
         if not good(dest, f, lambda n: seen(n, "checking")):
+            # a cache copy is hashed once: above, or here if it was not
             src = cached(repo, sha, f["path"])
-            if src.is_file() and src.stat().st_size == f["size"]:
+            ok = checked.get(src)
+            if ok is None and src.is_file():
+                ok = good(src, f, lambda n: seen(n, "checking"))
+            if ok:
                 _adopt(src, dest)
-            if not good(dest, f):
+            else:
                 download(repo, sha, f, dest, seen)
         else:
             seen(0)

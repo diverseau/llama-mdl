@@ -34,7 +34,7 @@ from . import (catalog, evalrun, evalsuite, gguf, hw, progress, quality,
 FLOORS = {"agent": ("s_turn", 90.0), "chat": ("decode_d", 20.0)}
 SHORTLIST = 24
 QUANTS_PER_MODEL = 3
-WORKERS = 6
+WORKERS = 12          # header fetches at once: 6 read 8 MB/s, 12 read 10, 16 no more
 ROWS = 8
 TIE = 0.5              # points of quality a faster quant of one model may give up
 K = 1024

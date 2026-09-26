@@ -598,7 +598,7 @@ class Hub(http.server.BaseHTTPRequestHandler):
                              % (first, hi, len(data)))
         self.end_headers()
         if mode == "short":
-            hi = lo + (hi - lo) // 2
+            hi = lo + 99                # ends before the header does
         try:
             self.wfile.write(data[lo:hi + 1])
         except OSError:
@@ -617,15 +617,15 @@ check("quants group, shards together, projectors left out",
 check("shards in order", [s["path"] for s in groups["Some-Model-Q4_K.gguf"]],
       ["Some-Model-Q4_K-00001-of-00002.gguf",
        "Some-Model-Q4_K-00002-of-00002.gguf"])
-remote.FIRST = 64                       # force the grow-and-refetch path
+remote.FIRST = 64                       # parse early, and fail, and read on
 before = len(hits)
 rinv = remote.inventory(REPO, "Some-Model-Q8_0.gguf",
                         groups["Some-Model-Q8_0.gguf"])
 check("a remote inventory matches the local one, from headers only",
       (rinv.file_size, rinv.n_layer, rinv.n_vocab),
       (inv.file_size, inv.n_layer, inv.n_vocab))
-check("a short first fetch grows until the header parses",
-      len(hits) - before > 1, True)
+check("a header is one request, however many parses it takes",
+      len(hits) - before, 1)
 before = len(hits)
 remote.inventory(REPO, "Some-Model-Q8_0.gguf", groups["Some-Model-Q8_0.gguf"])
 check("the second look costs no requests", len(hits) - before, 0)
@@ -636,11 +636,11 @@ check("hf spec parsing", remote.parse_spec("hf:a/b:Q4_K"), ("a/b", "Q4_K"))
 # B04: a header request reads a bounded prefix, whatever the server does
 big = "Big-Q8_0.gguf"
 files[big] = dense.read_bytes() + b"\0" * (8 << 20)
-remote.FIRST = 4 << 20
+remote.FIRST = 1 << 20
 HUB_MODE[big] = "ignore-range"
 body = remote.fetch_header(REPO, big, len(files[big]))
-check("a server that ignores Range is read no further than asked",
-      len(body), min(remote.FIRST, len(files[big])))
+check("a server that ignores Range is read no further than the header",
+      len(body), remote.FIRST)
 for mode, words in (("wrong-start", "wrong range"),
                     ("no-content-range", "wrong range"),
                     ("short", "bytes asked for")):
@@ -666,7 +666,7 @@ try:
     got = "no error"
 except remote.RemoteError as e:
     got = str(e)
-remote.FIRST, remote.LIMIT = 4 << 20, 256 << 20
+remote.FIRST, remote.LIMIT = 1 << 20, 256 << 20
 check("a length past the limit is refused, not fetched",
       ("header larger" in got, len(hits) - before), (True, 1))
 del files[big], files[evil]

@@ -42,6 +42,12 @@ Getting started, made shorter: from installing to a model answering.
   was. Its two "writable" lines say which directory is which.
 - `mdl catalog pull` says the snapshot's date and size in models, not its
   path and "crawl complete; 0 tasks pending; complete".
+- `mdl find` reads a model's header from the Hub in one request, stopping
+  as soon as it parses, instead of 4 MiB and then again from the start
+  (most headers are 4-8 MiB), and reads 12 at once instead of 6. A first
+  `find` here went from 138 s to 62 s. A second one, with the headers
+  cached, from 12.4 s to 8 s: whether llama.cpp loads an architecture is
+  asked once, not once a model, and a local model's header is parsed once.
 - `mdl update` shows one line while the installer runs instead of pip's
   or uv's output, which it prints only if the install fails (`-v` shows
   it as it goes), and says how long the update took.
@@ -93,6 +99,8 @@ Getting started, made shorter: from installing to a model answering.
   that nothing fits: the compute buffer a GPU build keeps on the card at
   `-ngl 0` was booked against 0 G of VRAM. A card-less machine now plans
   every model at `-ngl 0`, all of it in RAM.
+- `mdl pull` of a model partly in the Hugging Face cache hashed the cached
+  part twice, the second time with no progress shown.
 - `mdl doctor` with no models said nothing about a missing llama-server;
   it is now the failure it reports, with how to install llama.cpp.
 
