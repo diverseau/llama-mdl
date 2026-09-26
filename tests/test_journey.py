@@ -113,7 +113,7 @@ try:
 
     code, out, err, errors = mdl("pull", REPO, "--run")
     check("one command, from nothing to a model answering",
-          (code, errors, out.strip().splitlines()[-1:][0].startswith(
+          (code, errors, (out.strip().splitlines() or [""])[-1].startswith(
               "ready: tiny-model on http://127.0.0.1:")), (0, [], True))
     check("it said which quant it picked", "picked Q" in out, True)
     check("and wrote the config itself, with no placeholder table to trip on",

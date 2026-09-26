@@ -81,6 +81,12 @@ Getting started, made shorter: from installing to a model answering.
 - An error during `mdl pull` was printed on the end of its progress line.
 - `test_pull` let the fit behind a pull write into the real
   `~/.config/mdl`.
+- On a machine with no GPU, `mdl fit`, `mdl find` and `mdl pull` found
+  that nothing fits: the compute buffer a GPU build keeps on the card at
+  `-ngl 0` was booked against 0 G of VRAM. A card-less machine now plans
+  every model at `-ngl 0`, all of it in RAM.
+- `mdl doctor` with no models said nothing about a missing llama-server;
+  it is now the failure it reports, with how to install llama.cpp.
 
 ## [0.12.0] - 2026-09-25
 

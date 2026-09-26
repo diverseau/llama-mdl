@@ -1719,13 +1719,16 @@ def _doctor_model(name, cfg, binary, states, help_cache):
     return notes
 
 
-def _doctor_backend(notes, binary):
+def _doctor_backend(notes, binary, alone=False):
     """What this llama-server can compute on, as llama.cpp lists it. A
     build without a GPU backend on a machine with a GPU runs, and runs
     many times slower, and nothing else says so."""
     path = shutil.which(binary) or (binary if Path(binary).is_file() else None)
     if not path:
-        return                      # each model's binary check says so
+        # each model's own check says so; with none, this is the only word
+        if alone:
+            _doctor_note(notes, "fail", "binary", missing_binary(binary))
+        return
     from mdl_fit import hw
     devices = hw.llama_devices(path)
     if devices:
@@ -1852,7 +1855,7 @@ def cmd_doctor(args):
     except (OSError, ValueError) as e:
         _doctor_note(notes, "warn", "runtime", "cannot read state: %s" % e)
         states = {}
-    _doctor_backend(notes, binary)
+    _doctor_backend(notes, binary, alone=not models)
     _doctor_update(notes)
     help_cache = {}
     for name in rest or sorted(models):

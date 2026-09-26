@@ -144,11 +144,11 @@ teardown(root)
 root, port = sandbox()
 mdl.CONFIG.unlink()
 run(mdl.cmd_init, [])
-# init fills llama_server from PATH, so on a machine without llama-server
-# it leaves a placeholder there too - a real problem, and not the one
-# under test. Point it at something that certainly exists.
+# init fills llama_server from PATH, and leaves it commented out on a
+# machine without llama-server - which check then reports, a real problem
+# and not the one under test. Point it at something that certainly exists.
 mdl.CONFIG.write_text(
-    re.sub(r'^llama_server = .*$',
+    re.sub(r'^(# )?llama_server = .*$',
            'llama_server = "%s"' % sys.executable.replace(chr(92), '/'),
            mdl.CONFIG.read_text(encoding='utf-8'), count=1, flags=re.M),
     encoding='utf-8')

@@ -258,6 +258,16 @@ check("a floor past the model's own trained context says so: memory is "
       (bool(roomy.picks), "this model is trained for at most %dk"
        % (inv.n_ctx_train // 1024) in (roomy.relaxed or ""),
        "can hold here" in (roomy.relaxed or "")), (True, True, False))
+no_card = FakeMachine(gpu_name="no GPU", backend="CPU", vram_total=0,
+                      vram_free=0, margin=0, ram_total=20 * GiB,
+                      ram_avail=16 * GiB, os_headroom=0, ram_reserve=4 * GiB,
+                      cores=(16, 10, 6), build={"build": 1})
+cpu = search.solve(search.Context(inv, no_card, calib.Residuals([])),
+                   search.Options("chat"))
+check("a machine with no GPU runs a model on the CPU, all of it in RAM "
+      "(every config was refused: the compute buffer was booked to a card)",
+      (bool(cpu.picks), {p.flags.ngl for p in cpu.everything},
+       max(p.gpu for p in cpu.everything)), (True, {0}, 0))
 
 tiny_ram = machine(vram=GiB, ram=int(0.001 * GiB))
 nope = search.solve(search.Context(inv, tiny_ram, calib.Residuals([])),
