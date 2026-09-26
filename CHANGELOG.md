@@ -2,12 +2,20 @@
 
 Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
 
-## [Unreleased]
+## [0.13.0] - 2026-09-26
 
 Getting started, made shorter: from installing to a model answering.
+`mdl setup` adds the GGUFs already on the machine, `mdl pull` picks a
+quant for it, a first `mdl find` takes a third of the time and ends with
+the command that runs #1, the terminal dashboard comes with the install,
+and everything that makes you wait says how far along it is.
 
 ### Changed
 
+- **Breaking:** no config is not an error. `mdl list`, `mdl check` and
+  `mdl doctor` with no config say how to get a model and exit 0, where
+  they exited 1 (doctor warns). The first `mdl pull`, `mdl add`,
+  `mdl setup` or `mdl fit --write` creates `models.toml`.
 - The terminal dashboard installs with mdl: Textual is a dependency, so
   `pip install llama-mdl` (or pipx, or `uv tool`) is the whole install and
   bare `mdl` always opens the dashboard. `llama-mdl[ui]` still works and
@@ -16,9 +24,6 @@ Getting started, made shorter: from installing to a model answering.
   install that lacked Textual gains it as a dependency.
 - The README's non-goals no longer rule out downloading models or a web
   UI: `mdl pull` and `mdl ui` are features.
-- No config is not an error. The first `mdl pull`, `mdl add` or
-  `mdl fit --write` creates `models.toml`; `mdl list`, `mdl check` and
-  `mdl doctor` with no models say how to get one and exit 0 (doctor warns).
 - `mdl init` writes the example model commented out: the live `[example]`
   pointed at nothing, took port 8080 from the first real model, and was
   flagged by check and doctor until deleted. `llama_server` is left
