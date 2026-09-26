@@ -431,14 +431,17 @@ try:
     check("an index that is down: one line", (code, err.count("\n")), (1, 1))
     serve(pypi(CUR, NEWER))
     lines = []
-    with pip_here, fake("ok"), \
+    # a line nothing else prints: "ok" was also in the random temp path
+    # the install is described by, so the check failed now and then
+    said = "the-fake-installer-said-this"
+    with pip_here, fake(said), \
             patch.object(mdl_update, "installed_version", return_value=NEWER), \
             patch.object(mdl_update, "path_note", return_value=None):
         out, err, code = run(mdl.cmd_update, [])
     check("an update, start to finish",
           (code, "updated mdl %s -> %s in " % (CUR, NEWER) in out), (0, True))
     check("with the installer kept quiet, and a link when the changelog "
-          "cannot be had", ("ok" in out, "what changed: " in out),
+          "cannot be had", (said in out + err, "what changed: " in out),
           (False, True))
     with pip_here, fake("Collecting llama-mdl", "ERROR: no such version",
                         code=1), \
