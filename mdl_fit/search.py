@@ -97,9 +97,17 @@ class Context:
     def residual(self, flags):
         return self.res.lookup(self.sig, self.inv.arch, flags)
 
+    @property
+    def cpu_only(self):
+        """No card at all. Every config is -ngl 0 then, and the fit was
+        refusing them all: the compute buffer a GPU build keeps on the
+        card at -ngl 0 was booked against 0 G of VRAM."""
+        return not self.machine.vram_total
+
     def memory(self, flags):
-        return model.memory(self.shape, flags, None, self.machine.max_alloc,
-                            self.residual(flags))
+        mem = model.memory(self.shape, flags, None, self.machine.max_alloc,
+                           self.residual(flags))
+        return mem.on_host() if self.cpu_only else mem
 
     def fits(self, mem):
         return (mem.gpu <= self.machine.vram_usable
@@ -185,7 +193,8 @@ def candidates(ctx_obj, opts, floor_ctx=None):
             if 4 * ub * shape.n_vocab >= ctx_obj.machine.max_alloc:
                 continue                  # logits would land on the CPU
             prev_ctx = None
-            for ngl, ncmoe in placements(shape):
+            for ngl, ncmoe in ([(0, 0)] if ctx_obj.cpu_only
+                               else placements(shape)):
                 base = model.Flags(ngl=ngl, ncmoe=ncmoe, ctk=ctk, ctv=ctv,
                                    ub=ub, b=max(2048, ub), np=opts.np,
                                    mmproj=opts.mmproj,
@@ -385,7 +394,13 @@ def solve(ctx_obj, opts):
     top_ctx = max(f.flags.ctx for f in loose)
     top_tps = max(f.speed.decode_d for f in loose)
     why = []
-    if top_ctx < opts.min_ctx:
+    trained = ctx_obj.inv.n_ctx_train
+    if top_ctx < opts.min_ctx and trained and top_ctx >= trained:
+        # the model's own limit, not this machine's: more memory would
+        # not help, and saying "can hold here" sent people shopping
+        why.append("this model is trained for at most %dk of context "
+                   "(floor %dk)" % (trained // K, opts.min_ctx // K))
+    elif top_ctx < opts.min_ctx:
         why.append("the most context this quant can hold here is %dk "
                    "(floor %dk)" % (top_ctx // K, opts.min_ctx // K))
     if opts.min_tps and top_tps < opts.min_tps:

@@ -6,11 +6,11 @@ check the change is wanted.
 
 ## The scope
 
-mdl runs local llama.cpp servers from a config file, and works out what to
-run and how. Things it will not grow: a daemon, downloading model weights,
-hot-swapping, a web UI. Those are all reasonable things to want, and all of
-them are somebody else's tool. The narrow scope is the point - see the
-non-goals in the README for where the edges actually are.
+mdl runs local llama.cpp servers from a config file, works out what to
+run and how, and fetches the model you chose. Things it will not grow: a
+daemon, hot-swapping. Those are reasonable things to want, and they are
+somebody else's tool. The narrow scope is the point - see the non-goals in
+the README for where the edges actually are.
 
 Things that fit: better llama.cpp flag coverage, better failure messages,
 shell completions, more output formats, anything that makes the code
@@ -24,7 +24,7 @@ No build step, no virtualenv required.
 git clone https://github.com/diverseau/llama-mdl
 cd llama-mdl
 python mdl.py --help
-python -m pip install textual      # only if you want the dashboard
+python -m pip install textual      # only for the terminal dashboard
 ```
 
 ## Running the tests
@@ -48,9 +48,10 @@ docker run --rm -v "$PWD:/repo:ro" python:3.12-slim \
 
 ## House style
 
-- **Two files.** `mdl.py` is the CLI and imports only the standard library.
-  `mdl_ui.py` is the dashboard and is the only place Textual may appear. The
-  CLI must keep working with Textual uninstalled.
+- **One dependency, in one file.** `mdl.py` is the CLI and imports only the
+  standard library. `mdl_ui.py` is the terminal dashboard and is the only
+  place Textual may appear. Textual installs with mdl, but the CLI imports it
+  only for `mdl tui`, and must keep working from a clone without it.
 - **Errors are one plain line on stderr and a non-zero exit.** No tracebacks
   at the user, no emoji, no colour in the CLI.
 - **Comments explain why, not what.** If a line looks odd, the comment should

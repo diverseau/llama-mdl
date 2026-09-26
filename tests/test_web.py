@@ -417,6 +417,74 @@ try:
               action("url", extra={"url": "https://evil.example/"})[0], 400)
     finally:
         server.webbrowser.open = real_open
+    # -- GGUFs on disk: only one the scan found can be added ----------------
+    from mdl_fit import scan, setup
+    adopted = []
+    real_add = setup.add
+    setup.add = lambda f, name: adopted.append((f.path.name, name))
+    try:
+        hub.found = [scan.Found(Path("/m/One-Q4_K_M.gguf"), 5 << 30, "LM Studio"),
+                     scan.Found(Path("/m/Two-Q8_0.gguf"), 9 << 30, "LM Studio")]
+        hub.found_at = time.monotonic()         # the made-up list is fresh
+        check("adopt: not a path the page made up",
+              action("adopt", extra={"path": "/etc/passwd"}),
+              (404, {"ok": False, "error": "not a model found here"}))
+        check("adopt: one the scan found", action(
+            "adopt", extra={"path": str(Path("/m/One-Q4_K_M.gguf"))}),
+            (200, {"ok": True}))
+        check("adopt: added as setup adds it, named from its file",
+              until(lambda: adopted and not hub.adding, 5) and adopted,
+              [("One-Q4_K_M.gguf", "one")])
+        adopted.clear()
+        hub.found_at = time.monotonic()         # keep the made-up list
+        check("adopt: all of them", action("adopt", extra={"path": "*"}),
+              (200, {"ok": True}))
+        check("adopt: each, named apart",
+              until(lambda: len(adopted) == 2 and not hub.adding, 5)
+              and sorted(adopted),
+              [("One-Q4_K_M.gguf", "one"), ("Two-Q8_0.gguf", "two")])
+        check("adopt: and the page looks on disk again after",
+              hub.found_at, 0.0)
+    finally:
+        setup.add = real_add
+        hub.found, hub.adding = [], {}
+
+    # -- a newer mdl: offered, installed from the page, then restarted -------
+    check("update: nothing to install until one is offered",
+          action("update"), (409, {"ok": False, "error": "no update to install"}))
+    import mdl_update
+    real_install = mdl_update.install
+    installs = []
+
+    def fake_install(version, out=print, force=False):
+        installs.append(version)
+        out("running: pip install llama-mdl==" + version)
+        out("Collecting llama-mdl==" + version)
+        if len(installs) == 1:
+            raise mdl.MdlError("pip failed (exit 1)")
+        return version
+
+    mdl_update.install = fake_install
+    try:
+        hub.update = {"latest": "9.9.9", "state": "offer", "detail": ""}
+        hub.rebuild()
+        check("update: the snapshot offers it", snap().get("update"),
+              {"latest": "9.9.9", "state": "offer", "detail": ""})
+        check("update: install it", action("update"), (200, {"ok": True}))
+        check("update: a failed install says why, and is offered again",
+              until(lambda: hub.update.get("state") == "failed", 5)
+              and hub.update["detail"], "pip failed (exit 1)")
+        check("update: and not restarted", hub.restart, False)
+        check("update: try again", action("update"), (200, {"ok": True}))
+        check("update: installed, main() restarts it",
+              until(lambda: hub.restart, 5) and hub.update["state"], "restarting")
+        check("update: the version offered is the one installed", installs,
+              ["9.9.9", "9.9.9"])
+        check("update: once only while it restarts", action("update")[0], 409)
+    finally:
+        mdl_update.install = real_install
+        hub.update, hub.restart = {}, False
+        hub.rebuild()
     check("url: and only the one asked for", opened,
           ["https://huggingface.co/a/b"])
 

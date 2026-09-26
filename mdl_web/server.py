@@ -48,6 +48,7 @@ COOKIE = "mdl_ui"
 BUSY_S, IDLE_S = 1.0, 2.0       # a snapshot this often while a load runs, else
 PING_S = 15.0                   # an SSE comment this often keeps it open
 IDLE_EXIT_S = 20.0              # no page for this long after one was: done
+FOUND_S = 30.0                  # an empty config's page looks on disk this often
 FIRST_PAGE_S = 300.0            # and none ever arrived within this: done
 LOG_LINES = 400
 
@@ -65,9 +66,24 @@ class Hub:
         self.failed = {}        # name -> why its start, from here, failed
         self.stopping = set()   # names being stopped from here
         self.halt = threading.Event()
+        # a newer mdl: {"latest", "state": offer | installing | failed |
+        # restarting, "detail"}; empty when there is none to offer
+        self.update = {}
+        self.restart = False    # updated: main() starts the new code
+        self.token = None
+        # GGUFs already on disk, offered while the config has no models
+        self.found, self.found_at, self.adding, self.add_error = [], 0.0, {}, ""
 
     def rebuild(self):
         snap = snapshot.build(self.failed, set(self.stopping))
+        if self.update:
+            snap["update"] = dict(self.update)
+        if not snap.get("deployments"):
+            found = self.found_models()
+            if found:
+                snap["found"] = found
+            if self.add_error:
+                snap["foundError"] = self.add_error
         text = json.dumps(snap, separators=(",", ":"))
         with self.cond:
             if text != self.text:
@@ -75,6 +91,32 @@ class Hub:
                 self.seq += 1
                 self.cond.notify_all()
         return snap
+
+    def found_models(self):
+        """The GGUFs on this machine for the page to offer, while the
+        config has no models (or some are being added from here), looked
+        for at most every FOUND_S. [] otherwise."""
+        import mdl
+
+        from mdl_fit import scan
+        models = mdl.load_config(missing_ok=True)[0]
+        if models and not self.adding:
+            return []
+        if time.monotonic() - self.found_at > FOUND_S:
+            try:
+                self.found = scan.found(known=scan.configured(models))
+            except OSError:
+                self.found = []
+            self.found_at = time.monotonic()
+        taken, out = set(models), []
+        for f in self.found[:12]:
+            name = self.adding.get(str(f.path)) or scan.name_for(f.path, taken)
+            taken.add(name)
+            out.append({"name": name, "path": str(f.path),
+                        "sizeGb": round(f.size / 1e9, 1), "place": f.place,
+                        "vision": bool(f.mmproj),
+                        "adding": str(f.path) in self.adding})
+        return out
 
     def loop(self):
         while not self.halt.is_set():
@@ -162,6 +204,79 @@ def _stop(hub, name, state):
         hub.rebuild()
 
 
+def update_loop(hub):
+    """Whether a newer mdl is out, for the page to offer: the dashboard's
+    check, cached a day, off where it is off (MDL_NO_UPDATE_CHECK,
+    update_check = false, a source checkout)."""
+    import mdl_update
+    while not hub.halt.is_set():
+        try:
+            if not mdl_update.disabled():
+                latest = mdl_update.offer()
+                if latest and hub.update.get("state") in (None, "offer"):
+                    hub.update = {"latest": latest, "state": "offer",
+                                  "detail": ""}
+                    hub.rebuild()
+        except Exception:               # noqa: BLE001 - a courtesy, no more
+            pass
+        hub.halt.wait(6 * 3600)
+
+
+def _update(hub, version):
+    """Install `version` the way mdl was installed, saying how far on the
+    page, then have main() start the new code in this one's place."""
+    import mdl
+
+    import mdl_update
+
+    def out(line):
+        line = " ".join(line.split())
+        if line and not line.startswith("running: "):
+            hub.update = dict(hub.update, detail=line[:80])
+            hub.rebuild()
+
+    hub.update = {"latest": version, "state": "installing",
+                  "detail": "starting the installer"}
+    hub.rebuild()
+    try:
+        now = mdl_update.install(version, out=out)
+    except mdl.MdlError as e:
+        hub.update = {"latest": version, "state": "failed", "detail": str(e)}
+        hub.rebuild()
+        return
+    hub.update = {"latest": now, "state": "restarting",
+                  "detail": "updated to %s; restarting" % now}
+    hub.rebuild()
+    hub.restart = True
+
+
+def _adopt(hub, pool):
+    """Add found GGUFs as presets fitted here (mdl setup's way), saying
+    on the page which are being added until they all are."""
+    import mdl
+
+    from mdl_fit import scan, setup
+    taken = set(mdl.load_config(missing_ok=True)[0])
+    for f in pool:
+        hub.adding[str(f.path)] = scan.name_for(f.path, taken)
+        taken.add(hub.adding[str(f.path)])
+    hub.add_error = ""
+    hub.rebuild()
+    for f in pool:
+        name = hub.adding[str(f.path)]
+        try:
+            why = setup.add(f, name)
+        except (SystemExit, Exception) as e:     # noqa: BLE001
+            hub.add_error = "%s: %s" % (f.path.name, e)
+            continue
+        if why:                 # added, but with defaults: say so
+            hub.add_error = "%s as a fitted preset (%s has mdl add's " \
+                "defaults): %s" % (f.path.name, name, why)
+    hub.adding.clear()
+    hub.found_at = 0.0
+    hub.rebuild()
+
+
 def act(hub, req):
     """Run one of a fixed few verbs: (status, {"ok": ...}). A model must be
     one the config or the running servers have."""
@@ -169,6 +284,22 @@ def act(hub, req):
 
     from . import agents, tailnet, usage
     verb, name = str(req.get("verb")), str(req.get("name") or "")
+    if verb == "adopt":
+        # only a file the scan found: never a path the page makes up
+        path = str(req.get("path") or "")
+        pool = [f for f in hub.found if path in ("*", str(f.path))]
+        if hub.adding:
+            return 409, {"ok": False, "error": "already adding"}
+        if not pool:
+            return 404, {"ok": False, "error": "not a model found here"}
+        threading.Thread(target=_adopt, args=(hub, pool), daemon=True).start()
+        return 200, {"ok": True}
+    if verb == "update":
+        if hub.update.get("state") not in ("offer", "failed"):
+            return 409, {"ok": False, "error": "no update to install"}
+        threading.Thread(target=_update, args=(hub, hub.update["latest"]),
+                         daemon=True).start()
+        return 200, {"ok": True}
     if verb == "url":
         url = str(req.get("url") or "")
         if not url.startswith(URLS):
@@ -184,7 +315,7 @@ def act(hub, req):
             return 409, {"ok": False, "error": str(e)}
         return 200, {"ok": True}
     try:
-        models, binary = mdl.load_config()
+        models, binary = mdl.load_config(missing_ok=True)
     except mdl.MdlError as e:
         return 409, {"ok": False, "error": str(e)}
     states = mdl.read_states()
@@ -471,6 +602,7 @@ def serve(port=0, token=None):
     """(server, hub, url): listening, with the snapshot thread running."""
     token = token or secrets.token_urlsafe(24)
     hub = Hub()
+    hub.token = token
     httpd = Server(("127.0.0.1", port), lambda *a: None)
     real_port = httpd.server_address[1]
     httpd.RequestHandlerClass = make_handler(hub, token, real_port)
@@ -547,11 +679,19 @@ def main(args):
             mdl.die(usage)
     from . import usage
     usage.ensure()              # servers started before mdl ui are booked too
+    # a restart after an update keeps the port and the token, so the
+    # window already open reconnects to the new code by itself
+    token = os.environ.pop("MDL_UI_TOKEN", None)
+    came = os.environ.pop("MDL_UPDATED_FROM", None)
     try:
-        httpd, hub, url = serve(port)
+        httpd, hub, url = serve(port, token)
     except OSError as e:
         mdl.die("cannot listen on 127.0.0.1:%s: %s" % (port or "any", e))
+    if came:
+        hub.update = {"latest": mdl.VERSION, "state": "updated",
+                      "detail": came}
     threading.Thread(target=picks_loop, args=(hub,), daemon=True).start()
+    threading.Thread(target=update_loop, args=(hub,), daemon=True).start()
     how = open_window(url, mdl.STATE_DIR / "ui-browser") if opening else None
     print({"window": "mdl ui: opened in an app window",
            "browser": "mdl ui: opened in your browser"}.get(
@@ -566,6 +706,8 @@ def main(args):
             with hub.cond:
                 clients, seen = hub.clients, hub.seen_client
                 quiet = time.monotonic() - hub.last_client
+            if hub.restart:
+                break
             if clients == 0 and seen and quiet > IDLE_EXIT_S:
                 break
             if not seen and time.monotonic() - started > FIRST_PAGE_S:
@@ -580,3 +722,9 @@ def main(args):
             hub.cond.notify_all()
         httpd.shutdown()
         httpd.server_close()
+    if hub.restart:
+        import mdl_update
+        os.environ["MDL_UI_TOKEN"] = hub.token
+        print("mdl ui: updated; starting the new version", flush=True)
+        mdl_update.restart(["ui", "--no-open", "--port",
+                            str(httpd.server_address[1])])

@@ -81,6 +81,12 @@ jobs:
             --popular "$CATALOG_POPULAR" --recent "$CATALOG_RECENT" \
             --budget-minutes "$CATALOG_MINUTES" \
             --from .mdl/cache/catalog.sqlite --out catalog.sqlite
+      - name: Store model headers
+        # the header find reads first for each model, so a first find
+        # does not fetch them from the Hub; most downloaded first, and
+        # the next run carries on where the budget stopped this one
+        run: |
+          python mdl.py catalog headers --in catalog.sqlite --budget-minutes 10
       - name: Describe snapshot
         run: |
           python - <<'PY'
@@ -93,6 +99,7 @@ jobs:
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
               summary.write('Catalog: ' + progress(meta) + '\n\n')
               summary.write(f"{meta['nodes']} models, {meta['ggufs']} GGUF quants, "
+                            f"{meta.get('headers', 0)} headers, "
                             f"{meta['requests']} requests, {meta['seconds']} seconds.\n")
           cat.db.close()
           PY

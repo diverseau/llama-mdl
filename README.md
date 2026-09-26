@@ -19,18 +19,19 @@ mdl run ornith
 only, and on its own it is everything you need to run servers. Linux, macOS
 and Windows.
 
-The `mdl_fit` package behind `mdl fit`, `mdl eval`, `mdl catalog` and
-`mdl find` is standard library too, and `mdl.py` imports it only when you
-call one of those four, so the commands you use every day load nothing extra.
+The `mdl_fit` package behind `mdl fit`, `mdl eval`, `mdl catalog`,
+`mdl find` and `mdl pull` is standard library too, and `mdl.py` imports it
+only when you call one of those, so the commands you use every day load
+nothing extra.
 
 `mdl ui` opens the same thing in a window: your models, what is running
 and how fast, what each has served, run and stop at a click, and a coding
 agent opened on any of them. It is `mdl_web/`, standard library
 too, serving a page that has no build step and loads nothing from the
-network. `mdl_ui.py` adds an optional terminal dashboard (`mdl tui`). It is
-the only part that needs a dependency — [Textual](https://textual.textualize.io/) —
-and the CLI never imports it, so every command but `tui` stays
-dependency-free.
+network. `mdl tui` (or just `mdl`) is the terminal dashboard, `mdl_ui.py`.
+It is the one part with a dependency - [Textual](https://textual.textualize.io/),
+which installs with mdl - and the CLI imports it only for `tui`, so the
+other commands never load it.
 
 In practice it does two jobs. It manages llama.cpp servers through named
 model presets: start one from a config file, switch between GGUF models, or
@@ -42,9 +43,24 @@ whether the quant you picked is measurably worse than the one above it
 
 ## Install
 
+mdl runs llama.cpp's `llama-server`, so that comes first:
+
 ```sh
-pipx install llama-mdl          # or: pip install llama-mdl
-pipx install "llama-mdl[ui]"    # with the terminal dashboard
+winget install ggml.llamacpp    # Windows
+brew install llama.cpp          # macOS, and Linux with Homebrew
+```
+
+or a build for your GPU from
+[llama.cpp's releases](https://github.com/ggml-org/llama.cpp/releases).
+`mdl doctor` says which GPU the `llama-server` on your PATH runs on, and
+warns if it is a CPU-only build on a machine with a GPU.
+
+Then mdl itself, with any of:
+
+```sh
+uv tool install llama-mdl       # the quickest
+pipx install llama-mdl
+pip install llama-mdl
 ```
 
 To update:
@@ -59,25 +75,43 @@ that tool upgrade it, so nothing changes but the version. See
 `mdl --version` says which one you are running.
 
 The package is `llama-mdl`; the command it installs is `mdl`. (Plain `mdl`
-on PyPI is an unrelated project.) Nothing but the dashboard has a
-dependency, and that is [Textual](https://textual.textualize.io/).
+on PyPI is an unrelated project.) Its one dependency is
+[Textual](https://textual.textualize.io/), for the terminal dashboard.
+`pip install "llama-mdl[ui]"`, the way to get the dashboard before 0.13,
+still works and installs the same thing.
 
-Or run it straight from a clone - it is Python and the standard library,
-nothing to build:
+Or run it straight from a clone - it is Python, nothing to build, and
+only `mdl tui` needs Textual (`pip install textual`):
 
 ```sh
 git clone https://github.com/diverseau/llama-mdl ~/src/mdl
 python ~/src/mdl/mdl.py --help
 ```
 
-Then create a starter config:
+Then get a model and start it:
 
 ```sh
-mdl init
+mdl setup                       # check llama.cpp, add the GGUFs you already have
+mdl find                        # what fits this machine, best first
+mdl find --run 1                # fetch #1, fit a preset to it, start it
+mdl pull unsloth/Qwen3-8B-GGUF --run   # or a repo you already know
 ```
 
-That writes `~/.config/mdl/models.toml`, finds `llama-server` on your PATH if
-it is there, and tells you what to edit.
+`mdl setup` says whether llama.cpp is installed and which GPU it runs
+on, then looks for GGUFs already on this machine - in `~/models` (or
+`$MDL_MODELS`), the Hugging Face cache, llama.cpp's `-hf` cache and LM
+Studio's models folder - and adds the ones you pick as presets fitted to
+this machine, each on a port of its own, with its vision projector when
+one sits beside it. `--yes` adds them all without asking. With none
+there, it offers to run `mdl find`. Run again, it adds only what is new.
+The web page offers the same list, with an add button each, while the
+config has no models.
+
+There is no config to write first: the first model you set up, pull or
+add creates `~/.config/mdl/models.toml`, with `llama-server` set to the
+one on your PATH. `mdl add file.gguf` adds a GGUF from anywhere else. `mdl init`
+writes the same starter config on its own, with a commented example to
+copy from.
 
 For bulk edits, run `mdl config` to open models.toml in `$VISUAL` or
 `$EDITOR` (Notepad on Windows or vi elsewhere if neither is set).
@@ -174,9 +208,10 @@ away. To keep it off a full GPU, add `--no-mmproj-offload` to `args`.
 ## Commands
 
 ```
-mdl run <name>   Start <name> in the background, tail its log until the
+mdl run <name>   Start <name> in the background, follow its log until the
                  server answers /health, and exit. The server keeps running
                  after mdl exits. --port N overrides the config for one run.
+                 On a terminal the load is one line; -v prints the log.
 mdl stop [name]  SIGTERM the server, SIGKILL after 10s, clean up. Takes a
                  name when more than one is up, or --all for every one.
 mdl ps [--json]  name, pid, port and uptime per server, or "nothing
@@ -189,7 +224,12 @@ mdl check        Validate every model in the config without launching
                  anything. Exits non-zero if it finds a problem.
 mdl doctor [--json] [name]
                  Diagnose the environment and all presets, or just one.
-mdl init         Write a starter config, if you do not have one.
+mdl setup [--yes]
+                 Check llama.cpp, then add the GGUFs already on this
+                 machine (models folder, HF cache, LM Studio) as fitted
+                 presets. --dir PATH looks somewhere else too.
+mdl init         Write a starter config, if you do not have one. (The
+                 first setup, pull or add writes it too.)
 mdl config       Open models.toml in your editor; --path prints its location.
 mdl --version    The version, for bug reports.
 mdl update [--check]
@@ -208,6 +248,7 @@ mdl catalog ...  The hub's models, fine-tunes and GGUF quants, offline.
 mdl find         The best model this machine can run, and how to run it.
 mdl pull <org/repo[:quant]> [--run]
                  Download a GGUF, check it, and add a preset fitted to it.
+                 Without a quant, the one that suits this machine.
 mdl lab ...      The same prompt through variants of a config, measured.
 mdl manifest <name>
                  What <name> is running as: its command line, llama.cpp
@@ -215,8 +256,8 @@ mdl manifest <name>
                  as JSON. --redact cuts paths and secrets for a bug report.
 ```
 
-Without textual installed, `mdl tui` fails with one line and bare `mdl`
-prints the usage string, exactly as it always did.
+In a clone without Textual, `mdl tui` fails with one line saying how to
+add it, and bare `mdl` prints the usage string.
 
 ```console
 $ mdl list
@@ -224,11 +265,10 @@ ornith      /srv/models/Ornith-1.5-35B-A3B-Q4_K_M.gguf
 qwen-small  /srv/models/Qwen3-8B-Q5_K_M.gguf
 
 $ mdl run ornith
-starting ornith (pid 48812), log /home/leon/.local/state/mdl/ornith.log
-load_tensors: offloaded 43/43 layers to GPU
-llama_context: n_ctx = 65536
-main: server is listening on http://127.0.0.1:8080
+starting ornith (pid 48812), log ~/.local/state/mdl/ornith.log
 ready: ornith on http://127.0.0.1:8080 (pid 48812)
+  chat in a browser: http://127.0.0.1:8080  ·  OpenAI API: http://127.0.0.1:8080/v1
+  dashboard: mdl ui  ·  stop it: mdl stop ornith
 
 $ mdl ps
 ornith      pid 48812  port 8080  up 1h04m
@@ -504,7 +544,13 @@ mdl find --profile chat                ≥ 20 t/s decode
 mdl find --license apache --tag code
 mdl find --new                         only what has appeared since last time
 mdl find --no-fetch                    use cached GGUF headers only
+mdl find --run 1                       fetch the top row and start it
+mdl find --pull 3                      fetch row 3, add a preset, no start
 ```
+
+The table ends with the command that gets #1 running. The first `find`
+fetches the catalog (`mdl catalog pull`) if there is none, and asks for a
+newer one when the last check is a week old; `--no-fetch` does neither.
 
 The ranking is a heuristic for a shortlist, not a measured quality
 scale: it combines public scores that were run by different people with
@@ -543,10 +589,18 @@ then `mdl eval NAME`.
 ## Downloading a model: `mdl pull`
 
 ```
-mdl pull unsloth/Qwen3-8B-GGUF:Q4_K_M          download, check, add a preset
+mdl pull unsloth/Qwen3-8B-GGUF                 the quant that suits this machine
+mdl pull unsloth/Qwen3-8B-GGUF:Q4_K_M          this quant: download, check, add a preset
 mdl pull unsloth/Qwen3-8B-GGUF:Q4_K_M --run    and start it
 mdl pull org/repo:Q8_0 --name mine             under a name of your own
 ```
+
+Without a quant, it picks the one `mdl find` would: it reads one header
+(nothing is downloaded yet), sizes the other quants from it, leaves out
+F16 and above, and takes the best quant that clears the agent profile's
+floors here, then the fastest within half a point of it. When none
+clears them - a model trained for less than 128k of context never can -
+it takes the best that runs, and says so in the line naming its pick.
 
 `mdl pull` pins the repo at its current commit and takes every shard of
 the quant, plus its vision projector when the repo ships one (the full
@@ -593,8 +647,25 @@ after completion. Unchanged repositories reuse their file inventories.
 can resume its committed pages from the adjacent `.building` file, but a
 cancelled Actions run cannot upload work that never reached Publish.
 
-The workflow gives the crawl 40 minutes and the job 60, leaving time to
-publish a partial. A manual dispatch can run while the nightly switch
+**Headers.** Sizing a model needs its GGUF header, and a header is 4-8
+MiB, mostly vocabulary, for the few kilobytes `find` keeps of it. So
+`mdl catalog headers` stores, in the snapshot, the header of the quant
+`find` reads first for each model (the biggest under 8.6 bpw, in the
+repository with the most downloads), compressed, keyed by the file's
+content hash so a new upload is never mistaken for the old one. `find`
+takes a header from there before asking the Hub; one of a quant too big
+for this machine still sizes the smaller quants of that model. Measured
+here, with them, a first `find` took 14 s instead of 40. They average
+8 KB each, so a header for all 1,712 models with GGUFs in today's
+snapshot adds about 14 MB to its 25. It is incremental, most downloaded
+first, and drops headers no quant names any more.
+
+```sh
+mdl catalog headers --in catalog.sqlite --budget-minutes 10
+```
+
+The workflow gives the crawl 40 minutes, the headers 10, and the job 60,
+leaving time to publish a partial. A manual dispatch can run while the nightly switch
 stays off, with separate inputs for both seed sizes and the time budget.
 It reports the publishing account and API quota without printing the token.
 
@@ -828,10 +899,14 @@ has the tool that installed mdl upgrade it:
 |---|---|
 | pipx | `pipx upgrade llama-mdl` |
 | `uv tool` | `uv tool upgrade llama-mdl` |
-| pip, into any environment | `python -m pip install -U "llama-mdl[ui]==<newest>"`, with `[ui]` only if Textual is there and `--user` if mdl is |
+| pip, into any environment | `python -m pip install -U "llama-mdl==<newest>"`, with `--user` if mdl is |
 
-It then starts a fresh interpreter to check that the new version is the
-one that imports, and says so if the `mdl` first on your `PATH` is a
+While the installer runs, one line says what it is doing; its own output
+is kept and shown only if it fails (`-v` shows it as it goes). It then
+starts a fresh interpreter to check that the new version is the one that
+imports, says how long it took, and lists what is new: the first line of
+each changelog entry between the two versions, read from the changelog at
+the new version's tag. It says so if the `mdl` first on your `PATH` is a
 different install it did not touch. It refuses, and changes nothing:
 
 - **In a source checkout** (`python mdl.py`, or `pip install -e`). Update
@@ -841,8 +916,8 @@ different install it did not touch. It refuses, and changes nothing:
   goes ahead anyway. (`mdl lab` holds no lock, so it is not seen: do not
   update in the middle of one.)
 
-If the installer fails, you are still on the version you had, and the
-error is its last line. On Windows the running `mdl.exe` is moved aside
+If the installer fails, you are still on the version you had, and its
+last lines are printed under the error. On Windows the running `mdl.exe` is moved aside
 first, since `uv` cannot replace an exe that is running; a leftover
 `mdl.exe.old-<pid>` is removed by the next update.
 
@@ -850,7 +925,11 @@ first, since `uv` cannot replace an exe that is running; a leftover
 checks whether a newer release is out - at most once a day, cached in
 `~/.cache/mdl/update.json` - and if there is one, offers it: update and
 restart, later, or skip that version. Servers keep running through the
-restart, and `u` brings the offer back. `mdl doctor` reports the same
+restart, and `u` brings the offer back; after the restart it shows the
+first few things that are new. **The web page offers it too**: a row on
+the page says the new version is out, and one click installs it, shows
+the installer's progress, and restarts `mdl ui` on the same address - the
+open window reconnects and reloads itself. `mdl doctor` reports the same
 check. The request is a plain GET of PyPI's JSON for `llama-mdl`; nothing
 about you or your models is sent. To turn it off, set
 `MDL_NO_UPDATE_CHECK=1`, or put this at the top of the config:
@@ -890,8 +969,14 @@ same layout lives under `%USERPROFILE%`.
   binary or a busy port is one line in milliseconds, not a failed model load.
 - **Stale state self-heals.** If the pid in `run/<name>.json` is gone (crash,
   reboot, `kill -9`) the file is removed and `ps` no longer lists that server.
+- **The load is one line on a terminal.** While it loads, `run` redraws
+  `loading ornith · 43/43 layers on the GPU · 12s`, and prints only the log
+  lines that report a problem. `-v` prints the whole log, and so does any
+  `run` whose output is not a terminal - a script sees the log as before,
+  and the `ready:` line stays last.
 - **If the server exits during startup,** `run` reports its exit status, removes
-  the state file, and exits 1. The log has the reason.
+  the state file, and exits 1. On a terminal it shows the last 30 lines of
+  the log, which is where the reason is.
 - **If it does not report ready in time,** `run` exits 1 but leaves the server
   running, since it may still be loading. Check the log, or `mdl stop`. Raise
   `ready_timeout` if 300s is genuinely not enough.
@@ -934,27 +1019,25 @@ is what `mdl fit`, `mdl find` and `mdl eval` are for.
 ## Non-goals
 
 These are deliberate, and issues asking for them will be closed with a link
-here. `mdl` starts servers, stops them, says what is running, and works out
-what to run and how. What it does not do is manage your models for you.
+here. `mdl` starts servers, stops them, says what is running, works out
+what to run and how, and fetches the model you chose. What it does not do
+is run things behind your back or decide for you what stays loaded.
 
-- **No daemon.** Nothing runs in the background except the server itself.
+- **No daemon.** Nothing runs in the background but the servers and the
+  usage recorder `mdl run` starts beside them, which goes 30 seconds after
+  the last one stops (`MDL_RECORD=off` keeps it from starting at all).
   `mdl catalog pull` fetches the published snapshot and exits; the nightly
   crawl that builds that snapshot runs in CI, not on your machine.
-- **No model downloading.** `mdl find` and `mdl catalog` will tell you which
-  GGUF to fetch, and Range-read the first few megabytes of it to get the
-  tensor table, but they never pull the weights. Use `huggingface-cli`, or
-  your browser.
 - **No hot-swap.** Nothing is unloaded to make room for something else; what
   you started stays started until you stop it. `mdl eval` is the single
   exception and a narrow one: it starts a server for the run and stops it
   afterwards, but only one it started itself - a server that was already up
   is used as it stands and left running.
-- **No web UI.** llama-server already ships one.
 
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). Short version: open an issue first,
-keep `mdl.py` free of dependencies, and run the tests.
+keep `mdl.py` to the standard library, and run the tests.
 
 ```sh
 python tests/run.py

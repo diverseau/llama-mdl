@@ -2,10 +2,14 @@
 
 The HF API lists the repo's files and sizes; an HTTP Range request on each
 GGUF's resolve URL fetches only its header. Header length is not known up
-front (a 250k-token vocab is megabytes of strings), so it asks for 4 MiB,
-parses, and asks for more if the parse runs off the end. Parsed
-inventories are cached by repo, file and content hash, so the second look
-at a repo costs nothing.
+front (a 250k-token vocab is megabytes of strings), so it asks for up to
+LIMIT in one request, parses at 1 MiB and at each doubling after, and
+closes the connection once the header parses. (Asking for 4 MiB and again
+for more took twice as long: most headers are 4-8 MiB, and each request
+waits on the Hub's redirect.) Parsed inventories are cached by repo, file
+and content hash, so the second look at a repo costs nothing; and the
+catalog carries the headers of the quants find looks at first, under the
+same key, so a first look at those costs nothing either.
 """
 
 import hashlib
@@ -20,7 +24,8 @@ from pathlib import Path
 
 from . import gguf, hw
 
-FIRST = 4 << 20
+FIRST = 1 << 20                 # the first parse; then at each doubling
+CHUNK = 256 << 10
 LIMIT = 256 << 20
 UA = "mdl-fit (+https://github.com/diverseau/llama-mdl)"
 
@@ -55,10 +60,11 @@ def parse_spec(spec):
     return repo, (selector or None)
 
 
-def _request(url, headers=None, timeout=30, limit=None):
+def _request(url, headers=None, timeout=30, limit=None, consume=None):
     """(status, headers, body). With `limit`, at most that many bytes are
     read and the connection is closed on the rest - a server that ignores
-    Range must not get to send a whole model into memory."""
+    Range must not get to send a whole model into memory. With `consume`,
+    the body is consume(response): it reads what it needs and stops."""
     headers = dict(headers or {})
     headers.setdefault("User-Agent", UA)
     tok = token()
@@ -67,6 +73,8 @@ def _request(url, headers=None, timeout=30, limit=None):
     req = urllib.request.Request(url, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
+            if consume is not None:
+                return r.status, dict(r.headers), consume(r)
             return r.status, dict(r.headers), (
                 r.read() if limit is None else r.read(limit))
     except urllib.error.HTTPError as e:
@@ -161,29 +169,47 @@ def mmproj_files(files):
 CONTENT_RANGE = re.compile(r"bytes (\d+)-(\d+)/(\d+|\*)$")
 
 
-def _range(url, path, want, size):
-    """The first `want` bytes of a file, read no further than that."""
-    status, headers, body = _request(
-        url, {"Range": "bytes=0-%d" % (want - 1)}, limit=want)
-    if size and len(body) < want:          # want <= size: all of it
-        raise RemoteError("%s: the server sent %d of the %d bytes asked for"
-                          % (path, len(body), want))
-    if status == 206:
-        got = {k.lower(): v for k, v in headers.items()}.get("content-range")
-        m = CONTENT_RANGE.match((got or "").strip())
-        if (not m or int(m.group(1)) != 0
-                or int(m.group(2)) != len(body) - 1
-                or (m.group(3) != "*" and size
-                    and int(m.group(3)) != size)):
-            raise RemoteError("%s: the server answered a header request "
-                              "with the wrong range (%s)" % (path, got))
-    elif status != 200:                   # 200: Range ignored, read bounded
-        raise RemoteError("%s: HTTP %d to a range request" % (path, status))
-    return body
+def _header_reader(path, cap, size):
+    """consume() for fetch_header: check the answer is the range asked
+    for, then read it a chunk at a time, parsing at FIRST and each
+    doubling after, and stop as soon as the header parses."""
+    def consume(r):
+        if r.status == 206:
+            got = r.headers.get("Content-Range")
+            m = CONTENT_RANGE.match((got or "").strip())
+            if (not m or int(m.group(1)) != 0
+                    or not (int(m.group(2)) == cap - 1 if size
+                            else int(m.group(2)) < cap)
+                    or (m.group(3) != "*" and size
+                        and int(m.group(3)) != size)):
+                raise RemoteError("%s: the server answered a header request "
+                                  "with the wrong range (%s)" % (path, got))
+        elif r.status != 200:             # 200: Range ignored, read bounded
+            raise RemoteError("%s: HTTP %d to a range request"
+                              % (path, r.status))
+        buf, at = bytearray(), min(FIRST, cap)
+        while True:
+            chunk = r.read(min(CHUNK, cap - len(buf)))
+            buf += chunk
+            if len(buf) < at and chunk:
+                continue
+            try:
+                gguf.parse_header(buf)
+                return bytes(buf)
+            except gguf.Truncated as e:
+                need = int(e.args[0])
+            if need > cap:
+                raise RemoteError("%s: header larger than %d MiB"
+                                  % (path, cap >> 20))
+            if not chunk:                 # the answer ended before `cap`
+                raise RemoteError("%s: the server sent %d of the %d bytes "
+                                  "asked for" % (path, len(buf), cap))
+            at = min(max(len(buf) * 2, need), cap)
+    return consume
 
 
 def fetch_header(repo, path, size, revision="main"):
-    """Just enough of a remote GGUF to parse its header.
+    """Just enough of a remote GGUF to parse its header: one request.
 
     Never more than LIMIT bytes, whatever the server does with Range and
     whatever length the header claims to need: a length field is data
@@ -192,18 +218,8 @@ def fetch_header(repo, path, size, revision="main"):
     url = "%s/%s/resolve/%s/%s" % (endpoint(), repo, revision,
                                    urllib.parse.quote(path))
     cap = min(LIMIT, size) if size else LIMIT
-    want = min(FIRST, cap)
-    while True:
-        body = _range(url, path, want, size)
-        try:
-            gguf.parse_header(body)
-            return body
-        except gguf.Truncated as e:
-            need = int(e.args[0])
-            if want >= cap or need > cap:
-                raise RemoteError("%s: header larger than %d MiB"
-                                  % (path, cap >> 20)) from None
-            want = min(max(want * 2, need + (1 << 20)), cap)
+    return _request(url, {"Range": "bytes=0-%d" % (cap - 1)},
+                    consume=_header_reader(path, cap, size))[2]
 
 
 def manifest(shards):
@@ -214,11 +230,32 @@ def manifest(shards):
                             s.get("oid", "")] for s in shards]
 
 
-def _cache_path(repo, key, shards):
+def cache_key(repo, key, shards):
+    """A header's name in the cache: its repo, quant, and a hash of every
+    shard's path, size and content id - a new upload is a new key."""
     digest = hashlib.sha256(json.dumps(manifest(shards)).encode()).hexdigest()
-    safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", "%s__%s__%s" % (
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", "%s__%s__%s" % (
         repo, key, digest[:32]))
-    return hw.cache_dir() / "gguf" / (safe + ".json")
+
+
+def _cache_path(repo, key, shards):
+    return hw.cache_dir() / "gguf" / (cache_key(repo, key, shards) + ".json")
+
+
+# Somewhere else a header may already be: find points this at the
+# catalog's. STORE(cache key) -> Inventory JSON, or None.
+STORE = None
+
+
+def stored(repo, key, shards):
+    """The Inventory STORE holds of exactly this file, or None."""
+    if STORE is None or not shards or not all(s.get("oid") for s in shards):
+        return None
+    try:
+        text = STORE(cache_key(repo, key, shards))
+        return gguf.Inventory.from_json(text) if text else None
+    except (ValueError, KeyError, TypeError):
+        return None
 
 
 def inventory(repo, key, shards, revision="main", cache=True):
@@ -231,9 +268,11 @@ def inventory(repo, key, shards, revision="main", cache=True):
             return gguf.Inventory.from_json(path.read_text(encoding="utf-8"))
         except (OSError, ValueError, KeyError):
             pass
-    pieces = [(fetch_header(repo, s["path"], s["size"], revision), s["size"])
-              for s in shards]
-    inv = gguf.merge("hf:%s/%s" % (repo, key), pieces)
+    inv = stored(repo, key, shards) if cache else None
+    if inv is None:
+        pieces = [(fetch_header(repo, s["path"], s["size"], revision),
+                   s["size"]) for s in shards]
+        inv = gguf.merge("hf:%s/%s" % (repo, key), pieces)
     if cache:
         import mdl
         try:

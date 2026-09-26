@@ -2,6 +2,138 @@
 
 Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
 
+## [0.13.0] - 2026-09-26
+
+Getting started, made shorter: from installing to a model answering.
+`mdl setup` adds the GGUFs already on the machine, `mdl pull` picks a
+quant for it, a first `mdl find` takes a third of the time and ends with
+the command that runs #1, the terminal dashboard comes with the install,
+and everything that makes you wait says how far along it is.
+
+### Changed
+
+- **Breaking:** no config is not an error. `mdl list`, `mdl check` and
+  `mdl doctor` with no config say how to get a model and exit 0, where
+  they exited 1 (doctor warns). The first `mdl pull`, `mdl add`,
+  `mdl setup` or `mdl fit --write` creates `models.toml`.
+- The terminal dashboard installs with mdl: Textual is a dependency, so
+  `pip install llama-mdl` (or pipx, or `uv tool`) is the whole install and
+  bare `mdl` always opens the dashboard. `llama-mdl[ui]` still works and
+  adds nothing. The CLI still imports Textual only for `mdl tui`.
+- `mdl update` installs `llama-mdl==<newest>` without the `[ui]` extra; an
+  install that lacked Textual gains it as a dependency.
+- The README's non-goals no longer rule out downloading models or a web
+  UI: `mdl pull` and `mdl ui` are features.
+- `mdl init` writes the example model commented out: the live `[example]`
+  pointed at nothing, took port 8080 from the first real model, and was
+  flagged by check and doctor until deleted. `llama_server` is left
+  commented out when llama-server is not on PATH, so installing it later
+  is enough.
+- `mdl fit` says a model is trained for at most N k of context, when that
+  is what keeps it under a floor, instead of "the most context this quant
+  can hold here" - which sent people looking for memory that would not
+  help.
+
+- `mdl run` on a terminal shows the load as one line (layers on the GPU,
+  seconds so far) instead of llama.cpp's log, printing only lines that
+  report a problem, and the last 30 lines of the log if the start fails.
+  `mdl run -v`, or output that is not a terminal, prints the log as
+  before.
+- A vision projector named after its model (LM Studio's
+  `<model>-mmproj-<type>.gguf`) is found by `mdl add` too, not only one
+  named `mmproj-*`.
+- `mdl --help` lists every command, grouped by what you are doing, one
+  line each, and starts with what to type first. An unknown command says
+  to see `--help` instead of printing the whole usage line.
+- `mdl doctor` shows paths with `~` for the home directory, and cuts a
+  long finding in the middle rather than at the end, where the file name
+  was. Its two "writable" lines say which directory is which.
+- `mdl catalog pull` says the snapshot's date and size in models, not its
+  path and "crawl complete; 0 tasks pending; complete".
+- `mdl find` reads a model's header from the Hub in one request, stopping
+  as soon as it parses, instead of 4 MiB and then again from the start
+  (most headers are 4-8 MiB), and reads 12 at once instead of 6. A first
+  `find` here went from 138 s to 62 s, and to 40 s once the headers of
+  the rows it shows were read together too, not one after another. A
+  second one, with the headers
+  cached, from 12.4 s to 8 s: whether llama.cpp loads an architecture is
+  asked once, not once a model, and a local model's header is parsed once.
+- `mdl update` shows one line while the installer runs instead of pip's
+  or uv's output, which it prints only if the install fails (`-v` shows
+  it as it goes), and says how long the update took.
+
+### Added
+
+- Progress for everything that makes you wait: `mdl pull` shows a bar per
+  file with size, speed and time left (the page's card shows the same),
+  a spinner while it asks the Hub, picks a quant and fits the preset, and
+  finishes with what came down, how fast, and the preset it added.
+  `mdl catalog pull` and `mdl find`'s first fetch show a bar; `find` says
+  how many headers it has read. Off a terminal a bar prints a plain line
+  every tenth of the way. (`mdl_fit/progress.py`)
+- `mdl doctor` says what the llama-server on your PATH runs on - its GPU
+  and backend, as llama.cpp lists them - and warns about a CPU-only build
+  on a machine with an NVIDIA GPU.
+- A llama-server missing from PATH says how to install llama.cpp here
+  (`winget install ggml.llamacpp` on Windows, `brew install llama.cpp`
+  with Homebrew), in `mdl run`, `mdl init` and `mdl doctor`.
+- `mdl pull org/repo` without a quant picks the one `mdl find` would for
+  this machine, and says which and why in one line. Naming one still
+  works; the error listing quants (with no chooser) suggests Q4_K_M, not
+  BF16.
+- `mdl find` ends its table with the command that gets #1 running, and
+  `--run N` / `--pull N` fetch row N (and start it).
+- `mdl find` fetches the catalog when there is none, and checks for a
+  newer one once a week; `--no-fetch` does neither.
+- `mdl catalog headers` stores in the snapshot the GGUF header `find`
+  reads first for each model, a few kilobytes compressed where the Hub
+  sends 4-8 MiB, keyed by the file's content hash. `find` takes headers
+  from there before asking the Hub; the nightly workflow runs it after
+  the crawl, 10 minutes a run. Measured here, a first `find` with them
+  took 14 s instead of 40.
+- `mdl update` ends with what is new: the headline of each changelog
+  entry since the version you had, read from the changelog at the new
+  release's tag. The dashboard shows the first few after its restart.
+- `mdl setup`: the first minute in one command. It says whether
+  llama.cpp is installed and what it runs on, makes the config, and finds
+  the GGUFs already on this machine - `~/models`, the Hugging Face cache,
+  llama.cpp's `-hf` cache, LM Studio - to add as presets fitted here, one
+  file however many paths reach it, a split model once, projectors
+  attached. With none, it offers `mdl find`. `--yes` for scripts.
+- The web page lists those GGUFs while the config has no models, each
+  with an add button and one for all; the terminal dashboard's status
+  line says how many there are and that `mdl setup` adds them.
+- `mdl ui` offers a newer mdl on the page, installs it with one click,
+  and restarts on the same address; the open window reloads itself.
+- `mdl run` and `mdl pull --run` end, on a terminal, with where to chat
+  with the model, its OpenAI API URL, and how to stop it. `pull --run`
+  prints the `ready:` line `run` does.
+- `tools/journey.py`: a new user's first session in a throwaway home,
+  timed step by step, with the longest stretch each step printed nothing.
+- `tests/test_journey.py`: that walk, offline, as part of the gate: an
+  empty home to a model answering in one command, with no errors.
+
+### Fixed
+
+- `tools/update_e2e.py` built wheels without `mdl_web`, which setuptools
+  refused since 0.12.
+- An error during `mdl pull` was printed on the end of its progress line.
+- `test_pull` let the fit behind a pull write into the real
+  `~/.config/mdl`.
+- On a machine with no GPU, `mdl fit`, `mdl find` and `mdl pull` found
+  that nothing fits: the compute buffer a GPU build keeps on the card at
+  `-ngl 0` was booked against 0 G of VRAM. A card-less machine now plans
+  every model at `-ngl 0`, all of it in RAM.
+- A model the fit could not place on this machine - most often one too
+  big for it - was added by `mdl pull` (and now `mdl setup` and the web
+  page) with `mdl add`'s defaults, all layers on the GPU and 8k context,
+  and reported as if it had been fitted. It says it has the defaults, and
+  the fit's reason.
+- `mdl pull` of a model partly in the Hugging Face cache hashed the cached
+  part twice, the second time with no progress shown.
+- `mdl doctor` with no models said nothing about a missing llama-server;
+  it is now the failure it reports, with how to install llama.cpp.
+
 ## [0.12.0] - 2026-09-25
 
 A web UI: `mdl ui` opens 0xSero's Local AI panel, ported, in a window

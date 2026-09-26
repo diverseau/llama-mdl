@@ -95,6 +95,9 @@ os.environ["HF_HUB_CACHE"] = str(TMP / "hf-cache")
 for var in ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN"):
     os.environ.pop(var, None)
 os.environ["HF_HOME"] = str(TMP / "hf-home")          # no token file either
+# the preset a pull adds is fitted, and fitting keeps its measurements and
+# header cache under mdl's config: never the real one
+os.environ["MDL_FIT_HOME"] = str(TMP / "fit-home")
 
 # ------------------------------------------------------------ the plan --
 check("a preset's name from the repo",
@@ -107,6 +110,17 @@ except pull.PullError as e:
     check("two quants and none named: says which there are",
           ("Q4_K_M" in str(e), "Q8_0" in str(e), "mdl pull %s:" % REPO in str(e)),
           (True, True, True))
+try:
+    pull.plan(REPO)
+except pull.PullError as e:
+    check("and suggests Q4_K_M by name, not the first alphabetically",
+          "e.g. mdl pull %s:Q4_K_M" % REPO in str(e), True)
+asked = []
+sha, key, need = pull.plan(REPO, choose=lambda repo, groups, sha: (
+    asked.append(sorted(groups)) or "Tiny-Model-Q4_K_M.gguf"))
+check("given a chooser, several quants are its to pick from",
+      (asked, key), ([["Tiny-Model-Q4_K_M.gguf", "Tiny-Model-Q8_0.gguf"]],
+                     "Tiny-Model-Q4_K_M.gguf"))
 sha, key, need = pull.plan(REPO, "Q8_0")
 check("a quant named: pinned to the commit, the model then its projector, "
       "at full precision",
@@ -173,6 +187,20 @@ check("a name another preset has is refused",
 pull.stop("tiny-model")
 teardown(root)
 
+# -- no quant named, and no config yet: it picks one and writes the config ------
+root, port = sandbox()
+mdl.CONFIG.unlink()
+out, err, code = run(pull.main, [REPO, "--name", "auto"])
+cfg = mdl.load_config()[0].get("auto", {})
+check("no quant named, no config: one is picked for this machine, said in "
+      "a line, fetched, and the config is written for it",
+      (code, "picked Q" in out, "another: mdl pull %s:QUANT" % REPO in out,
+       Path(cfg.get("model", "")).name in FILES), (0, True, True, True))
+check("the config it wrote is the starter, with the model added",
+      mdl.CONFIG.read_text(encoding="utf-8").startswith("# mdl config."), True)
+pull.stop("auto")
+teardown(root)
+
 # -- a verified copy in the Hugging Face cache is used where it is ---------------
 root, port = sandbox()
 for f in ("Tiny-Model-Q8_0.gguf", "mmproj-F16.gguf"):
@@ -189,6 +217,28 @@ check("the cache's copy: nothing downloaded, the preset points at it",
 from mdl_web import snapshot                                   # noqa: E402
 check("and the page knows its weights from the cache's path",
       snapshot.weights(cfg.get("model")), [{"repository": REPO, "revision": SHA}])
+
+# some of it cached: that part adopted, hashed once, the rest downloaded
+pull.cached(REPO, SHA, "mmproj-F16.gguf").unlink()
+HITS.clear()
+hashed, real_sha = [], pull.sha256
+pull.sha256 = lambda path, seen=None: hashed.append(Path(path).name) or real_sha(
+    path, seen)
+config_before = mdl.CONFIG.read_text(encoding="utf-8")
+os.environ["MDL_MODELS"] = str(TMP / "models-adopt")    # nothing there yet
+try:
+    out, err, code = run(pull.main, ["%s:Q8_0" % REPO, "--name", "adopted"])
+    cfg = mdl.load_config()[0].get("adopted", {})
+finally:
+    pull.sha256 = real_sha
+    os.environ["MDL_MODELS"] = str(TMP / "models")
+    mdl.CONFIG.write_text(config_before, encoding="utf-8")
+check("partly cached: only what is missing is downloaded",
+      (code, [h[0] for h in HITS]), (0, ["mmproj-F16.gguf"]))
+check("and the cached part is hashed once, not again once adopted",
+      hashed.count("Tiny-Model-Q8_0.gguf"), 1)
+check("the preset points at the models folder, where both now are",
+      Path(cfg.get("model", "")).parent.name, REPO.replace("/", "--"))
 
 # -- what the page shows of a pull -------------------------------------------------
 st = pull.Status("going", REPO, ["0"], quiet=True, spec="hf:%s:Q8_0" % REPO)

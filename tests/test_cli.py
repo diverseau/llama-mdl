@@ -92,8 +92,15 @@ del os.environ["MDL_LLAMA_SERVER"]
 # ------------------------------------------------------------ config file ---
 mdl.CONFIG = root / "config" / "nope.toml"
 _, err, code = run(mdl.cmd_list, [])
-check("missing config", (err.strip(), code),
-      ("mdl: no config at %s; run 'mdl init' to create one" % mdl.CONFIG, 1))
+check("no config yet: list says how to get a model, and is not a failure",
+      (err.strip(), code), (mdl.NO_MODELS, 0))
+_, err, code = run(mdl.cmd_run, ["demo"])
+check("run with no config: one line saying how to get a model",
+      (err.strip(), code), ("mdl: no model named 'demo': " + mdl.NO_MODELS, 1))
+_, err, code = run(mdl.load_config)
+check("a command that needs the config still says there is none",
+      (err.strip().startswith("mdl: no config at %s yet" % mdl.CONFIG), code),
+      (True, 1))
 bad = root / "config" / "bad.toml"
 bad.write_text("[oops\n", encoding="utf-8")
 mdl.CONFIG = bad
@@ -212,6 +219,24 @@ check("dead server: one line, no traceback", (err.count("\n"), "Traceback" in er
       (1, False))
 check("dead server: state cleaned up", mdl.state_path("demo").exists(),
       False)
+
+
+def compact_run():
+    """What a terminal gets: the load in one line, not the log."""
+    models, binary = mdl.load_config()
+    proc, log, p = mdl.spawn("demo", models, binary)
+    mdl.tail_until_ready(proc, log, "demo", p, verbose=False)
+
+
+out, err, code = run(compact_run)
+check("compact: a failed start shows the problem line and the log's end",
+      (code, "error loading model" in out, "the last " in out,
+       "exited with status 1" in err), (1, True, True, True))
+del os.environ["MDL_FAKE_MODE"]
+out, err, code = run(compact_run)
+check("compact: a start that works prints no log at all",
+      (code, "offloaded" in out, out.strip()), (0, False, ""))
+run(mdl.cmd_stop, ["--all"])
 teardown(root)
 
 # ------------------------------------- listening but never reporting ready ---
@@ -240,22 +265,37 @@ check("XDG_CONFIG_HOME is honoured", fresh.CONFIG,
 check("XDG_STATE_HOME is honoured", fresh.STATE_DIR, home / "st" / "mdl")
 
 _, err, code = run(fresh.cmd_list, [])
-check("missing config points at init", ("run 'mdl init'" in err, code), (True, 1))
+check("missing config points at getting a model",
+      ("mdl pull" in err, code), (True, 0))
 
 out, _, code = run(fresh.cmd_init, [])
 check("init writes a config", (fresh.CONFIG.is_file(), code), (True, 0))
-starter = tomllib.loads(fresh.CONFIG.read_text(encoding="utf-8"))
-check("starter config is valid toml", "example" in starter, True)
-check("starter uses only known keys",
-      set(starter["example"]) <= fresh.KNOWN, True)
-check("starter builds a real command",
-      "-fa" in fresh.build_argv("example", starter["example"], "LS"), True)
+text = fresh.CONFIG.read_text(encoding="utf-8")
+starter = tomllib.loads(text)
+check("starter config is valid toml, with no model in it",
+      [k for k, v in starter.items() if isinstance(v, dict)], [])
+check("and says what to do next", "mdl pull" in out, True)
+# the example is commented out; uncommented, it is a working table
+lines = text.splitlines()
+at = lines.index("# [example]")
+example = tomllib.loads("\n".join(
+    x[2:].split("  #")[0] for x in lines[at:] if x.startswith("# ")
+    and "=" in x or x == "# [example]"))["example"]
+check("its example uses only known keys", set(example) <= fresh.KNOWN, True)
+check("its example builds a real command",
+      "-fa" in fresh.build_argv("example", example, "LS"), True)
+check("its example uses the placeholder check knows",
+      example["model"], fresh.PLACEHOLDER)
 _, err, code = run(fresh.cmd_init, [])
 check("init refuses to clobber", ("already exists" in err, code), (True, 1))
 _, err, code = run(fresh.cmd_init, ["x"])
 check("init takes no arguments", (err.strip(), code), ("mdl: usage: mdl init", 1))
 
 check("version is set", bool(fresh.VERSION), True)
+check("--help names every command, one line each",
+      [c for c in fresh.COMMANDS if "\n  %s " % c not in fresh.HELP], [])
+check("and every line fits 80 columns",
+      [x for x in fresh.HELP.splitlines() if len(x) > 80], [])
 for name in ("XDG_CONFIG_HOME", "XDG_STATE_HOME"):
     del os.environ[name]
 import shutil as _sh  # noqa: E402
@@ -303,6 +343,24 @@ for args, words in (
     check("mdl %s: one line, exit 1" % " ".join(args),
           (p.returncode, len(lines), bool(lines) and lines[0].startswith(
               "mdl: ") and words in lines[0]), (1, 1, True))
+
+# textual comes with every install since 0.13, and is still imported only
+# by the dashboard: a textual that is broken, or slow to import, must cost
+# the everyday commands nothing.
+(home / "c" / "mdl").mkdir(parents=True, exist_ok=True)
+(home / "c" / "mdl" / "models.toml").write_text(
+    '[demo]\nmodel = "/nowhere/demo.gguf"\n', encoding="utf-8")
+PROBE = ("import runpy, sys; sys.argv = ['mdl'] + sys.argv[1:]\n"
+         "try:\n    runpy.run_path(sys.argv.pop(1), run_name='__main__')\n"
+         "except SystemExit:\n    pass\n"
+         "sys.stderr.write('textual=%s' % ('textual' in sys.modules))")
+for args in (["--version"], ["ps"], ["list"], ["check"], ["--help"]):
+    p = subprocess.run([sys.executable, "-c", PROBE,
+                        str(support.ROOT / "mdl.py"), *args],
+                       capture_output=True, env=env, encoding="utf-8",
+                       errors="replace", timeout=60)
+    check("mdl %s does not import textual" % " ".join(args),
+          p.stderr.strip().splitlines()[-1:], ["textual=False"])
 _sh.rmtree(home, ignore_errors=True)
 
 sys.exit(t.done())

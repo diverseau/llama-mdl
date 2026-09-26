@@ -17,11 +17,18 @@ ROOT = Path(__file__).resolve().parents[1]
 # dashboard and doctor would otherwise do. test_update turns it back on
 # against a fake index of its own.
 os.environ["MDL_NO_UPDATE_CHECK"] = "1"
+# nor GitHub for the changelog `mdl update` shows; test_update serves one
+os.environ["MDL_CHANGELOG_URL"] = "file:///nonexistent/%s/CHANGELOG.md"
 FAKE = Path(__file__).resolve().parent / "fake_llama_server.py"
 sys.path.insert(0, str(ROOT))
 
 import mdl  # noqa: E402
-from mdl_fit import gguf  # noqa: E402
+from mdl_fit import gguf, scan  # noqa: E402
+
+# nor the developer's own models: a page with an empty config, or mdl
+# setup, looks for GGUFs in LM Studio and the HF cache; test_setup gives
+# it folders of its own
+scan.places = lambda: []
 
 # no usage recorder outliving a test's temp state dir; test_web turns it on
 os.environ.setdefault("MDL_RECORD", "off")

@@ -13,6 +13,11 @@ from support import mdl, run, sandbox, teardown  # noqa: E402
 
 t = support.Tally("test_doctor")
 check = t.check
+from mdl_fit import hw  # noqa: E402
+
+# the backend check asks nvidia-smi whether this machine has a GPU; this
+# machine's answer is not the test's, so nothing has one unless it says
+hw.nvidia = lambda: []
 root, port = sandbox()
 model = root / "model.gguf"
 model.write_bytes(b"GGUF" + bytes(16))
@@ -140,10 +145,43 @@ try:
     check("bad TOML stops with global failure", (code, report["models"],
                                                 len(err.splitlines())), (1, {}, 1))
     mdl.CONFIG.unlink()
-    report, _, code = diagnose()
-    check("missing config fails", (code, has(report, "fail", "no config", None)),
-          (1, True))
+    fake = str(next(root.glob("fake-llama-server*")))
+    with patch.dict(os.environ, {"MDL_LLAMA_SERVER": fake}):
+        report, _, code = diagnose()
+    check("no config yet: a warning saying what writes one, not a failure",
+          (code, has(report, "warn", "the first `mdl pull` or `mdl add` "
+                     "writes one", None)), (0, True))
+    check("and the environment is still checked",
+          any(f["check"] == "backend" for f in report["global"]), True)
+    with patch.dict(os.environ, {"MDL_LLAMA_SERVER": "no-such-llama-server"}):
+        report, _, code = diagnose()
+    check("no models and no llama-server: that is the failure, with how to "
+          "install it", (code, has(report, "fail", "install llama.cpp (%s)"
+                                   % mdl.llama_hint(), None)), (1, True))
     check("doctor registered", mdl.COMMANDS.get("doctor"), mdl.cmd_doctor)
+    # the backend: what llama.cpp lists, and a GPU it cannot see
+    mdl.CONFIG.write_bytes(original)
+    report, _, _ = diagnose()
+    check("a build that lists no GPU, on a machine without one: CPU, ok",
+          has(report, "ok", "runs on the CPU", None), True)
+    with patch.object(hw, "nvidia", return_value=[{"name": "RTX 3060"}]):
+        report, _, code = diagnose()
+    check("the same build beside a GPU: a warning, with how to get one",
+          (code, has(report, "warn", "has RTX 3060: install a GPU build ("
+                     + mdl.llama_hint(), None)), (0, True))
+    with patch.object(hw, "llama_devices", return_value=[
+            ("Vulkan", 0, "NVIDIA GeForce RTX 3060", 12 << 30, 11 << 30)]):
+        report, _, _ = diagnose()
+    check("a GPU build says what it runs on",
+          has(report, "ok", "runs on Vulkan0 NVIDIA GeForce RTX 3060 (12 G)",
+              None), True)
+    no_path = dict(os.environ, PATH="")
+    with patch.dict(os.environ, no_path):
+        check("llama-server missing from PATH: says how to install it",
+              ("install llama.cpp (%s)" % mdl.llama_hint())
+              in mdl.missing_binary("llama-server"), True)
+    check("a path written down is the user's to fix, as before",
+          mdl.missing_binary("/no/such"), "llama-server not found: /no/such")
     # review fixes: a negative value is not a flag, and a pid recycled
     # onto another process is a stale state, not a live server
     root2, port2 = sandbox()

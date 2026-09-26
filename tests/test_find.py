@@ -4,6 +4,7 @@ penalty, and the ranking, over a catalog and headers made up here."""
 import io
 import json
 import os
+import sqlite3
 import sys
 import tempfile
 from pathlib import Path
@@ -202,7 +203,7 @@ def fake_fetch(c, cache_only=False):
                   arch="alienarch" if c.repo == "odd/Alien" else "llama")
 
 
-find.fetch = fake_fetch
+hub_fetch, find.fetch = find.fetch, fake_fetch
 lib = TMP / "bin"
 lib.mkdir()
 (lib / "llama.dll").write_bytes(b"\x00llama\x00qwen3\x00")
@@ -424,6 +425,30 @@ def why_run(*args, models=None):
     return out.getvalue()
 
 
+table = why_run()
+check("the table ends with how to get #1 running",
+      "get #1   mdl pull " in table and " --run\n" in table, True)
+got = []
+with patch.object(find, "get", lambda c, run: got.append((c.label, run))):
+    picked = why_run("--run", "1")
+check("--run N gets that row, and prints which it is",
+      (got, picked.startswith("#1  ")), ([(got[0][0], True)] if got else
+                                         [("?", True)], True))
+try:
+    why_run("--pull", "99")
+    message = ""
+except mdl.MdlError as e:
+    message = str(e)
+check("a row the table does not have is one line saying so",
+      message.startswith("the table has "), True)
+for bad in (["--run", "0"], ["--run", "x"], ["--run", "1", "--pull", "2"]):
+    try:
+        find.parse(bad)
+        message = ""
+    except mdl.MdlError as e:
+        message = str(e)
+    check("find %s is refused in words" % " ".join(bad), bool(message), True)
+
 ranked_text = why_run("--why", "Fam/Base-Instruct")
 check("--why shows rank, every quant, evidence and penalties",
       [s in ranked_text for s in ("main table · rank #1", "Q8_0", "Q4_K_M",
@@ -571,5 +596,109 @@ find.show_why({"node": "local:abc", "lineage": "FT", "status": "not shown",
                            "flags": []}}, shown.append)
 check("a local model is named by its preset, not only its hash",
       shown[0].startswith("mine (local:abc)"), True)
+
+# -- headers the catalog carries -------------------------------------------------
+from mdl_fit import remote                                    # noqa: E402
+
+hq_rows = [{"node": "n", "repo": repo, "quant": q, "file": "%s-%s.gguf" % (repo, q),
+            "size": size, "downloads": dl, "shards": "[]"}
+           for repo, dl in (("a/GGUF", 10), ("b/GGUF", 90))
+           for q, size in (("F16", 60_000_000), ("Q8_0", 32_000_000),
+                           ("Q4_K_M", 18_000_000))]
+check("the header stored is find's first: the most downloaded repo's "
+      "biggest quant under the 8.6 bpw cap",
+      [find.header_quant(hq_rows, 30_000_000)[k] for k in ("repo", "quant")],
+      ["b/GGUF", "Q8_0"])
+check("none for a model with no sized quant",
+      find.header_quant([dict(hq_rows[0], size=None)], 30_000_000), None)
+
+store = TMP / "store.sqlite"
+sdb = catalog.connect(store, fresh=True)
+for nid, params in (("s/One", 30_000_000), ("s/Two", 30_000_000)):
+    sdb.execute("INSERT INTO nodes (id, params) VALUES (?, ?)", (nid, params))
+    for q, size in (("Q8_0", 32_000_000), ("Q4_K_M", 18_000_000)):
+        f = "%s-%s.gguf" % (nid[2:], q)
+        sdb.execute("INSERT INTO ggufs VALUES (?,?,?,?,?,?,?,?)", (
+            nid + "-GGUF", nid, q, f, size,
+            json.dumps([{"path": f, "size": size, "oid": "o" + f}]), 5, "m"))
+sdb.execute("INSERT INTO headers VALUES ('gone__x__y', x'00')")
+sdb.commit()
+sdb.close()
+read = []
+
+
+def fake_inventory(repo, key, shards, revision="main", cache=True):
+    read.append((repo, key, cache))
+    return inv_of("hf:%s/%s" % (repo, key))
+
+
+with patch.object(remote, "inventory", fake_inventory):
+    got = catalog.fill_headers(store, minutes=0, workers=2)
+check("fill_headers: no budget, no fetch; what is left is said",
+      (got, read), ((0, 0, 2), []))
+with patch.object(remote, "inventory", fake_inventory):
+    got = catalog.fill_headers(store, minutes=1, workers=2)
+check("fill_headers: one header a model, its first quant, read afresh",
+      (got, sorted(read)),
+      ((2, 2, 0), [("s/One-GGUF", "One-Q8_0.gguf", False),
+                   ("s/Two-GGUF", "Two-Q8_0.gguf", False)]))
+read.clear()
+with patch.object(remote, "inventory", fake_inventory):
+    got = catalog.fill_headers(store, minutes=1, workers=2)
+check("fill_headers: the next run reads only what is new", (got, read),
+      ((2, 0, 0), []))
+scat = catalog.Catalog(store)
+check("a header no quant names any more is dropped",
+      scat.header("gone__x__y"), None)
+check("and the count is in the snapshot's meta", scat.meta().get("headers"), 2)
+
+one_q8 = json.loads(scat.db.execute(
+    "SELECT shards FROM ggufs WHERE file = 'One-Q8_0.gguf'").fetchone()[0])
+one_q4 = json.loads(scat.db.execute(
+    "SELECT shards FROM ggufs WHERE file = 'One-Q4_K_M.gguf'").fetchone()[0])
+remote.STORE = scat.header
+
+
+def no_hub(*a, **k):
+    raise remote.RemoteError("the Hub was asked")
+
+
+try:
+    with patch.object(remote, "fetch_header", no_hub), \
+            patch.object(hw, "cache_dir", lambda: TMP / "store-cache"):
+        inv = remote.inventory("s/One-GGUF", "One-Q8_0.gguf", one_q8)
+        check("a stored header is used as it is, without the Hub",
+              (inv.source, inv.n_layer), ("hf:s/One-GGUF/One-Q8_0.gguf", 8))
+        check("and kept in the local cache like a fetched one",
+              remote._cache_path("s/One-GGUF", "One-Q8_0.gguf",
+                                 one_q8).is_file(), True)
+        changed = [dict(one_q8[0], oid="new-upload")]
+        check("a new upload of the file is not the stored header",
+              remote.stored("s/One-GGUF", "One-Q8_0.gguf", changed), None)
+        find.fetch = hub_fetch
+        # this machine keeps only the Q4: sized from the stored Q8's header
+        small = find.Cand("s/One", "s/One", "Q4_K_M", 18_000_000,
+                          "s/One-GGUF", "One-Q4_K_M.gguf", one_q4)
+        small.base = ("s/One-GGUF", "One-Q8_0.gguf", one_q8)
+        fq = quality.Model(scat)
+        find.fit_all([small], fq, mach, opts, "agent", binary, False, [])
+        check("a quant too small to be stored is sized from the one that is",
+              (small.inv is not None, small.exact, small.reject),
+              (True, False, None))
+        check("--no-fetch counts a stored header as there",
+              hub_fetch(find.Cand("s/One", "s/One", "Q8_0", 32_000_000,
+                                   "s/One-GGUF", "One-Q8_0.gguf", one_q8),
+                         cache_only=True) is not None, True)
+finally:
+    remote.STORE = None
+    find.fetch = fake_fetch
+    scat.db.close()
+old_cat = TMP / "old.sqlite"
+odb = sqlite3.connect(str(old_cat))
+odb.execute("CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT)")
+odb.commit()
+odb.close()
+check("a snapshot from before stored headers has none, and says so quietly",
+      catalog.Catalog(old_cat).header("k"), None)
 
 sys.exit(t.done())

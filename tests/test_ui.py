@@ -780,6 +780,25 @@ async def main():
             os.environ.pop("MDL_FIT_HOME", None)
         else:
             os.environ["MDL_FIT_HOME"] = old_home
+
+    # --- no models, but GGUFs on disk: the status line says what adds them ---
+    from mdl_fit import scan
+    root, port = sandbox()
+    mdl.CONFIG.write_text("", encoding="utf-8")
+    disk = Path(tempfile.mkdtemp(prefix="mdl-found-"))
+    support.llama(disk / "Found-Q4_K_M.gguf")
+    real_places, real_min = scan.places, scan.MIN_BYTES
+    scan.places, scan.MIN_BYTES = (lambda: [("LM Studio", disk)]), 1000
+    try:
+        app = MdlApp(fx="off")
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            check("no models, a GGUF on disk: the status line says mdl setup",
+                  ("1 GGUF on this machine" in app.status_line,
+                   "mdl setup" in app.status_line), (True, True))
+    finally:
+        scan.places, scan.MIN_BYTES = real_places, real_min
+        teardown(root)
     return t.done()
 
 

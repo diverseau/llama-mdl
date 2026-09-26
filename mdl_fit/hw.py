@@ -226,12 +226,17 @@ def llama_build(binary):
 
 
 _LIBS = {}
+_ARCHES = {}
 
 
 def arch_supported(binary, arch):
     """True if this llama.cpp build names `arch`, False if it does not,
     None when its library cannot be read. Every architecture llama.cpp
-    loads is a C string in libllama; one it has never heard of is not."""
+    loads is a C string in libllama; one it has never heard of is not.
+    Asked once per model in the catalog, so the answer is kept: a PATH
+    search and a scan of the library each time cost `find` seconds."""
+    if (binary, arch) in _ARCHES:
+        return _ARCHES[binary, arch]
     exe = Path(shutil.which(binary) or binary)
     if exe not in _LIBS:
         blob = b""
@@ -246,9 +251,9 @@ def arch_supported(binary, arch):
                 pass
         _LIBS[exe] = blob
     blob = _LIBS[exe]
-    if not blob or not arch:
-        return None
-    return arch.encode() + b"\x00" in blob
+    got = None if not blob or not arch else arch.encode() + b"\x00" in blob
+    _ARCHES[binary, arch] = got
+    return got
 
 
 def sibling(binary, name):

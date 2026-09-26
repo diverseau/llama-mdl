@@ -24,13 +24,16 @@ import os
 import re
 import sqlite3
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import zlib
 from pathlib import Path
 
-from . import hw, remote
+from . import gguf, hw, remote
+from . import progress as bars
 
 SCHEMA_VERSION = 1
 FILE = "catalog.sqlite"
@@ -68,6 +71,7 @@ CREATE TABLE IF NOT EXISTS ggufs(
 CREATE TABLE IF NOT EXISTS evals(
   node TEXT, benchmark TEXT, task TEXT, value REAL, verified INTEGER,
   source TEXT, date TEXT);
+CREATE TABLE IF NOT EXISTS headers(key TEXT PRIMARY KEY, inv BLOB);
 CREATE INDEX IF NOT EXISTS nodes_parent ON nodes(parent);
 CREATE INDEX IF NOT EXISTS ggufs_node ON ggufs(node);
 CREATE INDEX IF NOT EXISTS evals_node ON evals(node);
@@ -540,10 +544,118 @@ def build(path, bases=(), prev=None, log=None, **kw):
     return meta
 
 
+# ------------------------------------------------------------- headers --
+
+def fill_headers(path, minutes=10, workers=12, log=None):
+    """Store, in the catalog at `path`, the header of the quant `find`
+    reads first for each model: zlib'd Inventory JSON under remote's cache
+    key. A header is most of what a first `find` waits for - megabytes of
+    vocabulary each, for a few kilobytes of what it needs - so a snapshot
+    that carries them saves every user the fetch. Most downloaded first;
+    at `minutes` it stops, and the next run carries on. Headers no row
+    names any more are dropped. Returns (stored, new, left)."""
+    import concurrent.futures
+
+    from . import find
+    db = connect(path)
+    say = log or (lambda s: None)
+    try:
+        params = dict(db.execute("SELECT id, params FROM nodes"))
+        by_node, live = {}, set()
+        for r in db.execute("SELECT * FROM ggufs"):
+            shards = json.loads(r["shards"] or "[]")
+            live.add(remote.cache_key(r["repo"], r["file"], shards))
+            if r["size"] and not remote.auxiliary(r["file"]):
+                by_node.setdefault(r["node"], []).append(r)
+        with db:
+            db.executemany("DELETE FROM headers WHERE key = ?", [
+                (k,) for (k,) in db.execute("SELECT key FROM headers")
+                if k not in live])
+        have = {k for (k,) in db.execute("SELECT key FROM headers")}
+        todo = []
+        for nid, rows in by_node.items():
+            r = find.header_quant(rows, params.get(nid))
+            shards = json.loads(r["shards"] or "[]") if r else []
+            if not shards or not all(s.get("oid") for s in shards):
+                continue
+            key = remote.cache_key(r["repo"], r["file"], shards)
+            if key not in have:
+                todo.append((-(r["downloads"] or 0), key, r["repo"],
+                             r["file"], shards))
+        todo.sort(key=lambda t: t[:2])
+        deadline = time.monotonic() + minutes * 60
+        new = 0
+
+        def one(t):
+            return t[1], remote.inventory(t[2], t[3], t[4], cache=False)
+
+        # a fetch starts only while there is budget left, so a run ends
+        # at most one header's time past it, not a batch's
+        waiting, running, done = iter(todo), set(), 0
+        with concurrent.futures.ThreadPoolExecutor(workers) as pool:
+            while True:
+                while len(running) < workers and time.monotonic() < deadline:
+                    t = next(waiting, None)
+                    if t is None:
+                        break
+                    running.add(pool.submit(one, t))
+                if not running:
+                    break
+                finished, running = concurrent.futures.wait(
+                    running, return_when=concurrent.futures.FIRST_COMPLETED)
+                for job in finished:
+                    done += 1
+                    try:
+                        key, inv = job.result()
+                    except (remote.RemoteError, gguf.NotGGUF,
+                            gguf.Truncated, ValueError, OSError) as e:
+                        say("skip: %s" % " ".join(str(e).splitlines()))
+                        continue
+                    with db:
+                        db.execute("INSERT OR REPLACE INTO headers VALUES "
+                                   "(?, ?)", (key, zlib.compress(
+                                       inv.to_json().encode(), 9)))
+                    new += 1
+                    if new % 50 == 0:
+                        say("%d of %d headers" % (done, len(todo)))
+        stored = db.execute("SELECT COUNT(*) FROM headers").fetchone()[0]
+        with db:
+            db.execute("INSERT OR REPLACE INTO meta VALUES ('headers', ?)",
+                       (json.dumps(stored),))
+        return stored, new, len(todo) - new
+    finally:
+        db.close()
+
+
 # ---------------------------------------------------------------- pull --
 
-def pull(path=None, repo=None):
-    """Fetch the published snapshot if it changed. 'fresh', 'unchanged'."""
+REFRESH_S = 7 * 24 * 3600   # how stale a pulled snapshot find tolerates
+
+
+def ensure(say=None, max_age=REFRESH_S, bar=False):
+    """The pulled snapshot, for find: fetched when there is none, and asked
+    for again when the last check is over a week old (a 304 when nothing
+    changed, so that costs a request). Returns 'fresh', 'unchanged' or
+    None when nothing was asked; raises CatalogError."""
+    path = default_path()
+    try:
+        age = time.time() - path.stat().st_mtime
+    except OSError:
+        age = None
+    if age is not None and age < max_age:
+        return None
+    if say:
+        say("fetching the model catalog, once" if age is None else
+            "the model catalog is over a week old; checking for a newer one")
+    state = pull(path, shown=bar)
+    if state == "unchanged":
+        os.utime(path)          # checked now: the next week asks nothing
+    return state
+
+
+def pull(path=None, repo=None, shown=False):
+    """Fetch the published snapshot if it changed. 'fresh', 'unchanged'.
+    `shown` puts a bar on stderr while it comes down."""
     path = Path(path or default_path())
     repo = repo or repo_name()
     etag_file = path.with_suffix(".etag")
@@ -556,12 +668,21 @@ def pull(path=None, repo=None):
     try:
         with urllib.request.urlopen(req, timeout=120) as r:
             path.parent.mkdir(parents=True, exist_ok=True)
+            size = int(r.headers.get("Content-Length") or 0)
+            bar = (bars.Bar("model catalog", size) if shown and size
+                   else None)
+            got = 0
             with open(tmp, "wb") as f:
                 while True:
                     chunk = r.read(1 << 20)
                     if not chunk:
                         break
                     f.write(chunk)
+                    got += len(chunk)
+                    if bar:
+                        bar.update(got)
+            if bar:
+                bar.finish()
             etag = r.headers.get("X-Linked-Etag") or r.headers.get("ETag")
         con = sqlite3.connect(str(tmp))
         try:
@@ -604,8 +725,21 @@ class Catalog:
             raise CatalogError("no catalog at %s; run: mdl catalog pull "
                                "(or mdl catalog build)" % path)
         self.path = path
-        self.db = sqlite3.connect(str(path))
+        # header() is asked from find's fetch threads, one at a time
+        self.db = sqlite3.connect(str(path), check_same_thread=False)
         self.db.row_factory = sqlite3.Row
+        self.lock = threading.Lock()
+
+    def header(self, key):
+        """A header the crawl stored, as Inventory JSON, by remote's
+        cache key; None if it has none (or predates stored headers)."""
+        try:
+            with self.lock:
+                row = self.db.execute("SELECT inv FROM headers WHERE key = ?",
+                                      (key,)).fetchone()
+            return zlib.decompress(row[0]).decode("utf-8") if row else None
+        except (sqlite3.Error, zlib.error, UnicodeDecodeError):
+            return None
 
     def meta(self):
         return {r["key"]: json.loads(r["value"])
@@ -678,6 +812,8 @@ usage: mdl catalog pull                 fetch the published snapshot
        mdl catalog tree <org/repo>      cataloged relationships and GGUF quants
        mdl catalog search <text>        find a model by name
        mdl catalog stats
+       mdl catalog headers [--in PATH] [--budget-minutes N]
+                                        store the headers find reads first
 
 build options:
   --popular N        GGUF repos by downloads (default 3000)
@@ -753,15 +889,18 @@ def main(args, out=None):
     cmd, rest = args[0], args[1:]
     try:
         if cmd == "pull":
-            state = pull()
-            w("catalog  %s (%s)\n" % (state, default_path()))
+            state = pull(shown=True)
             cat = Catalog()
             try:
-                detail = progress(cat.meta())
+                meta = cat.meta()
             finally:
                 cat.db.close()
-            if detail:
-                w("crawl    %s\n" % detail)
+            w("catalog  %s · %s models (%s)\n" % (
+                str(meta.get("built_at", "?"))[:10],
+                "{:,}".format(meta.get("nodes", 0)),
+                "new" if state == "fresh" else "already the newest"))
+            if meta.get("complete") is False:
+                w("crawl    %s\n" % progress(meta))
             return state
         if cmd == "build":
             o, _ = _opts(rest, {"--org", "--base", "--per-org", "--max-nodes",
@@ -801,6 +940,16 @@ def main(args, out=None):
             if progress(meta):
                 w("crawl    %s\n" % progress(meta))
             return meta
+        if cmd == "headers":
+            o, _ = _opts(rest, {"--in", "--budget-minutes"})
+            path = Path(o["in"][-1]) if "in" in o else default_path()
+            if not path.is_file():
+                die("no catalog at %s" % path)
+            stored, new, left = fill_headers(
+                path, minutes=float(o.get("budget-minutes", [10])[-1]),
+                log=lambda s: (w("  %s\n" % s), out.flush()))
+            w("headers  %d stored, %d new, %d to go\n" % (stored, new, left))
+            return stored
         cat = Catalog()
         if cmd == "stats":
             m = cat.meta()

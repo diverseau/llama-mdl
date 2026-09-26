@@ -144,20 +144,25 @@ teardown(root)
 root, port = sandbox()
 mdl.CONFIG.unlink()
 run(mdl.cmd_init, [])
-# init fills llama_server from PATH, so on a machine without llama-server
-# it leaves a placeholder there too - a real problem, and not the one
-# under test. Point it at something that certainly exists.
+# init fills llama_server from PATH, and leaves it commented out on a
+# machine without llama-server - which check then reports, a real problem
+# and not the one under test. Point it at something that certainly exists.
 mdl.CONFIG.write_text(
-    re.sub(r'^llama_server = .*$',
+    re.sub(r'^(# )?llama_server = .*$',
            'llama_server = "%s"' % sys.executable.replace(chr(92), '/'),
            mdl.CONFIG.read_text(encoding='utf-8'), count=1, flags=re.M),
     encoding='utf-8')
 out, err, code = run(mdl.cmd_check, [])
-check("a freshly initialised config passes check", (code, err), (0, ""))
-check("the placeholder is called out as a to-do",
-      "not filled in yet" in out, True)
-check("the starter really does use the placeholder path",
+check("a freshly initialised config passes check, saying there is nothing "
+      "in it yet", (code, err.strip()), (0, mdl.NO_MODELS))
+check("the starter's example really does use the placeholder path",
       mdl.PLACEHOLDER in mdl.STARTER, True)
+# a pre-0.13 config still has init's live [example]: a to-do, not a fault
+with open(mdl.CONFIG, "a", encoding="utf-8") as fh:
+    fh.write('\n[example]\nmodel = "%s"\n' % mdl.PLACEHOLDER)
+out, err, code = run(mdl.cmd_check, [])
+check("the placeholder is called out as a to-do",
+      (code, "not filled in yet" in out), (0, True))
 teardown(root)
 
 # ---- vision -------------------------------------------------------------

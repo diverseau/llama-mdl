@@ -13,7 +13,8 @@ Not part of tests/run.py: it builds wheels and creates environments, which
 takes a minute, and uv and pipx may not be installed. Run it on Windows and
 on Linux before a release that touches mdl_update.py. Nothing outside a
 temp directory is written. mdl and the installers see only a local index;
-building the two wheels lets pip fetch setuptools, unless it is cached.
+building the two wheels lets pip fetch setuptools, unless it is cached,
+and textual and its dependencies are downloaded once for the index.
 
 On Linux, with Docker:
 
@@ -55,8 +56,9 @@ def wheel(tmp, version, out):
     src.mkdir()
     for f in FILES:
         shutil.copy2(ROOT / f, src / f)
-    shutil.copytree(ROOT / "mdl_fit", src / "mdl_fit",
-                    ignore=shutil.ignore_patterns("__pycache__"))
+    for package in ("mdl_fit", "mdl_web"):
+        shutil.copytree(ROOT / package, src / package,
+                        ignore=shutil.ignore_patterns("__pycache__"))
     text = (src / "mdl.py").read_text(encoding="utf-8")
     (src / "mdl.py").write_text(text.replace('VERSION = "%s"' % OLD,
                                              'VERSION = "%s"' % version),
@@ -110,6 +112,11 @@ def main():
         built = tmp / "built"
         built.mkdir()
         old_whl, new_whl = wheel(tmp, OLD, built), wheel(tmp, NEW, built)
+        # textual and what it needs, fetched once: the installers below see
+        # only a local directory, and mdl depends on textual since 0.13
+        deps = tmp / "deps"
+        sh([sys.executable, "-m", "pip", "download", "-q", "-d", deps,
+            "textual>=3,<9"])
         server = index(None)
         base = dict(os.environ,
                     MDL_PYPI_URL="http://127.0.0.1:%d/" % server.server_address[1],
@@ -125,7 +132,7 @@ def main():
             """A find-links directory holding only the old wheel until the
             install is done - an install that saw 99.0.0 would take it."""
             d = tmp / ("links-" + name)
-            d.mkdir()
+            shutil.copytree(deps, d)
             shutil.copy2(old_whl, d)
             return d
 

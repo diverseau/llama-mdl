@@ -368,6 +368,16 @@ class Memory:
         return (self.gpu_weights + self.gpu_kv + self.gpu_rs
                 + self.gpu_compute + self.gpu_mmproj)
 
+    def on_host(self):
+        """The same, on a machine with no card: what llama.cpp would have
+        put on one - even at -ngl 0 a GPU build keeps a compute buffer
+        there - is in RAM instead."""
+        for part in ("weights", "kv", "rs", "compute", "mmproj"):
+            setattr(self, "host_" + part, getattr(self, "host_" + part)
+                    + getattr(self, "gpu_" + part))
+            setattr(self, "gpu_" + part, 0)
+        return self
+
     @property
     def host(self):
         return (self.host_weights + self.host_kv + self.host_rs

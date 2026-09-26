@@ -32,7 +32,7 @@ def _base(env, *fallback):
 CONFIG_DIR = _base("XDG_CONFIG_HOME", ".config") / "mdl"
 CONFIG = CONFIG_DIR / "models.toml"
 STATE_DIR = _base("XDG_STATE_HOME", ".local", "state") / "mdl"
-VERSION = "0.12.0"
+VERSION = "0.13.0"
 DEFAULT_BIN = "llama-server"
 CONFIG_DATA = {}          # last parsed config, for UI-only settings
 DEFAULT_PORT = 8080
@@ -60,29 +60,87 @@ USAGE = ("usage: mdl {init|config [--path|--undo|--history]|"
          "catalog {pull|build|tree|search|stats}|update [--check]} "
          "[--version]")
 
-# The model path mdl init leaves behind. check knows to treat it as a
-# to-do rather than a fault; tests keep the two in step.
+# `mdl --help`: every command, grouped by what you are doing, one line
+# each. USAGE above is the terse form, kept for scripts and tests that
+# grep it.
+HELP = """\
+mdl - run local llama.cpp servers, and work out which model to run and how
+
+new here? `mdl setup` checks llama.cpp and adds the GGUFs you already
+have; `mdl find --run 1` fetches the best model this machine can run and
+starts it.
+
+get a model
+  setup [--yes]          check llama.cpp, add the GGUFs already here
+  find [--run N]         the best models this machine can run, ranked
+  pull org/repo[:quant]  download a GGUF, check it, add a preset fitted here
+  add file.gguf          add a GGUF you already have
+  catalog ...            the Hub's models, fine-tunes and quants, offline
+
+run it
+  run NAME [-v]          start NAME and wait until it answers
+  stop [NAME|--all]      stop a server
+  ps [--json]            what is running
+  logs [-f] [NAME]       a server's log
+  ui                     the web dashboard, in a window
+  tui                    the terminal dashboard (bare `mdl` too)
+
+tune and measure
+  fit FILE|NAME|hf:repo  what a model will do here, and with which flags
+  eval NAME              score a model on a private, auto-graded suite
+  lab ...                the same prompt through variants of a config
+  manifest NAME          exactly what NAME runs as, for a bug report
+
+look after it
+  list                   the models in your config
+  config [--path]        open models.toml in your editor
+  check                  validate every model without starting any
+  doctor [NAME]          diagnose the setup: llama-server, GPU, presets
+  init                   write a starter config (the first pull does too)
+  update [--check]       upgrade mdl, the way it was installed
+  snapshot               what the web UI shows, as JSON
+
+`mdl COMMAND --help` for more on fit, eval, find, pull, lab and catalog.
+The README has the rest: https://github.com/diverseau/llama-mdl
+"""
+
+# The model path the starter config's example uses, and mdl init wrote
+# as a live table before 0.13. check treats it as a to-do rather than a
+# fault; tests keep the two in step.
 PLACEHOLDER = "/path/to/your-model.gguf"
 
+# Written by mdl init, and by the first command that adds a model when
+# there is no config yet. The example is commented out: a live table
+# pointing nowhere took port 8080 from the first real model, and check
+# and doctor warned about it until someone deleted it.
 STARTER = '''# mdl config. One table per model; the table name is what you
-# pass to `mdl run`. Use forward slashes in paths on Windows - TOML
-# treats a backslash as an escape character.
+# pass to `mdl run`. `mdl pull org/repo` and `mdl add file.gguf` add
+# tables for you, and `mdl config` opens this file in your editor.
+# Use forward slashes in paths on Windows - TOML treats a backslash as
+# an escape character.
 
 # Where llama-server lives. $MDL_LLAMA_SERVER overrides this.
-llama_server = "%s"
+%s
 
-# Rename this, point it at a .gguf, and run: mdl run example
-[example]
-model = "/path/to/your-model.gguf"
-ngl = 99          # layers on the GPU; 99 means all of them
-ctx = 8192        # context window
-flash_attn = true
-kv_type = "q8_0"  # quantised KV cache, needs flash_attn
-parallel = 1
+# A model by hand: uncomment this, point it at a .gguf, and run:
+# mdl run example
+#
+# [example]
+# model = "/path/to/your-model.gguf"
+# ngl = 99          # layers on the GPU; 99 means all of them
+# ctx = 8192        # context window
+# flash_attn = true
+# kv_type = "q8_0"  # quantised KV cache, needs flash_attn
+# parallel = 1
 # mmproj = "/path/to/mmproj-F16.gguf"   # for a vision model
-port = 8080
-args = ["--metrics"]   # extra flags, passed through as-is
+# port = 8080
+# args = ["--metrics"]   # extra flags, passed through as-is
 '''
+
+# What to do with no models yet, for everything that finds none.
+NO_MODELS = ("no models yet: `mdl setup` adds the GGUFs already on this "
+             "machine, `mdl find` shows what fits it, `mdl pull org/repo` "
+             "fetches one")
 
 
 class MdlError(Exception):
@@ -93,11 +151,16 @@ def die(msg):
     raise MdlError(msg)
 
 
-def load_config():
+def load_config(missing_ok=False):
+    """(models, llama-server). No config is an error only for a command
+    that needs a model from it; missing_ok reads it as empty, for the ones
+    that list, check or add."""
     try:
         data = tomllib.loads(CONFIG.read_text())
     except FileNotFoundError:
-        die(f"no config at {CONFIG}; run 'mdl init' to create one")
+        if not missing_ok:
+            die(f"no config at {CONFIG} yet; {NO_MODELS}")
+        data = {}
     except (OSError, tomllib.TOMLDecodeError) as e:
         die(f"cannot read {CONFIG}: {e}")
     global CONFIG_DATA
@@ -113,6 +176,36 @@ def load_config():
 # ., starting with a letter or digit. A dot needs quoting in TOML, which
 # toml_key does; a slash or a space is never allowed.
 NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+
+
+def short(path):
+    """A path for people to read: the home directory as ~."""
+    text, home = str(path), str(Path.home())
+    if text == home or text.startswith(home + os.sep):
+        return "~" + text[len(home):]
+    return text
+
+
+def starter():
+    """The starter config's text: llama_server set to the one on PATH, or
+    left commented out so a llama.cpp installed later is found there."""
+    found = shutil.which(DEFAULT_BIN)
+    line = ('llama_server = "%s"' % found.replace(chr(92), "/") if found
+            else '# llama_server = "/path/to/llama-server"')
+    return STARTER % line
+
+
+def ensure_config():
+    """Create the config if there is none, for a command about to add a
+    model to it. Returns whether it made one."""
+    if CONFIG.exists():
+        return False
+    try:
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        write_atomic(CONFIG, starter())
+    except OSError as e:
+        die(f"cannot write {CONFIG}: {e}")
+    return True
 
 
 def check_name(name):
@@ -661,37 +754,105 @@ def uptime(seconds):
     return f"{s}s"
 
 
-def _drain(fh, pending):
-    """Echo whole lines from the log, returning the partial remainder."""
+def _drain(fh, pending, lines):
+    """Whole lines from the log onto `lines`, returning the partial
+    remainder."""
     pending += fh.read()
     while chr(10) in pending:
         line, pending = pending.split(chr(10), 1)
-        print(line, flush=True)
+        lines.append(line)
     return pending
 
 
-def tail_until_ready(proc, log, name, port):
-    """Echo the log until /health answers. Fatal if it dies or times out."""
+# What a person watching a load wants from llama.cpp's log, which runs to
+# hundreds of lines: how far the layers are, and anything that went wrong.
+LAYERS = re.compile(r"offloaded (\d+)/(\d+) layers")
+PROBLEM = re.compile(r"\b(error|failed|cannot|unsupported|missing tensor)\b",
+                     re.I)
+TAIL_ON_FAILURE = 30     # log lines shown when a start fails
+
+
+class _Echo:
+    """Where tail_until_ready puts the log: all of it (a pipe, or -v), or
+    one line redrawn on the terminal, with the lines that report a
+    problem printed above it and the last few kept for a failure."""
+
+    def __init__(self, name, verbose):
+        self.name, self.verbose = name, verbose
+        self.started = time.monotonic()
+        self.layers = None
+        self.last = []
+        self.line = None
+        if not verbose:
+            from mdl_fit import progress
+            self.line, self.words = progress.Line(), progress.time_words
+
+    def lines(self, lines):
+        for text in lines:
+            self.last = (self.last + [text])[-TAIL_ON_FAILURE:]
+            m = LAYERS.search(text)
+            if m:
+                self.layers = "%s/%s layers on the GPU" % m.groups()
+            if self.verbose:
+                print(text, flush=True)
+            elif PROBLEM.search(text):
+                with self.line.lock:
+                    self.line.clear()
+                    print(text, flush=True)
+        if self.line and self.line.tty:
+            self.line.draw("loading %s · %s · %s" % (
+                self.name, self.layers or "reading the model",
+                self.words(time.monotonic() - self.started)))
+
+    def failed(self, log):
+        """The end of the log, for a start that did not come up."""
+        if self.line:
+            self.line.clear()
+            if self.last:
+                print("the last %d lines of %s:" % (len(self.last),
+                                                   short(log)))
+                print(chr(10).join("  " + x for x in self.last), flush=True)
+
+    def done(self):
+        if self.line:
+            self.line.clear()
+
+
+def tail_until_ready(proc, log, name, port, verbose=None):
+    """Follow the log until /health answers. Fatal if it dies or times out.
+
+    A terminal gets one line saying how the load is going, and the log's
+    last lines if it fails; a pipe, or verbose, gets every line, as it
+    always did - a script reading `mdl run` sees what it saw before.
+    """
+    if verbose is None:
+        verbose = not sys.stdout.isatty()
+    echo = _Echo(name, verbose)
     limit = ready_timeout()
     deadline = time.monotonic() + limit
     with open(log, "r", errors="replace") as fh:
         pending = ""
         while True:
-            pending = _drain(fh, pending)
+            got = []
+            pending = _drain(fh, pending, got)
+            echo.lines(got)
             if server_ready(port):
                 time.sleep(0.2)          # let the last writes land, then show them
-                pending = _drain(fh, pending)
-                if pending:
-                    print(pending, flush=True)
+                got = []
+                pending = _drain(fh, pending, got)
+                echo.lines(got + ([pending] if pending else []))
+                echo.done()
                 return
             if proc.poll() is not None:
-                pending = _drain(fh, pending)
-                if pending:
-                    print(pending, flush=True)
+                got = []
+                pending = _drain(fh, pending, got)
+                echo.lines(got + ([pending] if pending else []))
+                echo.failed(log)
                 state_path(name).unlink(missing_ok=True)
                 die(f"{name} exited with status {proc.returncode} "
                     f"during startup; see {log}")
             if time.monotonic() > deadline:
+                echo.failed(log)
                 die(f"{name} not ready after {limit:g}s; it may still be "
                     f"loading - see {log}, or run 'mdl stop {name}'")
             time.sleep(0.2)
@@ -892,6 +1053,27 @@ class port_lock(file_lock):
                          f"try again in a moment")
 
 
+def llama_hint():
+    """How to get llama.cpp here: the one command that installs it, or
+    where its builds are. A package manager's build, not one of ours:
+    choosing a GPU backend and keeping it updated is that tool's job."""
+    if sys.platform == "win32":
+        return "winget install ggml.llamacpp"
+    if sys.platform == "darwin" or shutil.which("brew"):
+        return "brew install llama.cpp"
+    return "https://github.com/ggml-org/llama.cpp/releases"
+
+
+def missing_binary(binary):
+    """Why a llama-server cannot be found, and what to do about it. A bare
+    name missed on PATH means llama.cpp is not installed; a path someone
+    wrote down is theirs to fix."""
+    if os.sep in binary or "/" in binary:
+        return f"llama-server not found: {binary}"
+    return (f"llama-server not found: {binary} is not on your PATH; install "
+            f"llama.cpp ({llama_hint()}) or set llama_server in {CONFIG}")
+
+
 def spawn(name, models, binary, port=None):
     """Launch <name> detached, write its state file, return (proc, log, port).
 
@@ -933,7 +1115,7 @@ def _spawn(name, models, binary, port):
     binary = argv[0]                    # the model's own, if it names one
     port = cfg.get("port", DEFAULT_PORT)
     if not shutil.which(binary) and not Path(binary).is_file():
-        die(f"llama-server not found: {binary}")
+        die(missing_binary(binary))
     if not Path(models[name]["model"]).is_file():
         die(f"model file not found: {models[name]['model']}")
     with port_lock(port):
@@ -991,22 +1173,37 @@ def _launch(name, argv, binary, port):
 
 
 def cmd_run(args):
+    verbose = None
+    if "-v" in args:
+        verbose = True
+        args = [a for a in args if a != "-v"]
     port = None
     if len(args) == 3 and args[1] == "--port":
         port = check_port(args[2])
         args = args[:1]
     if len(args) != 1:
-        die("usage: mdl run <name> [--port N]")
+        die("usage: mdl run <name> [--port N] [-v]")
     name = args[0]
-    models, binary = load_config()
+    models, binary = load_config(missing_ok=True)
     if name not in models:
-        die(f"no model named '{name}' in {CONFIG}")
+        die(f"no model named '{name}' in {CONFIG}" if models else
+            f"no model named '{name}': {NO_MODELS}")
     # spawn() says if it is already running, under the launch lock
     proc, log, port = spawn(name, models, binary, port)
-    print(f"starting {name} (pid {proc.pid}), log {log}", flush=True)
-    tail_until_ready(proc, log, name, port)
+    print(f"starting {name} (pid {proc.pid}), log {short(log)}", flush=True)
+    tail_until_ready(proc, log, name, port, verbose)
     print(f"ready: {name} on http://127.0.0.1:{port} (pid {proc.pid})")
+    if sys.stdout.isatty():
+        # for a person; a script reads the ready line, and it stays last
+        print(next_steps(name, port))
     learn_from_log(name, models[name], binary, log)
+
+
+def next_steps(name, port):
+    """What to do with a server that just came up."""
+    url = f"http://127.0.0.1:{port}"
+    return (f"  chat in a browser: {url}  ·  OpenAI API: {url}/v1\n"
+            f"  dashboard: mdl ui  ·  stop it: mdl stop {name}")
 
 
 def learn_from_log(name, cfg, binary, log):
@@ -1046,6 +1243,11 @@ def cmd_find(args):
 def cmd_pull(args):
     from mdl_fit import pull
     pull.main(args)
+
+
+def cmd_setup(args):
+    from mdl_fit import setup
+    setup.main(args)
 
 
 def cmd_manifest(args):
@@ -1173,9 +1375,10 @@ def cmd_ps(args):
 def cmd_list(args):
     if args:
         die("usage: mdl list")
-    models, _ = load_config()
+    models, _ = load_config(missing_ok=True)
     if not models:
-        die(f"no models defined in {CONFIG}")
+        print(NO_MODELS, file=sys.stderr)
+        return
     width = max(len(n) for n in models)
     for name in sorted(models):
         print(f"{name.ljust(width)}  {models[name].get('model', '(no model path)')}")
@@ -1202,13 +1405,14 @@ def find_mmproj(model):
     """The vision projector sitting beside a model, if there is exactly one.
 
     Multimodal repos ship it as mmproj-<something>.gguf next to the
-    weights, and without it llama-server loads the text half and says
-    nothing about the missing eyes. Two candidates is a choice, not a
-    default, so it declines to guess.
+    weights (LM Studio's as <model>-mmproj-<type>.gguf), and without it
+    llama-server loads the text half and says nothing about the missing
+    eyes. Two candidates is a choice, not a default, so it declines to
+    guess.
     """
     try:
         found = sorted(p for p in model.parent.glob("*.gguf")
-                       if p.name.lower().startswith("mmproj"))
+                       if "mmproj" in p.name.lower())
     except OSError:
         return None
     return found[0] if len(found) == 1 else None
@@ -1309,16 +1513,13 @@ def cmd_init(args):
         die("usage: mdl init")
     if CONFIG.exists():
         die(f"config already exists at {CONFIG}")
-    found = shutil.which(DEFAULT_BIN) or "/path/to/llama-server"
-    try:
-        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-        write_atomic(CONFIG, STARTER % found.replace(chr(92), "/"))
-    except OSError as e:
-        die(f"cannot write {CONFIG}: {e}")
+    ensure_config()
     print(f"wrote {CONFIG}")
     if not shutil.which(DEFAULT_BIN):
-        print("set llama_server in it: llama-server is not on your PATH")
-    print("edit it, then run: mdl list")
+        print("llama-server is not on your PATH: install llama.cpp (%s), "
+              "or set llama_server in it" % llama_hint())
+    print("next: `mdl setup` adds the GGUFs already on this machine, "
+          "`mdl find` shows what fits it, `mdl pull org/repo` fetches one")
 
 
 def cmd_add(args):
@@ -1339,6 +1540,7 @@ def cmd_add(args):
         name = re.sub(r"[^A-Za-z0-9_-]+", "-", stem).strip("-").lower()
         name = name[:64].strip("-") or "model"
     port = check_port(args[2]) if len(args) > 2 else DEFAULT_PORT
+    ensure_config()
     models, _ = load_config()
     if name in models:
         die(f"{name} is already in {CONFIG}; pick another name")
@@ -1370,9 +1572,10 @@ def cmd_check(args):
     """Validate every model in the config without launching anything."""
     if args:
         die("usage: mdl check")
-    models, binary = load_config()
+    models, binary = load_config(missing_ok=True)
     if not models:
-        die(f"no models defined in {CONFIG}")
+        print(NO_MODELS, file=sys.stderr)
+        return
     problems = 0
     ports = {}
     if not shutil.which(binary) and not Path(binary).is_file():
@@ -1450,7 +1653,7 @@ def _doctor_model(name, cfg, binary, states, help_cache):
         except (OSError, ValueError):
             found = False
         if not found:
-            note("fail", "binary", "llama-server not found: %s" % binary)
+            note("fail", "binary", missing_binary(binary))
         else:
             note("ok", "binary", "llama-server found: %s" % binary)
             text, error = _doctor_probe(binary, "--version")
@@ -1524,6 +1727,34 @@ def _doctor_model(name, cfg, binary, states, help_cache):
     return notes
 
 
+def _doctor_backend(notes, binary, alone=False):
+    """What this llama-server can compute on, as llama.cpp lists it. A
+    build without a GPU backend on a machine with a GPU runs, and runs
+    many times slower, and nothing else says so."""
+    path = shutil.which(binary) or (binary if Path(binary).is_file() else None)
+    if not path:
+        # each model's own check says so; with none, this is the only word
+        if alone:
+            _doctor_note(notes, "fail", "binary", missing_binary(binary))
+        return
+    from mdl_fit import hw
+    devices = hw.llama_devices(path)
+    if devices:
+        _doctor_note(notes, "ok", "backend", "llama-server runs on %s" % ", ".join(
+            "%s%d %s (%.0f G)" % (b, i, name, total / (1 << 30))
+            for b, i, name, total, _ in devices))
+        return
+    gpus = [g["name"] for g in hw.nvidia()]
+    if gpus:
+        _doctor_note(notes, "warn", "backend", "llama-server lists no GPU, so "
+                     "it runs on the CPU only, but this machine has %s: "
+                     "install a GPU build (%s)" % (", ".join(gpus),
+                                                   llama_hint()))
+    else:
+        _doctor_note(notes, "ok", "backend", "llama-server runs on the CPU "
+                     "(it lists no GPU)")
+
+
 def _doctor_update(notes):
     """Whether a newer mdl is out, from the dashboard's daily cache. Says
     nothing when checks are off or PyPI cannot be reached: neither is a
@@ -1553,13 +1784,24 @@ def _doctor_print(report, as_json):
                             *report["models"].items()]:
             print(" ".join(name.split()) + ":")
             for f in notes:
-                message = f["message"]
-                if len(message) > 90:
-                    message = message[:87] + "..."
-                print("  %-4s  %s" % (f["level"], message))
+                print("  %-4s  %s" % (f["level"], _fit_line(f["message"])))
         print(summary)
     if fails:
         die(summary)
+
+
+def _fit_line(message, width=90):
+    """A finding for the terminal: the home directory as ~, and a long one
+    cut in the middle, where a path's least telling part is - cutting the
+    end took the name that made two findings different."""
+    home = str(Path.home())
+    message = message.replace(home + os.sep, "~" + os.sep)
+    # models.toml paths are written with forward slashes on Windows too
+    message = message.replace(home.replace(chr(92), "/") + "/", "~/")
+    if len(message) <= width:
+        return message
+    head = width * 2 // 5
+    return message[:head] + "…" + message[-(width - head - 1):]
 
 
 def cmd_doctor(args):
@@ -1572,20 +1814,29 @@ def cmd_doctor(args):
     report = {"global": [], "models": {}}
     notes = report["global"]
     try:
-        models, binary = load_config()
+        models, binary = load_config(missing_ok=True)
     except (MdlError, UnicodeError) as e:
         _doctor_note(notes, "fail", "config", e)
         _doctor_print(report, as_json)
         return
     if rest and rest[0] not in models:
         die("no model named %r in %s" % (rest[0], CONFIG))
-    _doctor_note(notes, "ok", "config", "config parses: %s" % CONFIG)
-    for directory in (STATE_DIR, run_dir()):
+    if not CONFIG.exists():
+        _doctor_note(notes, "warn", "config", "no config at %s yet; the "
+                     "first `mdl pull` or `mdl add` writes one" % CONFIG)
+    elif not models:
+        _doctor_note(notes, "warn", "config", "config parses, but has no "
+                     "models yet: %s" % CONFIG)
+    else:
+        _doctor_note(notes, "ok", "config", "config parses: %s" % CONFIG)
+    for what, directory in (("state dir", STATE_DIR),
+                            ("run dir", run_dir())):
         try:
             directory.mkdir(parents=True, exist_ok=True)
             with tempfile.TemporaryFile(dir=directory):
                 pass
-            _doctor_note(notes, "ok", "writable", "writable: %s" % directory)
+            _doctor_note(notes, "ok", "writable", "%s writable: %s"
+                         % (what, directory))
         except OSError as e:
             _doctor_note(notes, "fail", "writable", e)
     ports = {}
@@ -1612,6 +1863,7 @@ def cmd_doctor(args):
     except (OSError, ValueError) as e:
         _doctor_note(notes, "warn", "runtime", "cannot read state: %s" % e)
         states = {}
+    _doctor_backend(notes, binary, alone=not models)
     _doctor_update(notes)
     help_cache = {}
     for name in rest or sorted(models):
@@ -1650,8 +1902,8 @@ def _launch_ui(fx=None, args=("tui",)):
     try:
         from mdl_ui import run_ui
     except ImportError as e:
-        die("mdl tui needs textual: pip install \"llama-mdl[ui]\" ({})"
-            .format(e))
+        die("the dashboard needs textual, which did not import ({}); "
+            "reinstall mdl, or in a clone: pip install textual".format(e))
     _after_ui(run_ui(fx), args)
 
 
@@ -1709,7 +1961,8 @@ COMMANDS = {"init": cmd_init, "config": cmd_config,
             "run": cmd_run, "stop": cmd_stop, "ps": cmd_ps, "list": cmd_list,
             "logs": cmd_logs, "fit": cmd_fit, "eval": cmd_eval,
             "catalog": cmd_catalog, "find": cmd_find, "pull": cmd_pull,
-            "manifest": cmd_manifest, "lab": cmd_lab, "update": cmd_update}
+            "manifest": cmd_manifest, "lab": cmd_lab, "update": cmd_update,
+            "setup": cmd_setup}
 
 
 def _dispatch():
@@ -1718,19 +1971,20 @@ def _dispatch():
         try:
             from mdl_ui import run_ui
         except ImportError:
-            print(USAGE)
+            print(HELP, end="")
             sys.exit(2)
         _after_ui(run_ui(), [])
         return
-    if sys.argv[1] in ("-h", "--help"):
-        print(USAGE)
+    if sys.argv[1] in ("-h", "--help", "help"):
+        print(HELP, end="")
         return
     if sys.argv[1] in ("-V", "--version"):
         print("mdl " + VERSION)
         return
     command = COMMANDS.get(sys.argv[1])
     if not command:
-        die("unknown command '{}'".format(sys.argv[1]) + chr(10) + USAGE)
+        die("unknown command '{}'; `mdl --help` lists them".format(
+            sys.argv[1]))
     command(sys.argv[2:])
 
 

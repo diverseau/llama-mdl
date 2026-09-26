@@ -121,7 +121,7 @@ def _config():
     """(models, binary) without dying when there is no config yet."""
     import mdl
     try:
-        return mdl.load_config()
+        return mdl.load_config(missing_ok=True)
     except mdl.MdlError:
         return {}, "llama-server"
 
@@ -564,7 +564,9 @@ def preview(name, old, new, out=None):
 def write_new(name, keys, comment, dry_run=False, out=None):
     import mdl
     mdl.check_name(name)
-    models, _ = mdl.load_config()
+    if not dry_run:
+        mdl.ensure_config()
+    models, _ = mdl.load_config(missing_ok=True)
     if name in models:
         die("%s is already in %s; pick another name, or use --apply "
             "on it" % (name, mdl.CONFIG))

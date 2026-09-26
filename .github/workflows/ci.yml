@@ -20,8 +20,8 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python }}
-      - name: Install with the dashboard extra
-        run: python -m pip install --upgrade pip && python -m pip install ".[ui]"
+      - name: Install
+        run: python -m pip install --upgrade pip && python -m pip install .
       - name: Run the fast suites
         run: python tests/run.py
         env:
@@ -104,15 +104,45 @@ jobs:
       - run: python -m pip install build twine
       - run: python -m build
       - run: python -m twine check dist/*
-      - name: Each artifact installs, and brings nothing with it
+      - name: Each artifact installs, with the dashboard and nothing else
         run: |
           for artifact in dist/*.whl dist/*.tar.gz; do
             rm -rf /tmp/v
             python -m venv /tmp/v
             /tmp/v/bin/pip install "$artifact"
             /tmp/v/bin/mdl --version
-            # One line means the package pulled in no dependencies.
-            test "$(/tmp/v/bin/pip list --format=freeze --exclude pip --exclude setuptools | wc -l)" -eq 1
+            /tmp/v/bin/python -c "import mdl_ui"
+            # textual is the one dependency; everything else installed must
+            # be textual's own, which it names in its metadata
+            /tmp/v/bin/python - <<'PY'
+          import importlib.metadata as md, re
+          def norm(n):
+              return re.sub(r"[-_.]+", "-", n).lower()
+          seen, todo = set(), [("llama-mdl", ())]
+          while todo:
+              d, extras = todo.pop()
+              if (d, extras) in seen:
+                  continue
+              seen.add((d, extras))
+              try:
+                  reqs = md.requires(d) or []
+              except md.PackageNotFoundError:
+                  continue            # a marker left it out
+              for req in reqs:
+                  m = re.match(r"\s*([\w.-]+)\s*(?:\[([^\]]*)\])?", req)
+                  wanted = re.search(r"extra\s*==\s*['\"]([^'\"]+)", req)
+                  if wanted and wanted.group(1) not in extras:
+                      continue
+                  more = tuple(x.strip() for x in (m.group(2) or "").split(",")
+                               if x.strip())
+                  todo.append((norm(m.group(1)), more))
+          asked = {d for d, _ in seen}
+          have = {norm(x.metadata["Name"]) for x in md.distributions()}
+          stray = have - asked - {"pip", "setuptools"}
+          assert "textual" in have, have
+          assert not stray, "installed but nothing asked for it: %s" % stray
+          print("dependencies:", ", ".join(sorted(asked - {"llama-mdl"})))
+          PY
           done
       - uses: actions/upload-artifact@v7
         with:

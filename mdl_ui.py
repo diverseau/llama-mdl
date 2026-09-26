@@ -1322,18 +1322,50 @@ class MdlApp(App):
         came_from = os.environ.pop("MDL_UPDATED_FROM", None)
         if came_from:
             self.status_line = "updated mdl %s -> %s" % (came_from, mdl.VERSION)
+            self._whats_new(came_from)
         self.set_interval(POLL_SECONDS, self._tick)
         self._tick()
         self._check_update()
 
+    @work(thread=True, group="news")
+    def _whats_new(self, came_from):
+        """After an update, the headlines of what it brought, from the
+        changelog at the new tag. A courtesy, like the check: nothing
+        that goes wrong here may reach the app."""
+        try:
+            entries = mdl_update.changes(came_from, mdl.VERSION)
+        except Exception:
+            return
+        heads = [h for _, hs in entries for h in hs]
+        if heads:
+            more = len(heads) - 3
+            self.call_from_thread(
+                self.notify, "\n".join("· " + h for h in heads[:3])
+                + ("\nand %d more in the changelog" % more if more > 0 else ""),
+                title="new in mdl %s" % mdl.VERSION, timeout=20)
+
     # ---- config / table ----
     def _load_config(self):
         try:
-            self.models, self.binary = mdl.load_config()
+            self.models, self.binary = mdl.load_config(missing_ok=True)
         except mdl.MdlError as e:
             self.models, self.binary = {}, ""
             self.status_line = str(e)
             return
+        if not self.models:
+            self.status_line = mdl.NO_MODELS
+            # a first model may be on disk already, from LM Studio or a
+            # pull by another tool: say so, and what adds them
+            try:
+                from mdl_fit import scan
+                n = len(scan.found())
+            except OSError:
+                n = 0
+            if n:
+                self.status_line = (
+                    "no models yet, but %d GGUF%s on this machine: quit (q) "
+                    "and run `mdl setup` to add %s" % (
+                        n, "" if n == 1 else "s", "it" if n == 1 else "them"))
         marks = self._marks_path()
         try:
             self.marks = json.loads(marks.read_text())
