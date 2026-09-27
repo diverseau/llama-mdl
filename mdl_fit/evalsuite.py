@@ -47,10 +47,23 @@ SIZE = {"code": 46, "tools": 36, "longctx": 33, "instruct": 26,
         "reason": 26}
 FRONTIER = {"code": 6, "tools": 6, "longctx": 9, "instruct": 6,
             "reason": 6}
-# max_tokens per request. A thinking model spends most of it thinking; a
-# reply that hits the cap is graded as it stands and counted as capped.
-CAP = {"code": 6144, "tools": 3072, "longctx": 2048, "instruct": 3072,
-       "reason": 6144, "custom": 4096}
+# Thinking tokens a request may spend, then room for the answer. A
+# thinking model that runs out is not cut off mid-thought any more:
+# llama-server ends its thinking with BUDGET_MESSAGE and it answers from
+# what it has. Cut off, 40 of 40 capped replies scored nothing, most of
+# them empty - the cap, not the model, set the score, and half of a
+# run's time went on replies that could not score.
+THINK = {"code": 8192, "tools": 2048, "longctx": 1536, "instruct": 2048,
+         "reason": 8192, "custom": 3072}
+ANSWER = {"code": 4096, "tools": 1024, "longctx": 512, "instruct": 1024,
+          "reason": 2048, "custom": 1024}
+# max_tokens per request: the budget and the answer. A reply that still
+# hits it - a model that ignores the budget, or answers at length - is
+# graded as it stands and counted as capped.
+CAP = {s: THINK[s] + ANSWER[s] for s in THINK}
+# Qwen's own wording for a thinking budget that has run out
+BUDGET_MESSAGE = ("\n\nConsidering the limited time by the user, I have to "
+                  "give the solution based on the thinking directly now.\n")
 # Reply tokens a model that does not think typically spends, for the
 # time estimate. A thinking model is costed at THINK_FACTOR times this.
 EXPECT = {"code": 450, "tools": 120, "longctx": 40, "instruct": 300,
@@ -70,7 +83,8 @@ class Item:
         self.world = world         # () -> fresh mock world, multi-step only
         self.meta = meta or {}
         self.domain = DOMAIN.get(suite, "general")
-        self.max_tokens = CAP.get(suite, 4096)
+        self.think = THINK.get(suite, THINK["custom"])
+        self.max_tokens = CAP.get(suite, CAP["custom"])
 
     def text(self, cpt=4.0):
         return self.prompt(cpt) if callable(self.prompt) else self.prompt
@@ -143,10 +157,21 @@ def spec(it):
             "prompt": hashlib.sha256(body.encode("utf-8", "replace"))
             .hexdigest(),
             "tools": it.tools or [], "max_tokens": it.max_tokens,
+            "think": it.think,
             "multi_step": it.world is not None,
             "meta": {k: v for k, v in sorted(it.meta.items())
                      if k != "reference"},
             "grader": GRADER_VERSION, "suite_version": SUITE_VERSION}
+
+
+def set_think(items, tokens):
+    """One thinking budget for every item, the answer room kept. 0 asks
+    for no thinking at all. The budget is part of each item's spec, so
+    runs at different budgets are never compared as the same questions."""
+    for it in items:
+        it.think = tokens
+        it.max_tokens = tokens + ANSWER.get(it.suite, ANSWER["custom"])
+    return items
 
 
 def rng_for(seed, suite):
@@ -5166,6 +5191,7 @@ def load_custom(folder):
                         t.get("system"))
             item.domain = domain
             item.max_tokens = cap
+            item.think = min(item.think, cap * 2 // 3)
             items.append(item)
     return items
 

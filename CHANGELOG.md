@@ -4,6 +4,32 @@ Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `mdl eval --think N`: one thinking budget for every reply; `--think 0`
+  asks for no thinking. The budget is part of the item set, so runs at
+  different budgets are refused by `--compare`, not subtracted.
+
+### Changed
+
+- `mdl eval` gives a thinking model a thinking budget per reply (8192
+  tokens for code and reasoning, 1536-2048 for the rest) and room to
+  answer after it. When the budget runs out, llama-server ends the
+  thinking and the model answers from what it has; it used to be cut off
+  at the reply cap, and every capped reply measured scored nothing. The
+  report has a `forced` column beside `capped`, and each item records
+  its thinking tokens. The code and reasoning caps rise to 12288 and
+  10240 tokens to make room; the item set changes, so earlier runs are
+  not compared with new ones.
+- `mdl eval` intervals are Wilson intervals: six right out of six was
+  reported as [1.00, 1.00], and is now [0.61, 1.00].
+- `mdl eval --compare` calls a model ahead only when the items the two
+  models split also say so (an exact sign test), holds each domain row
+  to its share of the 5% level, shows won-lost counts and p, weighs
+  domains equally in its overall as the report does, and says how small
+  a difference its items can detect. Four items won and none lost used
+  to be called a win.
+
 ### Fixed
 
 - `mdl eval`: a later `--suite` or `--limit` run of a model no longer
@@ -19,7 +45,7 @@ Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
   unknown, not as zero tokens, and the cost line says so instead of
   showing the run as free.
 - `mdl eval`: the line-splitter items name their punctuation in words;
-  a lone backslash was shown as `'\'`, which reads as two.
+  a lone backslash was shown as `'\\'`, which reads as two.
 - `mdl eval --help` lists `--port`.
 
 ## [0.14.0] - 2026-09-28

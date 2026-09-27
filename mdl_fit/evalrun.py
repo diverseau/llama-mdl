@@ -12,6 +12,7 @@ import contextlib
 import hashlib
 import http.client
 import json
+import math
 import os
 import random
 import re
@@ -35,7 +36,7 @@ IMAGE = "python:3.12-slim"
 USAGE = """\
 usage: mdl eval <name> [--suite code,tools,longctx,instruct,reason,custom]
                        [--limit N] [--resume] [--no-sandbox] [--estimate]
-                       [--port N] [--json]
+                       [--think N] [--port N] [--json]
        mdl eval --results [name]
 
 Runs a private, auto-graded suite against <name> the way models.toml
@@ -71,6 +72,10 @@ dropped connection, an HTTP error) is retried, not scored as wrong.
                 runtime is available
   --sandbox     require the container; fail if there is none
   --estimate    say how long it would take, and stop
+  --think N     thinking tokens per reply before the model is told to
+                answer (default per suite: code and reason 8192, the
+                rest 1536-2048); 0 for no thinking. Part of the run's
+                identity: runs at different budgets are not compared
   --port N      the port to start the server on, when eval starts it
   --results     past runs
   --compare A B  two models on the same items, scored item by item
@@ -127,11 +132,18 @@ class Client:
         with urllib.request.urlopen(req, timeout=timeout or self.timeout) as r:
             return json.loads(r.read().decode("utf-8", "replace"))
 
-    def chat(self, messages, tools=None, max_tokens=1024, seed=None):
+    def chat(self, messages, tools=None, max_tokens=1024, seed=None,
+             think=None):
         body = {"messages": messages, "max_tokens": max_tokens,
                 "cache_prompt": True, "stream": False}
         if seed is not None:
             body["seed"] = seed
+        if think is not None:
+            # per request, over any --reasoning-budget the preset sets: the
+            # budget is the eval's, so every model gets the same one
+            body["reasoning_budget_tokens"] = think
+            if think:
+                body["reasoning_budget_message"] = evalsuite.BUDGET_MESSAGE
         if tools:
             body["tools"] = tools
         try:
@@ -346,11 +358,21 @@ def run_item(client, item, env, cpt=4.0):
     world = item.world() if item.world else None
     prompt = completion = 0
     counted = True        # a server that reports no usage leaves it unknown
-    capped = thought = False
+    capped = thought = forced = False
+    thinking = 0          # tokens of it, where the server can count them
     speed = []
     budget = item.meta.get("turns", MAX_TURNS) if world else 1
+    count = getattr(client, "tokens", None)
     for _ in range(budget):
-        r = client.chat(msgs, item.tools, item.max_tokens, seed)
+        r = client.chat(msgs, item.tools, item.max_tokens, seed,
+                        think=getattr(item, "think", None))
+        # the budget ran out and the server said so in the model's own
+        # thinking: it answered from what it had, it was not cut off
+        forced = forced or evalsuite.BUDGET_MESSAGE.strip() in (
+            r.reasoning or "")
+        if r.reasoning and thinking is not None:
+            n = count(r.reasoning) if count else None
+            thinking = None if n is None else thinking + n
         if r.prompt_tokens is None or r.completion_tokens is None:
             counted = False
         else:
@@ -385,7 +407,8 @@ def run_item(client, item, env, cpt=4.0):
     return {"id": item.id, "suite": item.suite, "domain": item.domain,
             "tier": item.meta.get("tier", "base"),
             "score": float(score), "why": why, "capped": capped,
-            "error": bool(r.error), "thinking": thought,
+            "forced": forced, "error": bool(r.error), "thinking": thought,
+            "reasoning_tokens": thinking if thought else 0,
             "reply": (r.content or "")[-400:],
             "prompt_tokens": prompt if counted else None,
             "completion_tokens": completion if counted else None,
@@ -444,6 +467,20 @@ def bootstrap(scores, n=1000, seed=0):
     return mean, means[int(0.025 * n)], means[int(0.975 * n) - 1]
 
 
+def wilson(mean, n, z=1.96):
+    """A 95% interval for a share of n that stays honest at 0 and 1.
+
+    The percentile bootstrap gave 6 out of 6 the interval [1.00, 1.00] -
+    certainty, from six items. Wilson's gives [0.61, 1.00], which is what
+    six right answers actually say."""
+    if not n:
+        return 0.0, 0.0
+    d = 1 + z * z / n
+    mid = (mean + z * z / (2 * n)) / d
+    half = z * math.sqrt(mean * (1 - mean) / n + z * z / (4 * n * n)) / d
+    return max(0.0, mid - half), min(1.0, mid + half)
+
+
 def summarize(results, key):
     groups = {}
     for r in results:
@@ -451,7 +488,8 @@ def summarize(results, key):
             groups.setdefault(r[key], []).append(r)
     out = {}
     for k, rs in sorted(groups.items()):
-        mean, lo, hi = bootstrap([r["score"] for r in rs], seed=len(rs))
+        mean = sum(r["score"] for r in rs) / len(rs)
+        lo, hi = wilson(mean, len(rs))
         # one reply the server did not count makes the total unknown:
         # a sum that silently leaves it out reads as cheaper than it was
         known = [r.get("completion_tokens") for r in rs]
@@ -461,6 +499,7 @@ def summarize(results, key):
         out[k] = {"n": len(rs), "score": round(mean, 4), "lo": round(lo, 4),
                   "hi": round(hi, 4),
                   "capped": sum(1 for r in rs if r["capped"]),
+                  "forced": sum(1 for r in rs if r.get("forced")),
                   "errors": sum(1 for r in rs if r["error"]),
                   "tokens": spend,
                   "seconds": round(sum(r.get("seconds", 0) for r in rs), 1),
@@ -751,11 +790,12 @@ def report(rec, w):
         else ""))
     for title, part in (("suite", rec["suites"]), ("domain", rec["domains"]),
                         ("tier", rec.get("tiers") or {})):
-        w("  %-13s score  95%% CI       items  capped  errors\n" % title)
+        w("  %-13s score  95%% CI       items  forced  capped  errors\n"
+          % title)
         for k, v in part.items():
-            w("  %-13s %.2f   %.2f–%.2f    %-6d %-7d %d\n" % (
-                k, v["score"], v["lo"], v["hi"], v["n"], v["capped"],
-                v["errors"]))
+            w("  %-13s %.2f   %.2f–%.2f    %-6d %-7d %-7d %d\n" % (
+                k, v["score"], v["lo"], v["hi"], v["n"], v.get("forced", 0),
+                v["capped"], v["errors"]))
     # one number, and it weights the five abilities equally: weighting by
     # item count would move the headline whenever a suite changes size,
     # which says nothing about the model
@@ -855,18 +895,59 @@ def paired(a, b):
 
 
 def diff_ci(pairs, n=2000, seed=7):
-    """(mean difference, lo, hi) by resampling the pairs, not the models."""
+    """(mean difference, lo, hi) by resampling the pairs, not the models.
+
+    Each domain counts the same, as in the report's overall: the pairs
+    are resampled within their domain and the domains averaged, so a
+    suite with more items does not outvote the others."""
     if not pairs:
         return 0.0, 0.0, 0.0
-    diffs = [x - y for x, y, _ in pairs]
-    mean = sum(diffs) / len(diffs)
+    by = {}
+    for x, y, dom in pairs:
+        by.setdefault(dom, []).append(x - y)
+    groups = list(by.values())
+
+    def avg(gs):
+        return sum(sum(g) / len(g) for g in gs) / len(gs)
+
+    mean = avg(groups)
     rng = random.Random(seed)
-    means = sorted(sum(rng.choice(diffs) for _ in diffs) / len(diffs)
+    means = sorted(avg([[rng.choice(g) for _ in g] for g in groups])
                    for _ in range(n))
     return mean, means[int(0.025 * n)], means[int(0.975 * n) - 1]
 
 
-def verdict(lo, hi, a, b):
+def sign_test(wins, losses):
+    """Two-sided exact p that wins and losses are an even coin: McNemar's
+    test on the items only one of two models got. Ties say nothing."""
+    n = wins + losses
+    if not n:
+        return 1.0
+    tail = sum(math.comb(n, i) for i in range(min(wins, losses) + 1))
+    return min(1.0, 2 * tail / 2 ** n)
+
+
+def detectable(pairs):
+    """The smallest difference these items would find four times in five
+    at the 5% level: 2.8 standard errors of the mean paired difference.
+    Below it, "too close to call" is all the items can say."""
+    diffs = [x - y for x, y, _ in pairs]
+    if len(diffs) < 2:
+        return None
+    mean = sum(diffs) / len(diffs)
+    var = sum((d - mean) ** 2 for d in diffs) / (len(diffs) - 1)
+    # no disagreement at all is not proof of no difference: take the
+    # spread of a single discordant pair as the floor
+    var = max(var, 1 / len(diffs))
+    return 2.8 * math.sqrt(var / len(diffs))
+
+
+def verdict(lo, hi, a, b, p=0.0, alpha=0.05):
+    """Ahead only when the interval clears zero and the items that split
+    the two models also do: four discordant items all one way cleared
+    the bootstrap, and a coin does that one time in eight."""
+    if p >= alpha:
+        return "too close to call"
     if lo > 0:
         return "%s ahead" % a
     if hi < 0:
@@ -890,18 +971,36 @@ def compare(a, b, w):
     w("compare  %s vs %s   (%d items, suite v%s, item set %s)\n" % (
         na, nb, len(pairs), a.get("suite_version", "?"),
         a.get("items_hash", "?")))
-    w("  %-13s %-6s %-6s %-7s %-18s %s\n" % (
-        "domain", na[:6], nb[:6], "diff", "95% CI", "verdict"))
+    w("  %-13s %-6s %-6s %-7s %-18s %-9s %-6s %s\n" % (
+        "domain", na[:6], nb[:6], "diff", "95% CI", "won-lost", "p",
+        "verdict"))
     rows = {}
     for x, y, dom in pairs:
         rows.setdefault(dom, []).append((x, y, dom))
     for dom in sorted(rows) + ["overall"]:
         got = pairs if dom == "overall" else rows[dom]
         mean, lo, hi = diff_ci(got)
-        w("  %-13s %-6.2f %-6.2f %+-7.2f %+.2f to %+-10.2f %s\n" % (
-            dom, sum(x for x, _, _ in got) / len(got),
-            sum(y for _, y, _ in got) / len(got), mean, lo, hi,
-            verdict(lo, hi, na, nb)))
+        won = sum(1 for x, y, _ in got if x > y + 1e-9)
+        lost = sum(1 for x, y, _ in got if y > x + 1e-9)
+        p = sign_test(won, lost)
+        # a row per domain is several tests at once: each is held to the
+        # 5% level divided among them, so one lucky domain is not a win
+        alpha = 0.05 if dom == "overall" else 0.05 / len(rows)
+        per = {}
+        for x, _, d in got:
+            per.setdefault(d, []).append(x)
+        side_a = sum(sum(v) / len(v) for v in per.values()) / len(per)
+        per = {}
+        for _, y, d in got:
+            per.setdefault(d, []).append(y)
+        side_b = sum(sum(v) / len(v) for v in per.values()) / len(per)
+        w("  %-13s %-6.2f %-6.2f %+-7.2f %+.2f to %+-10.2f %-9s %-6.3f %s\n"
+          % (dom, side_a, side_b, mean, lo, hi, "%d-%d" % (won, lost), p,
+             verdict(lo, hi, na, nb, p, alpha)))
+    small = detectable(pairs)
+    if small is not None:
+        w("note     with these %d items, a difference under about %.2f "
+          "overall cannot be told from noise\n" % (len(pairs), small))
     for rec in (a, b):
         whole = rec.get("suites") or {}
         spend = sum(v.get("tokens") or 0 for v in whole.values())
@@ -939,7 +1038,7 @@ def parse(args):
     o, pos, i = {}, [], 0
     while i < len(args):
         a = args[i]
-        if a in ("--suite", "--limit", "--port"):
+        if a in ("--suite", "--limit", "--port", "--think"):
             if i + 1 >= len(args):
                 die("%s needs a value" % a)
             o[a[2:]] = args[i + 1]
@@ -1033,6 +1132,14 @@ def main(args, out=None):
         die(str(e))
     if not items:
         die("nothing to run")
+    if "think" in o:
+        try:
+            think = int(o["think"])
+        except ValueError:
+            think = -1
+        if think < 0:
+            die("--think takes a number of tokens, 0 for no thinking")
+        evalsuite.set_think(items, think)
     argv = mdl.build_argv(name, models[name], binary)
     binary = argv[0]                    # the build this model runs on
     thinking = thinking_flag(argv)
@@ -1222,6 +1329,7 @@ def _finish(o, w, name, target, flags, build, mach, seed, items, done,
            "seed_id": evalsuite.seed_id(seed),
            "items_hash": evalsuite.fingerprint(items),
            "full": full,
+           "think": {it.suite: it.think for it in items},
            "suites": summarize(done, "suite"),
            "tiers": summarize(done, "tier"),
            "domains": summarize(done, "domain"),

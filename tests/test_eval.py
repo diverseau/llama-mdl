@@ -321,7 +321,8 @@ class Agent:
     def __init__(self):
         self.turns = 0
 
-    def chat(self, messages, tools=None, max_tokens=0, seed=None):
+    def chat(self, messages, tools=None, max_tokens=0, seed=None,
+             think=None):
         self.turns += 1
         task = messages[-1]["content"] if messages[-1]["role"] == "user" \
             else next(m["content"] for m in messages if m["role"] == "user")
@@ -834,7 +835,8 @@ check("and a retry that erases another writer's change loses that counter",
 
 
 class Lazy(Agent):
-    def chat(self, messages, tools=None, max_tokens=0, seed=None):
+    def chat(self, messages, tools=None, max_tokens=0, seed=None,
+             think=None):
         return R("I would call the tools, but I will not.")
 
 
@@ -843,7 +845,8 @@ check("an agent that never calls a tool solves none of them",
 
 
 class Loop(Agent):
-    def chat(self, messages, tools=None, max_tokens=0, seed=None):
+    def chat(self, messages, tools=None, max_tokens=0, seed=None,
+             think=None):
         self.turns += 1
         return self.call(tools[0]["function"]["name"], nonsense=1)
 
@@ -1012,7 +1015,8 @@ check("saying it is not recorded passes, inventing a code does not",
 
 
 class Echo:
-    def chat(self, messages, tools=None, max_tokens=0, seed=None):
+    def chat(self, messages, tools=None, max_tokens=0, seed=None,
+             think=None):
         return R("nothing")
 
 
@@ -1032,7 +1036,8 @@ class Flaky:
     def __init__(self, bad):
         self.bad, self.calls = bad, 0
 
-    def chat(self, messages, tools=None, max_tokens=0, seed=None):
+    def chat(self, messages, tools=None, max_tokens=0, seed=None,
+             think=None):
         self.calls += 1
         if self.calls <= self.bad:
             return R(error="connection reset")
@@ -1389,6 +1394,19 @@ check("tokens and props", (client.tokens("abcd" * 10),
       (10, {"n_ctx": 4096}))
 check("characters per token come from the server's tokenizer",
       round(evalrun.chars_per_token(client), 1), 4.0)
+client.chat([{"role": "user", "content": "hi"}], think=4096)
+budgeted = seen_bodies[-1]
+client.chat([{"role": "user", "content": "hi"}], think=0)
+no_think = seen_bodies[-1]
+client.chat([{"role": "user", "content": "hi"}])
+plain = seen_bodies[-1]
+check("a thinking budget is sent per request, with the words that end it",
+      (budgeted["reasoning_budget_tokens"],
+       budgeted["reasoning_budget_message"] == evalsuite.BUDGET_MESSAGE,
+       no_think["reasoning_budget_tokens"],
+       "reasoning_budget_message" in no_think,
+       "reasoning_budget_tokens" in plain),
+      (4096, True, 0, False, False))
 dead = evalrun.Client(1, timeout=2).chat([{"role": "user", "content": "x"}])
 check("no server: an error", bool(dead.error), True)
 
@@ -1502,7 +1520,8 @@ check("an old record without the flag is full if it scored every suite",
 class Uncounted:
     """A server that answers but reports no usage, as TabbyAPI does."""
 
-    def chat(self, messages, tools=None, max_tokens=0, seed=None):
+    def chat(self, messages, tools=None, max_tokens=0, seed=None,
+             think=None):
         return R("Answer: 1", prompt_tokens=None, completion_tokens=None)
 
 
@@ -1541,5 +1560,88 @@ finally:
     evalrun.perf = real_perf
 check("a model's own spend on a tool world is counted once, not per turn",
       (measured, guessed > measured), (900.0, True))
+
+
+# ============================================================ budgets ===
+
+check("every reply has room to answer after its thinking budget",
+      all(evalsuite.CAP[k] == evalsuite.THINK[k] + evalsuite.ANSWER[k]
+          > evalsuite.THINK[k] for k in evalsuite.THINK), True)
+check("and every item carries its suite's budget",
+      all(i.think == evalsuite.THINK[i.suite] for i in items), True)
+
+
+class Forced:
+    """Thinks until the budget runs out, as llama-server tells it, then
+    answers."""
+
+    def chat(self, messages, tools=None, max_tokens=0, seed=None,
+             think=None):
+        self.think = think
+        return R("Answer: 1", reasoning="let me see ... "
+                 + evalsuite.BUDGET_MESSAGE, finish="stop",
+                 prompt_tokens=10, completion_tokens=90)
+
+    def tokens(self, text):
+        return len(text) // 4
+
+
+forced_client = Forced()
+item0 = by["reason"][0]
+got = evalrun.run_item(forced_client, item0, env)
+check("an item asks for its own budget, and a forced answer is marked",
+      (forced_client.think, got["forced"], got["capped"],
+       got["reasoning_tokens"] > 0),
+      (evalsuite.THINK["reason"], True, False, True))
+got_sum = evalrun.summarize([got], "suite")["reason"]
+forced_out = io.StringIO()
+evalrun.report(dict(run_of("m", [1.0]), suites={"reason": got_sum},
+                    domains={}, tiers={}, name="m", suite_version=6,
+                    items=[]), forced_out.write)
+check("the report counts forced answers apart from capped ones",
+      (got_sum["forced"], "forced" in forced_out.getvalue()), (1, True))
+low = evalsuite.set_think(evalsuite.build(["reason"], seed), 1024)
+check("a budget of one's own is part of the item set, so it never "
+      "compares with the default",
+      (low[0].think, low[0].max_tokens,
+       evalsuite.fingerprint(low) != evalsuite.fingerprint(by["reason"])),
+      (1024, 1024 + evalsuite.ANSWER["reason"], True))
+
+
+# ======================================================== statistics ===
+
+six = evalrun.summarize([{"suite": "code", "score": 1.0, "capped": False,
+                          "error": False}] * 6, "suite")["code"]
+check("six right out of six is not certainty",
+      (six["score"], round(six["lo"], 2), six["hi"]), (1.0, 0.61, 1.0))
+lucky = run_of("lucky", [1.0] * 30)
+unlucky = run_of("unlucky", [0.0] * 4 + [1.0] * 26)
+out = io.StringIO()
+evalrun.compare(lucky, unlucky, out.write)
+check("four items split one way is a coin landing heads four times, "
+      "not a win",
+      ("too close to call" in out.getvalue(), "lucky ahead"
+       in out.getvalue(), "4-0" in out.getvalue()), (True, False, True))
+check("and the comparison says how small a gap its items can see",
+      "cannot be told from noise" in out.getvalue(), True)
+
+
+def two_domains(name, coding, general):
+    return dict(run_of(name, []), items=[
+        {"id": "c%d" % i, "domain": "coding", "score": v}
+        for i, v in enumerate(coding)] + [
+        {"id": "g%d" % i, "domain": "general", "score": v}
+        for i, v in enumerate(general)])
+
+
+# forty coding items tied, four general items all won: item by item that
+# is +0.09, domain by domain +0.5, and the report's overall is the latter
+wide = two_domains("wide", [1.0] * 40, [1.0] * 4)
+narrow = two_domains("narrow", [1.0] * 40, [0.0] * 4)
+check("the comparison's overall weighs domains as the report's does",
+      round(evalrun.diff_ci(evalrun.paired(wide, narrow))[0], 2), 0.5)
+check("an exact sign test",
+      (evalrun.sign_test(4, 0), round(evalrun.sign_test(12, 2), 4),
+       evalrun.sign_test(0, 0)), (0.125, 0.0129, 1.0))
 
 sys.exit(t.done())
