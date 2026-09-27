@@ -32,7 +32,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 from . import progress, remote
 
@@ -135,8 +135,12 @@ def plan(repo, selector=None, rev="main", choose=None):
                                f["path"]))
         need.append(mm[0])
     for f in need:
+        # read as Windows would, on every OS: it splits on both slashes,
+        # and a drive ("C:/...", "C:x") or share turns folder / path into
+        # the path alone, out of the folder
         p = f["path"]
-        if p.startswith(("/", "\\")) or ".." in Path(p).parts:
+        w = PureWindowsPath(p)
+        if w.anchor or ".." in w.parts:
             raise PullError("the Hub listed an unsafe path: %r" % p)
     return sha, key, need
 

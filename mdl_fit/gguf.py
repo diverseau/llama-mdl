@@ -36,6 +36,14 @@ _STRING, _ARRAY = 8, 9
 # Arrays longer than this are kept as a length only. Per-layer arrays
 # (head counts, SWA patterns) are well under it; token lists are not.
 KEEP_ARRAY = 4096
+# An array of arrays costs 12 bytes a level, so without a limit a small
+# header can recurse past Python's stack and crash the parse with a
+# traceback. The limit is a chosen bound, not a measured one.
+MAX_NESTING = 8
+# block_count sizes several per-layer lists in model.Shape, and a header
+# can claim billions. This is far past any model; it is here so a hostile
+# header gets an error instead of the memory it asks for.
+MAX_LAYERS = 1 << 16
 
 SPLIT_RE = re.compile(r"-(\d{5})-of-(\d{5})\.gguf$", re.I)
 
@@ -79,20 +87,23 @@ class _Reader:
         self.pos += n
         return raw.decode("utf-8", "replace")
 
-    def value(self, vtype):
+    def value(self, vtype, depth=0):
         if vtype in _SCALAR:
             return self.take(_SCALAR[vtype])
         if vtype == _STRING:
             return self.string()
         if vtype == _ARRAY:
+            if depth >= MAX_NESTING:
+                raise NotGGUF("metadata arrays nested more than %d deep"
+                              % MAX_NESTING)
             etype, count = self.take("<I"), self.take("<Q")
             if count > KEEP_ARRAY:
-                self._skip_array(etype, count)
+                self._skip_array(etype, count, depth + 1)
                 return {"_len": count}
-            return [self.value(etype) for _ in range(count)]
+            return [self.value(etype, depth + 1) for _ in range(count)]
         raise NotGGUF("unknown metadata value type %d" % vtype)
 
-    def _skip_array(self, etype, count):
+    def _skip_array(self, etype, count, depth):
         if etype in _SCALAR:
             self.skip(struct.calcsize(_SCALAR[etype]) * count)
         elif etype == _STRING:
@@ -110,7 +121,7 @@ class _Reader:
             self.pos = pos
         else:
             for _ in range(count):
-                self.value(etype)
+                self.value(etype, depth)
 
 
 def parse_header(buf):
@@ -248,6 +259,15 @@ class Inventory:
         self.data_starts = data_starts
         self.warnings = list(warnings or [])
         self.arch = meta.get("general.architecture", "unknown")
+        # checked here, where every caller already expects NotGGUF, not
+        # later in model.Shape where the lists get allocated
+        try:
+            n = self.n_layer
+        except (TypeError, ValueError):
+            n = -1
+        if not 0 <= n <= MAX_LAYERS:
+            raise NotGGUF("the header claims %r layers" % (
+                self.hp("block_count", n),))
         others = sorted({t.name.split(".", 2)[2] if t.layer is not None
                          else t.name for t in tensors if t.role == "other"})
         if others:

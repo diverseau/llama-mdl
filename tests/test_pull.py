@@ -126,13 +126,20 @@ check("a quant named: pinned to the commit, the model then its projector, "
       "at full precision",
       (sha, key, [f["path"] for f in need]),
       (SHA, "Tiny-Model-Q8_0.gguf", ["Tiny-Model-Q8_0.gguf", "mmproj-F16.gguf"]))
-MODE["extra"] = [{"type": "file", "path": "../evil-Q2_K.gguf", "size": 1,
-                  "lfs": {"size": 1, "oid": "x"}}]
-try:
-    pull.plan(REPO, "Q2_K")
-    check("a path out of the folder is refused", "planned", "error")
-except pull.PullError as e:
-    check("a path out of the folder is refused", "unsafe path" in str(e), True)
+# on Windows, folder / "C:/..." is the drive path alone, out of the folder
+for bad in ("../evil-Q2_K.gguf", "sub/../../evil-Q2_K.gguf",
+            "sub\\..\\..\\evil-Q2_K.gguf", "/evil-Q2_K.gguf",
+            "C:/Users/Public/evil-Q2_K.gguf", "C:\\Windows\\evil-Q2_K.gguf",
+            "C:evil-Q2_K.gguf", "//server/share/evil-Q2_K.gguf"):
+    MODE["extra"] = [{"type": "file", "path": bad, "size": 1,
+                      "lfs": {"size": 1, "oid": "x"}}]
+    try:
+        pull.plan(REPO, "Q2_K")
+        check("a path out of the folder is refused: %s" % bad, "planned",
+              "error")
+    except pull.PullError as e:
+        check("a path out of the folder is refused: %s" % bad,
+              "unsafe path" in str(e), True)
 MODE.pop("extra")
 
 # ------------------------------------------------------------ the pull --

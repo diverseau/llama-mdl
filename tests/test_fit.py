@@ -9,6 +9,7 @@ pin the rules.
 import http.server
 import json
 import os
+import struct
 import sys
 import tempfile
 import threading
@@ -78,6 +79,30 @@ try:
     check("not a GGUF is refused", "no error", "NotGGUF")
 except gguf.NotGGUF:
     check("not a GGUF is refused", True, True)
+
+nested = llama(TMP / "Nested.gguf", n_layer=1,
+               extra_meta={"t.pairs": [[1, 2], [3]]})
+check("an array of arrays still parses",
+      gguf.load(nested).meta["t.pairs"], [[1, 2], [3]])
+# 12 bytes a level: 5,000 levels is 60 KB, well past Python's stack
+deep = (b"GGUF" + struct.pack("<IQQ", 3, 0, 1)
+        + struct.pack("<Q", 1) + b"k" + struct.pack("<I", 9)
+        + struct.pack("<IQ", 9, 1) * 5000
+        + struct.pack("<IQ", 4, 0))
+try:
+    gguf.parse_header(deep)
+    check("arrays nested without end are refused", "no error", "NotGGUF")
+except gguf.NotGGUF as e:
+    check("arrays nested without end are refused, not a traceback",
+          "nested" in str(e), True)
+huge = llama(TMP / "Huge-Layers.gguf", n_layer=1,
+             extra_meta={"llama.block_count": 0xFFFFFFFF})
+try:
+    gguf.load(huge)
+    check("a block_count of billions is refused", "loaded", "NotGGUF")
+except gguf.NotGGUF as e:
+    check("a block_count of billions is refused before anything is sized "
+          "by it", "4294967295" in str(e), True)
 
 check("classify: routed experts", gguf.classify("blk.3.ffn_up_exps.weight"),
       (3, "exps"))

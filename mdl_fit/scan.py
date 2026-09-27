@@ -10,9 +10,10 @@ import re
 import sys
 from pathlib import Path
 
+from .gguf import SPLIT_RE as SHARD
+
 MIN_BYTES = 50_000_000       # smaller is a vocab or a template, not weights
 DEPTH = 6                    # HF's cache is models--o--r/snapshots/rev/dir/f
-SHARD = re.compile(r"-(\d{5})-of-(\d{5})\.gguf$", re.I)
 
 
 class Found:
