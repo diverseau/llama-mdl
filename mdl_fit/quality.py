@@ -278,8 +278,12 @@ class Model:
         # Scores only mean the same thing when the questions were the
         # same. Keep the newest generation of items and drop the rest:
         # an older run is history, not evidence about this model.
+        # and only whole runs: a later `--suite code` look at one model
+        # used to become "the newest items" and shut every full run out
+        from . import evalrun
         usable = [r for r in records
-                  if not r.get("partial") and r.get("domains")]
+                  if not r.get("partial") and r.get("domains")
+                  and evalrun.is_full(r)]
         newest = max((r.get("suite_version", 0) for r in usable), default=0)
         current = [r for r in usable if r.get("suite_version", 0) == newest]
         latest = max(current, key=lambda r: r.get("at", ""), default=None)

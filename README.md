@@ -418,7 +418,7 @@ Leaderboards say how a model does in someone else's setup. `mdl eval`
 says how it does here, at your quant, KV type and context:
 
 ```
-mdl eval qwen-small                    every suite (~15-90 min, see --estimate)
+mdl eval qwen-small                    every suite (an hour or more; --estimate)
 mdl eval qwen-small --suite code,tools --limit 5
 mdl eval qwen-small --estimate         how long it would take
 mdl eval --results                     past runs, with 95% intervals
@@ -440,8 +440,20 @@ found an hour into the run.
 
 The report scores base, hard and frontier separately. The base and hard
 mix stays in place; frontier adds 33 generated items across the five
-suites. The per-suite reply token caps stay the same, and the report
-counts replies that hit them. A suite everything passes ranks nothing,
+suites.
+
+A thinking model gets a thinking budget per reply - 8192 tokens for code
+and reasoning, 1536-2048 for the rest - and room to answer after it.
+When the budget runs out, llama-server ends the thinking with a line
+telling it to answer from what it has, instead of cutting the reply off:
+cut off, every capped reply we measured scored nothing, most of them
+empty, and the cap rather than the model set the score. The report
+counts answers that were forced this way and replies that still hit the
+cap. `--think N` sets one budget for every suite (`--think 0` asks for no
+thinking); the budget is part of the item set, so runs at different
+budgets are not compared as the same questions.
+
+A suite everything passes ranks nothing,
 so the hard items are built to be failed - and, more importantly, built so
 that recognising them does not help. Half of the hard code and reason
 items are generated rather than named: a price with five clauses that

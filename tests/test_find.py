@@ -127,8 +127,10 @@ check("a profile mixes its domains", (agent.rated, round(sum(
     quality.WEIGHTS["agent"].values()), 6)), (True, 1.0))
 
 
-def local_rec(h, score, bpw=8.5, params=30_000_000, kv="f16/f16"):
+def local_rec(h, score, bpw=8.5, params=30_000_000, kv="f16/f16",
+              full=True, at="2026-01-01 00:00", items_hash="same"):
     return {"hash": h, "bpw": bpw, "params": params, "kv": kv,
+            "full": full, "at": at, "items_hash": items_hash,
             "domains": {d: {"score": score, "lo": score - 0.05,
                             "hi": score + 0.05} for d in quality.DOMAINS}}
 
@@ -153,6 +155,13 @@ qm4.add_local([local_rec("q8", 0.80, bpw=8.5),
                                                  "q3": "new/Fresh"})
 check("the same model at two quants teaches the penalty curve",
       qm4.scale > quality.QUANT_SCALE, True)
+qm5 = quality.Model(cat)
+qm5.add_local([local_rec("h1", 0.9),
+               local_rec("h1", 0.2, full=False, at="2026-02-02 00:00",
+                         items_hash="just-code")], {"h1": "new/Fresh"})
+check("a later one-suite run does not shut the full run out of find",
+      round(qm5.estimate("new/Fresh", "coding").mean, 1),
+      round(f2.mean, 1))
 
 # ============================================================== find ===
 

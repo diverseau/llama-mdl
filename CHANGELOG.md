@@ -4,21 +4,15 @@ Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
 
 ## [Unreleased]
 
-### Fixed
-
-- `mdl find` no longer suggests an MTP head as the model. A GGUF whose
-  header holds under half the layers it declares (a head or draft
-  exported with its model's metadata) is turned away whatever its name,
-  and the files beside it read their own headers instead of being sized
-  from it. A 2.9 GB head of a 27B was offered at F16 and 256K context.
-  `mdl ui` drops such picks saved by an earlier run and runs `find`
-  again.
-
 ## [0.14.0] - 2026-09-28
 
-A frontier tier for `mdl eval`, editing a model's config from its page
-in `mdl ui`, and fixes from a review of the core: Hub paths, hostile
-GGUF headers, and the backend a quick probe reports.
+`mdl eval` made worth trusting: a thinking model gets a thinking budget
+and is told to answer when it runs out instead of being cut off, the
+intervals and `--compare` stop claiming more than the items can show,
+a frontier tier and a thirty-item `--quick` run. Also: editing a
+model's config from its page in `mdl ui`, `mdl find` no longer taking
+an MTP head for the model, and fixes from a review of the core - Hub
+paths, hostile GGUF headers, and the backend a quick probe reports.
 
 ### Added
 
@@ -35,8 +29,14 @@ GGUF headers, and the backend a quick probe reports.
   in the document, and a missing record. Format: a grouped CSV report, a
   text under five simultaneous rules, and a JSON regroup. Reasoning: a
   directed route, a pruned logic grid, and an inclusion-exclusion count.
-  Per-suite reply token caps are unchanged. Suite version 6 prevents
-  comparisons with older item sets.
+  Suite version 6 prevents comparisons with older item sets.
+- `mdl eval --think N`: one thinking budget for every reply; `--think 0`
+  asks for no thinking. The budget is part of the item set, so runs at
+  different budgets are refused by `--compare`, not subtracted.
+- `mdl eval --quick`: thirty items, six from each suite across every
+  tier, no two from one task family, long documents at 32k only. A
+  quick run is recorded as one, and `mdl find` and `--compare` prefer a
+  full run over it.
 - `mdl ui`: Edit config on every model in your config, a page of its
   keys in the panel's own rows. Save writes only the keys changed and
   keeps comments and hand edits; a refused save says why on the page;
@@ -44,10 +44,53 @@ GGUF headers, and the backend a quick probe reports.
   config has changed since it started. `mdl tui`'s edit form and the
   page read what is typed through the same code.
 
+### Changed
+
+- `mdl eval` gives a thinking model a thinking budget per reply (8192
+  tokens for code and reasoning, 1536-2048 for the rest) and room to
+  answer after it. When the budget runs out, llama-server ends the
+  thinking and the model answers from what it has; it used to be cut off
+  at the reply cap, and every capped reply measured scored nothing. The
+  report has a `forced` column beside `capped`, and each item records
+  its thinking tokens. The code and reasoning caps rise to 12288 and
+  10240 tokens to make room.
+- `mdl eval` intervals are Wilson intervals: six right out of six was
+  reported as [1.00, 1.00], and is now [0.61, 1.00].
+- `mdl eval --compare` calls a model ahead only when the items the two
+  models split also say so (an exact sign test), holds each domain row
+  to its share of the 5% level, shows won-lost counts and p, weighs
+  domains equally in its overall as the report does, and says how small
+  a difference its items can detect. Four items won and none lost used
+  to be called a win.
+- The `mdl eval` report shows seconds per item and tokens per right
+  answer for every suite, domain and tier.
+
 ### Fixed
 
+- `mdl find` no longer suggests an MTP head as the model. A GGUF whose
+  header holds under half the layers it declares (a head or draft
+  exported with its model's metadata) is turned away whatever its name,
+  and the files beside it read their own headers instead of being sized
+  from it. A 2.9 GB head of a 27B was offered at F16 and 256K context.
+  `mdl ui` drops such picks saved by an earlier run and runs `find`
+  again.
+- `mdl eval`: a later `--suite` or `--limit` run of a model no longer
+  stands in for its full run. `--compare` and `mdl find` take the newest
+  full run, so one quick look at one suite does not shut every full
+  run out of `mdl find`'s local evidence.
+- `mdl eval --estimate` counted a tool world's tokens once per turn over
+  what the model had actually spent on it, so worlds of up to sixty
+  turns were estimated many times too long.
+- `mdl eval`: a resumed run's minutes now include the items finished
+  before the resume.
+- `mdl eval`: a server that reports no token usage is recorded as
+  unknown, not as zero tokens, and the cost line says so instead of
+  showing the run as free.
+- `mdl eval`: the line-splitter items name their punctuation in words;
+  a lone backslash was shown as `'\\'`, which reads as two.
 - `mdl eval`: a base format item could be a lone "no more than N words"
   rule, which any short reply keeps; such an item is drawn again.
+- `mdl eval --help` lists `--port`.
 - A quick hardware probe (`mdl manifest`, `mdl fit calibrate`, `mdl
   lab`, `mdl eval`) with no nvidia-smi reported the backend as CPU on an
   AMD, Intel or Apple GPU. It now takes the backend a full probe booked

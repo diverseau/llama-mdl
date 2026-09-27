@@ -47,10 +47,23 @@ SIZE = {"code": 46, "tools": 36, "longctx": 33, "instruct": 26,
         "reason": 26}
 FRONTIER = {"code": 6, "tools": 6, "longctx": 9, "instruct": 6,
             "reason": 6}
-# max_tokens per request. A thinking model spends most of it thinking; a
-# reply that hits the cap is graded as it stands and counted as capped.
-CAP = {"code": 6144, "tools": 3072, "longctx": 2048, "instruct": 3072,
-       "reason": 6144, "custom": 4096}
+# Thinking tokens a request may spend, then room for the answer. A
+# thinking model that runs out is not cut off mid-thought any more:
+# llama-server ends its thinking with BUDGET_MESSAGE and it answers from
+# what it has. Cut off, 40 of 40 capped replies scored nothing, most of
+# them empty - the cap, not the model, set the score, and half of a
+# run's time went on replies that could not score.
+THINK = {"code": 8192, "tools": 2048, "longctx": 1536, "instruct": 2048,
+         "reason": 8192, "custom": 3072}
+ANSWER = {"code": 4096, "tools": 1024, "longctx": 512, "instruct": 1024,
+          "reason": 2048, "custom": 1024}
+# max_tokens per request: the budget and the answer. A reply that still
+# hits it - a model that ignores the budget, or answers at length - is
+# graded as it stands and counted as capped.
+CAP = {s: THINK[s] + ANSWER[s] for s in THINK}
+# Qwen's own wording for a thinking budget that has run out
+BUDGET_MESSAGE = ("\n\nConsidering the limited time by the user, I have to "
+                  "give the solution based on the thinking directly now.\n")
 # Reply tokens a model that does not think typically spends, for the
 # time estimate. A thinking model is costed at THINK_FACTOR times this.
 EXPECT = {"code": 450, "tools": 120, "longctx": 40, "instruct": 300,
@@ -70,7 +83,8 @@ class Item:
         self.world = world         # () -> fresh mock world, multi-step only
         self.meta = meta or {}
         self.domain = DOMAIN.get(suite, "general")
-        self.max_tokens = CAP.get(suite, 4096)
+        self.think = THINK.get(suite, THINK["custom"])
+        self.max_tokens = CAP.get(suite, CAP["custom"])
 
     def text(self, cpt=4.0):
         return self.prompt(cpt) if callable(self.prompt) else self.prompt
@@ -143,10 +157,55 @@ def spec(it):
             "prompt": hashlib.sha256(body.encode("utf-8", "replace"))
             .hexdigest(),
             "tools": it.tools or [], "max_tokens": it.max_tokens,
+            "think": it.think,
             "multi_step": it.world is not None,
             "meta": {k: v for k, v in sorted(it.meta.items())
                      if k != "reference"},
             "grader": GRADER_VERSION, "suite_version": SUITE_VERSION}
+
+
+# A quick run: from each suite, this many items per tier, each from a
+# different task family, and long documents at 32k only - thirty items
+# that still reach every tier, where --limit's first N never got past
+# the base and hard items to the frontier ones generated last.
+QUICK = {"base": 1, "hard": 2, "frontier": 3}
+
+
+def family(it):
+    """The task an item was made from, without its number: two items of
+    one family are the same question with other numbers."""
+    if it.suite == "longctx":
+        return it.id.rsplit("-", 1)[1]           # the question, any length
+    if it.suite == "instruct":
+        return it.id.split("-")[-1]
+    return it.id.split("-", 2)[2] if it.id.count("-") >= 2 else it.id
+
+
+def quick(items):
+    """A stratified few of `items`, in their own order."""
+    picked, seen = [], set()
+    for it in items:
+        if it.suite == "longctx" and it.meta.get("doc") != LONG[0][0]:
+            continue
+        tier = it.meta.get("tier", "base")
+        key = (it.suite, tier, family(it))
+        room = QUICK.get(tier, 0) - sum(
+            1 for s, t, _ in seen if (s, t) == (it.suite, tier))
+        if key in seen or room <= 0:
+            continue
+        seen.add(key)
+        picked.append(it)
+    return picked
+
+
+def set_think(items, tokens):
+    """One thinking budget for every item, the answer room kept. 0 asks
+    for no thinking at all. The budget is part of each item's spec, so
+    runs at different budgets are never compared as the same questions."""
+    for it in items:
+        it.think = tokens
+        it.max_tokens = tokens + ANSWER.get(it.suite, ANSWER["custom"])
+    return items
 
 
 def rng_for(seed, suite):
@@ -1294,6 +1353,19 @@ def _machine(rng):
     return ("run", prompt, src, cases)
 
 
+# Punctuation named in words: %r showed a lone backslash as '\\', which
+# reads as two of them, and a backtick in backticks cannot be read at all.
+CHAR_NAMES = {"|": "vertical bar", ";": "semicolon", ":": "colon",
+              "#": "hash", "'": "single quote", '"': "double quote",
+              "`": "backtick", "~": "tilde", "^": "caret",
+              "\\": "backslash", "%": "percent sign",
+              "!": "exclamation mark", "@": "at sign"}
+
+
+def _shown(c):
+    return "The %s (%s)" % (CHAR_NAMES[c], c)
+
+
 @_spec_code
 def _splitter(rng):
     """Four pieces of punctuation, chosen by the seed, and the rules for
@@ -1335,23 +1407,25 @@ def _splitter(rng):
         "Write a Python function `split_line(s)` that splits the string "
         "`s` into a list of fields, reading it one character at a time "
         "from the left.\n"
-        "- %r separates one field from the next.\n"
-        "- %r before any character puts that character into the field as "
-        "it is, and the %r itself is not kept. This holds everywhere, "
-        "inside quotes as well as outside. A %r as the very last "
+        "- %s separates one field from the next.\n"
+        "- %s before any character puts that character into the field as "
+        "it is, and the %s itself is not kept. This holds everywhere, "
+        "inside quotes as well as outside. A %s as the very last "
         "character of `s` is dropped.\n"
-        "- %r turns quoting on, and the next %r turns it off. The %r "
-        "characters themselves are never kept. While quoting is on, %r "
-        "and %r are ordinary characters. Quoting that is never turned "
-        "off simply runs to the end of `s`.\n"
-        "- %r, when quoting is off, ends the line: it and everything "
+        "- %s turns quoting on, and the next %s turns it off. The %s "
+        "characters themselves are never kept. While quoting is on, the "
+        "%s and the %s are ordinary characters. Quoting that is never "
+        "turned off simply runs to the end of `s`.\n"
+        "- %s, when quoting is off, ends the line: it and everything "
         "after it are dropped.\n"
         "- Spaces are never stripped from anything.\n"
         "- If `s` is empty, or nothing at all is left once a comment is "
-        "dropped, return []. Otherwise a `s` that ends in %r has an "
-        "empty last field, and two %r in a row have an empty field "
-        "between them."
-        % (sep, esc, esc, esc, quo, quo, quo, sep, com, com, sep, sep))
+        "dropped, return []. Otherwise a `s` that ends in a %s has an "
+        "empty last field, and two %s characters in a row have an empty "
+        "field between them."
+        % (_shown(sep), _shown(esc), CHAR_NAMES[esc], CHAR_NAMES[esc],
+           _shown(quo), CHAR_NAMES[quo], CHAR_NAMES[quo], CHAR_NAMES[sep],
+           CHAR_NAMES[com], _shown(com), CHAR_NAMES[sep], CHAR_NAMES[sep]))
 
     cases = [
         [""],
@@ -5151,6 +5225,7 @@ def load_custom(folder):
                         t.get("system"))
             item.domain = domain
             item.max_tokens = cap
+            item.think = min(item.think, cap * 2 // 3)
             items.append(item)
     return items
 
