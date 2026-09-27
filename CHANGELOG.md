@@ -6,6 +6,13 @@ Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
 
 ### Added
 
+- `mdl eval` adds a frontier tier above base and hard, reported separately
+  across all five suites. It includes generated bug repairs with large
+  hidden cases, paged tool worlds with transient failures and a checked
+  final state, scattered long-context aggregation and absent answers,
+  interacting report constraints, and solver-checked route puzzles. The
+  existing per-suite reply token caps stay in place. Suite version 5
+  prevents comparisons with older item sets.
 - `mdl ui`: Edit config on every model in your config, a page of its
   keys in the panel's own rows. Save writes only the keys changed and
   keeps comments and hand edits; a refused save says why on the page;

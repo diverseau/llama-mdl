@@ -426,21 +426,23 @@ mdl eval --compare qwen-small ornith   which of two is actually better
 ```
 
 It starts the model as models.toml runs it (or uses it if it is already
-up) and runs five suites: code (40 functions, graded by hidden unit
-tests that are actually executed), tools (30 tool-calling tasks, single
-and multi-step, against mock worlds), long-context (24 questions over
-documents at 32k, 64k and 128k, those beyond the configured context
-skipped), instruct (20 checkable format rules) and reason (20
-exact-answer problems). Add your own as `[[task]]` entries in
+up) and runs five suites: code (46 functions and bug repairs, graded by
+hidden unit tests that are actually executed), tools (36 tool-calling
+tasks, single and multi-step, against mock worlds), long-context (33
+questions over documents at 32k, 64k and 128k, those beyond the
+configured context skipped), instruct (26 checkable format rules) and
+reason (26 exact-answer problems). Add your own as `[[task]]` entries in
 `~/.config/mdl/evals/*.toml`, checked by `contains`, `regex`, `exact`
 or a Python snippet. A task that cannot run - no prompt, a regex that
 does not compile, a domain the report has no row for, an id used twice -
 is refused when the suite is built, naming the file and the task, not
 found an hour into the run.
 
-Three of every five items are the harder tier, and the report scores
-the tiers separately. A suite everything passes ranks nothing, so the
-hard items are built to be failed - and, more importantly, built so
+The report scores base, hard and frontier separately. The base and hard
+mix stays in place; frontier adds 33 generated items across the five
+suites. The per-suite reply token caps stay the same, and the report
+counts replies that hit them. A suite everything passes ranks nothing,
+so the hard items are built to be failed - and, more importantly, built so
 that recognising them does not help. Half of the hard code and reason
 items are generated rather than named: a price with five clauses that
 interact, a validator with a stated precedence over its rules, a stack
@@ -457,6 +459,13 @@ and they are kept because they still catch arithmetic slips, but on
 their own they measured memory rather than reasoning: a 35B coder in a
 3-bit quant answered 36 of 40 of them.
 
+Frontier code asks for a repair to existing, multi-function code. Hidden
+cases cover revision ties, deletes, missing keys and large inputs that
+time out a quadratic lookup. Frontier reasoning asks for minimum routes
+through a generated directed travel-time table; a solver checks the
+answer. Frontier format tasks combine sorting, arithmetic, case, CSV
+structure and a checksum.
+
 The tool worlds take four to a dozen dependent calls. One forbids the
 action the request asks for, and doing it anyway is the failure. One
 fails a call the first time. One offers eight tools, four of them
@@ -467,8 +476,12 @@ the rules once at the start is not enough. One has four customers with
 the same name, and only reading each one says which to cancel. One has
 another writer change a counter between the read and the write, so
 retrying the value already worked out erases their change - a 35B coder
-in a 3-bit quant did exactly that. Eighteen of the thirty tools items
-are worlds like these, and two in three of those are the hard ones.
+in a 3-bit quant did exactly that. Eighteen of the original thirty tools
+items are worlds like these, and two in three of those are the hard ones.
+The frontier queue takes about 25 calls: page through ticket ids, fetch
+the separate policy and each ticket, retry temporary read and write
+errors, and finish with exactly the eligible tickets approved. It offers
+distractor tools and checks the final state.
 
 The long-context questions are not all needles. One per document asks
 for every match rather than one - three of six people share a floor,
@@ -477,12 +490,14 @@ overlap, so stopping after two is worth more than nothing and less than
 finishing. One counts something that has to be read for in full. And
 one has no answer in the document at all: the project is real and nine
 others do list a code, so the pull towards writing one down is strong,
-and saying it is not recorded is the only reply that scores. Nothing
-else in the suite measures making things up.
+and saying it is not recorded is the only reply that scores. Frontier
+documents add scattered consignment facts linked through bundles,
+clerks and rooms, then ask for a floor-wide crate total, another linked
+floor, and a second code that the records never provide.
 
-Code and format items are marked in parts, so a function that handles
-the ordinary cases and trips on one edge does not score the same as one
-that does not run.
+The original code and format items are marked in parts, so a function
+that handles the ordinary cases and trips on one edge does not score
+the same as one that does not run.
 
 Every grader is checked against replies that contain no knowledge -
 nothing, a refusal, a guessed number, the instructions read back - and
