@@ -164,6 +164,40 @@ def spec(it):
             "grader": GRADER_VERSION, "suite_version": SUITE_VERSION}
 
 
+# A quick run: from each suite, this many items per tier, each from a
+# different task family, and long documents at 32k only - thirty items
+# that still reach every tier, where --limit's first N never got past
+# the base and hard items to the frontier ones generated last.
+QUICK = {"base": 1, "hard": 2, "frontier": 3}
+
+
+def family(it):
+    """The task an item was made from, without its number: two items of
+    one family are the same question with other numbers."""
+    if it.suite == "longctx":
+        return it.id.rsplit("-", 1)[1]           # the question, any length
+    if it.suite == "instruct":
+        return it.id.split("-")[-1]
+    return it.id.split("-", 2)[2] if it.id.count("-") >= 2 else it.id
+
+
+def quick(items):
+    """A stratified few of `items`, in their own order."""
+    picked, seen = [], set()
+    for it in items:
+        if it.suite == "longctx" and it.meta.get("doc") != LONG[0][0]:
+            continue
+        tier = it.meta.get("tier", "base")
+        key = (it.suite, tier, family(it))
+        room = QUICK.get(tier, 0) - sum(
+            1 for s, t, _ in seen if (s, t) == (it.suite, tier))
+        if key in seen or room <= 0:
+            continue
+        seen.add(key)
+        picked.append(it)
+    return picked
+
+
 def set_think(items, tokens):
     """One thinking budget for every item, the answer room kept. 0 asks
     for no thinking at all. The budget is part of each item's spec, so

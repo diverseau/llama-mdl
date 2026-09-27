@@ -1644,4 +1644,22 @@ check("an exact sign test",
       (evalrun.sign_test(4, 0), round(evalrun.sign_test(12, 2), 4),
        evalrun.sign_test(0, 0)), (0.125, 0.0129, 1.0))
 
+
+# ============================================================== quick ===
+
+fast = evalsuite.quick(items)
+check("a quick run is six items a suite, every tier reached",
+      ({s: sum(i.suite == s for i in fast) for s in evalsuite.SUITES},
+       sorted({(i.suite, i.meta["tier"]) for i in fast}) == sorted(
+           {(i.suite, i.meta["tier"]) for i in items})),
+      (dict.fromkeys(evalsuite.SUITES, 6), True))
+check("no two quick items are one family, and documents stay at 32k",
+      (len({(i.suite, evalsuite.family(i)) for i in fast}), len(fast),
+       {i.meta["doc"] for i in fast if i.suite == "longctx"}),
+      (30, 30, {"32k"}))
+check("the quick set is the same set every time",
+      [i.id for i in evalsuite.quick(evalsuite.build(evalsuite.SUITES,
+                                                      seed))],
+      [i.id for i in fast])
+
 sys.exit(t.done())

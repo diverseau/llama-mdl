@@ -36,7 +36,7 @@ IMAGE = "python:3.12-slim"
 USAGE = """\
 usage: mdl eval <name> [--suite code,tools,longctx,instruct,reason,custom]
                        [--limit N] [--resume] [--no-sandbox] [--estimate]
-                       [--think N] [--port N] [--json]
+                       [--quick] [--think N] [--port N] [--json]
        mdl eval --results [name]
 
 Runs a private, auto-graded suite against <name> the way models.toml
@@ -66,6 +66,10 @@ a crash, a closed laptop - continues with --resume, as long as the items
 and the server are the same ones; an item the server failed on (a
 dropped connection, an HTTP error) is retried, not scored as wrong.
 
+  --quick       thirty items: six from each suite, one to three from
+                each tier, no two from one task family, documents at
+                32k only. A look, not a result: mdl find and --compare
+                prefer a full run
   --limit N     only the first N items of each suite
   --resume      continue the interrupted run of these items on this server
   --no-sandbox  run model-written code directly, even if a container
@@ -1044,7 +1048,7 @@ def parse(args):
             o[a[2:]] = args[i + 1]
             i += 2
         elif a in ("--sandbox", "--estimate", "--json", "--results",
-                   "--compare", "--resume", "--no-sandbox"):
+                   "--compare", "--resume", "--no-sandbox", "--quick"):
             o[a[2:]] = True
             i += 1
         elif a.startswith("-"):
@@ -1130,6 +1134,10 @@ def main(args, out=None):
                                 custom_dir=custom_dir())
     except ValueError as e:
         die(str(e))
+    if o.get("quick"):
+        if "limit" in o:
+            die("--quick and --limit both choose the items; use one")
+        items = evalsuite.quick(items)
     if not items:
         die("nothing to run")
     if "think" in o:
@@ -1313,7 +1321,7 @@ def _finish(o, w, name, target, flags, build, mach, seed, items, done,
     failed save leaves the run resumable - and book its timings."""
     if not any("score" in r for r in done):
         die("no items finished; nothing saved")
-    full = ("limit" not in o
+    full = ("limit" not in o and not o.get("quick")
             and set(evalsuite.SUITES) <= set(pick_suites(o.get("suite"))))
     rec = {"at": time.strftime("%Y-%m-%d %H:%M"), "name": name,
            "model": str(target.model_path), "file": target.model_path.name,
@@ -1329,6 +1337,8 @@ def _finish(o, w, name, target, flags, build, mach, seed, items, done,
            "seed_id": evalsuite.seed_id(seed),
            "items_hash": evalsuite.fingerprint(items),
            "full": full,
+           "profile": "quick" if o.get("quick") else "limit"
+           if "limit" in o else "full",
            "think": {it.suite: it.think for it in items},
            "suites": summarize(done, "suite"),
            "tiers": summarize(done, "tier"),

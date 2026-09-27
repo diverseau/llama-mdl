@@ -9,6 +9,10 @@ Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
 - `mdl eval --think N`: one thinking budget for every reply; `--think 0`
   asks for no thinking. The budget is part of the item set, so runs at
   different budgets are refused by `--compare`, not subtracted.
+- `mdl eval --quick`: thirty items, six from each suite across every
+  tier, no two from one task family, long documents at 32k only. A
+  quick run is recorded as one, and `mdl find` and `--compare` prefer a
+  full run over it.
 
 ### Changed
 
