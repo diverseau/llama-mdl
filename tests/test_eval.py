@@ -39,6 +39,16 @@ again = evalsuite.build(evalsuite.SUITES, seed)
 check("the same seed gives the same items",
       [i.text()[:300] for i in items if i.suite != "longctx"],
       [i.text()[:300] for i in again if i.suite != "longctx"])
+frontier = [i for i in items if i.meta.get("tier") == "frontier"]
+check("each suite has its allotted frontier items",
+      {s: sum(i.suite == s for i in frontier) for s in evalsuite.SUITES},
+      evalsuite.FRONTIER)
+check("frontier items are deterministic, including hidden world data",
+      evalsuite.fingerprint(frontier),
+      evalsuite.fingerprint([i for i in again
+                             if i.meta.get("tier") == "frontier"]))
+check("frontier keeps the existing per-suite output caps",
+      all(i.max_tokens == evalsuite.CAP[i.suite] for i in frontier), True)
 check("another seed gives other items",
       [i.text() for i in evalsuite.build(["reason"], "other")]
       != [i.text() for i in by["reason"]], True)
@@ -144,7 +154,7 @@ cheats = {
                          "def %s(*a):\n    return \"no such answer\"\n",
 }
 for label, src in cheats.items():
-    for it in by["code"][:3]:
+    for it in by["code"][:3] + [i for i in frontier if i.suite == "code"][:1]:
         name = it.id.split("-", 2)[2]
         check("a submission that %s scores nothing (%s)" % (label, name),
               it.grade(R("```python\n%s```" % (src % name)), env)[0], 0.0)
@@ -157,6 +167,22 @@ check("the code block that defines the function wins",
       evalsuite.extract_code("```python\nprint(1)\n```\n```python\ndef f(x):"
                              "\n    return x\n```\n```\nf(2)\n```", "f"),
       "def f(x):\n    return x\n")
+frontier_code = [i for i in frontier if i.suite == "code"]
+check("a wrong frontier repair fails on hidden cases",
+      [i.grade(R("```python\ndef reconcile(events, keys):\n"
+                 "    return [None for key in keys]\n```"), env)[0] < 1.0
+       for i in frontier_code], [True] * len(frontier_code))
+quadratic = ("```python\ndef reconcile(events, keys):\n"
+             "    out = []\n    for key in keys:\n"
+             "        matches = [e for e in events if e['key'] == key]\n"
+             "        e = max(enumerate(matches), "
+             "key=lambda pair: (pair[1]['rev'], pair[0]))[1] "
+             "if matches else None\n"
+             "        out.append(e.get('value') if e and e['kind'] == "
+             "'put' else None)\n    return out\n```")
+score, why = frontier_code[0].grade(R(quadratic), evalrun.Env(timeout=3))
+check("a quadratic repair times out on the large hidden case",
+      (score, "timed out" in why), (0.0, True))
 
 # ============================================================= reason ===
 
@@ -165,6 +191,10 @@ ok = [it.grade(R("Let me work it out.\nAnswer: %s" % it.meta["answer"]),
 check("exact answers grade right", sum(ok), len(ok))
 check("and a wrong one does not",
       by["reason"][0].grade(R("Answer: 1234567"), env)[0], 0.0)
+frontier_reason = [i for i in frontier if i.suite == "reason"]
+check("solver-graded route puzzles reject a wrong total",
+      [i.grade(R("Answer: 999999"), env)[0] for i in frontier_reason],
+      [0.0] * len(frontier_reason))
 check("answers are read the way people write them",
       [evalsuite.same_answer(evalsuite.final_answer(x), w) for x, w in (
           ("so it is\n**Answer:** $1,250.", "1250"),
@@ -215,6 +245,8 @@ class Agent:
         seen = [json.loads(m["content"]) for m in messages
                 if m["role"] == "tool"]
         names = {t["function"]["name"] for t in tools}
+        if "list_queue" in names:
+            return self._frontier_queue(task, seen)
         return getattr(self, "_" + sorted(names)[0])(task, seen)
 
     @staticmethod
@@ -222,6 +254,34 @@ class Agent:
         return R(calls=[Call("c%d" % random.randint(0, 99999),  # the tools
                              tool, args, json.dumps(args))])    # takes a
                                                                 # `name` arg
+
+    def _frontier_queue(self, task, seen):
+        policy = next((s["minimum_amount"] for s in seen
+                       if "minimum_amount" in s), None)
+        if policy is None:
+            return self.call("get_policy")
+        pages = [s for s in seen if "ticket_ids" in s]
+        if not pages:
+            return self.call("list_queue", page=1)
+        if pages[-1]["next_page"]:
+            return self.call("list_queue", page=pages[-1]["next_page"])
+        ids = [ticket_id for page in pages for ticket_id in page["ticket_ids"]]
+        if seen[-1].get("error", "").startswith("temporary read"):
+            return self.call("get_ticket", ticket_id=seen[-1]["ticket_id"])
+        details = {s["ticket_id"]: s for s in seen if "category" in s}
+        for ticket_id in ids:
+            if ticket_id not in details:
+                return self.call("get_ticket", ticket_id=ticket_id)
+        if seen[-1].get("error", "").startswith("temporary write"):
+            return self.call("approve_ticket",
+                             ticket_id=seen[-1]["ticket_id"])
+        approved = {s["approved"] for s in seen if "approved" in s}
+        for ticket_id in ids:
+            ticket = details[ticket_id]
+            if (ticket["amount"] >= policy[ticket["category"]]
+                    and ticket_id not in approved):
+                return self.call("approve_ticket", ticket_id=ticket_id)
+        return R("The queue is reviewed.")
 
     def _book(self, task, seen):            # calendar
         need = int(re.search(r"(\d+)-minute", task).group(1))
@@ -422,9 +482,48 @@ check("a careful agent solves every multi-step item",
 check("every world is in the suite, the hard ones too",
       sorted({i.id.split("-", 2)[2] for i in multi}),
       ["calendar", "conflict", "files", "freeze", "incident", "ledger",
-       "namesake", "orders", "prices", "refund", "restock", "team"])
-check("most of the tools suite is worlds, and most of those are hard",
-      (len(multi), sum(i.meta["tier"] == "hard" for i in multi)), (18, 12))
+       "namesake", "orders", "prices", "queue", "refund", "restock", "team"])
+check("the old world mix remains and six frontier queues are added",
+      (len(multi), sum(i.meta["tier"] == "hard" for i in multi),
+       sum(i.meta["tier"] == "frontier" for i in multi)), (24, 12, 6))
+queue = [i for i in multi if i.meta["tier"] == "frontier"]
+check("a wrong no-op leaves every frontier queue unsolved",
+      [i.grade(R("done"), env, i.world())[0] for i in queue],
+      [0.0] * len(queue))
+world = queue[0].world()
+ids = [ticket_id for page in range(1, 5)
+       for ticket_id in world.call("list_queue", {"page": page})["ticket_ids"]]
+check("a frontier queue has enough dependent calls and retriable errors",
+      (len(ids), "error" in world.call("get_ticket", {"ticket_id": ids[3]}),
+       "category" in world.call("get_ticket", {"ticket_id": ids[3]}),
+       queue[0].meta["turns"] >= 30),
+      (12, True, True, True))
+wrong_world = queue[0].world()
+wrong_world.call("get_policy", {})
+wrong_world.call("get_ticket", {"ticket_id": ids[0]})
+wrong_world.call("approve_ticket", {"ticket_id": ids[0]})
+check("blind approval changes the final state and loses credit",
+      (wrong_world.tickets[ids[0]]["state"],
+       queue[0].grade(R("done"), env, wrong_world)[0]),
+      ("approved", 0.0))
+played = []
+
+
+def counted_queue():
+    w = queue[0].world()
+    played.append(w)
+    return w
+
+
+sample = evalsuite.Item("tools", queue[0].id, queue[0].prompt,
+                        queue[0].grade, queue[0].system, queue[0].tools,
+                        world=counted_queue, meta=queue[0].meta)
+check("the frontier reference finishes in 20-40 calls with retries",
+      (evalrun.run_item(Agent(), sample, env)["score"],
+       20 <= len(played[0].log) <= 40,
+       played[0].read_attempts[ids[3]],
+       played[0].write_attempts[ids[7]]),
+      (1.0, True, 2, 2))
 
 
 class Hasty(Agent):
@@ -565,11 +664,12 @@ SINK = (
     + " ".join(evalsuite.WEEKDAYS) + "\n")
 
 worst = {}
+frontier_accidents = []
 for it in [i for i in items if i.suite != "code"]:
     asked = it.text(4.0) if it.suite == "longctx" else it.text()
     junk = {"nothing": "", "a guess": "Answer: 42",
             "the question back": asked[-500:], "everything at once": SINK}
-    if not it.id.endswith("-7"):
+    if not it.meta.get("unanswerable"):
         # the one question the document does not answer is *meant* to be
         # passed by a refusal, so it is the one item that is not probed
         # with one; every other item must score nothing for it
@@ -578,9 +678,13 @@ for it in [i for i in items if i.suite != "code"]:
     for label, text in junk.items():
         got = (it.grade(R(text), env, world) if it.world
                else it.grade(R(text), env))[0]
+        if it.meta.get("tier") == "frontier" and got:
+            frontier_accidents.append((it.id, label, got))
         if got > worst.get(label, (-1, ""))[0]:
             worst[label] = (got, it.id)
 
+check("no frontier grader pays a zero-knowledge reply",
+      frontier_accidents, [])
 check("no reply that knows nothing is ever paid in full",
       sorted(k for k, (v, _) in worst.items() if v >= 0.5), [])
 check("and saying nothing is worth nothing anywhere",
@@ -602,12 +706,24 @@ doc = lc.text(4.0)
 check("a document is about the size asked for",
       0.95 * 30000 * 4 < len(doc) < 1.05 * 30000 * 4 + 3000, True)
 planted = [i for i in by["longctx"]
-           if not i.id.endswith(("-5", "-6", "-7"))]
+           if i.id.rsplit("-", 1)[-1] in ("0", "1", "2", "3", "4")]
 check("and every planted answer is in its document",
       all(i.meta["answer"] in i.text(4.0) for i in planted), True)
-check("eight questions per length, three lengths",
+check("eleven questions per length, three lengths",
       (sorted({i.meta["doc"] for i in by["longctx"]}), len(by["longctx"])),
-      (["128k", "32k", "64k"], 24))
+      (["128k", "32k", "64k"], 33))
+frontier_ctx = [i for i in frontier if i.suite == "longctx"]
+check("frontier document answers are solvable and a wrong answer fails",
+      [(i.grade(R("The answer is %s" % i.meta["answer"]), env)[0],
+        i.grade(R("Answer: 999999"), env)[0])
+       for i in frontier_ctx if i.meta["kind"] == "floor"],
+      [(1.0, 0.0)] * 6)
+missing_code = [i for i in frontier_ctx if i.meta["kind"] == "missing"]
+check("the missing-code question needs the right record, not a refusal",
+      [(i.grade(R(i.meta["answer"]), env)[0],
+        i.grade(R("NONE"), env)[0],
+        i.grade(R("I don't know"), env)[0]) for i in missing_code],
+      [(1.0, 0.0, 0.0)] * 3)
 count = [i for i in by["longctx"] if i.id.endswith("-5")][0]
 check("the counting question counts what the document really says",
       (count.meta["tier"],
@@ -866,6 +982,13 @@ check("and fail what they forbid", [
 check("no item pairs rules that cannot both be kept",
       all(tuple(i.id.split("-")[2:4]) not in evalsuite.CLASH
           for i in by["instruct"] if i.id.count("-") == 3), True)
+frontier_format = [i for i in frontier if i.suite == "instruct"]
+check("a generated report passes every interacting format constraint",
+      [i.grade(R(i.meta["reference"]), env)[0] for i in frontier_format],
+      [1.0] * len(frontier_format))
+check("a report with a wrong checksum fails",
+      [i.grade(R(i.meta["reference"] + "0"), env)[0]
+       for i in frontier_format], [0.0] * len(frontier_format))
 
 # ============================================================= custom ===
 
@@ -1038,6 +1161,14 @@ check("a run that was sampled says the interval is not over runs",
 check("the report shows scores, skips and misses",
       [s in out.getvalue() for s in ("0.50", "skipped", "miss")],
       [True, True, True])
+tier_rows = [dict(res[0], tier="base"), dict(res[1], tier="hard"),
+             dict(res[0], tier="frontier")]
+tier_report = io.StringIO()
+evalrun.report(dict(rec, tiers=evalrun.summarize(tier_rows, "tier")),
+               tier_report.write)
+check("the report gives frontier its own score and cap count",
+      all("  %-13s" % tier in tier_report.getvalue()
+          for tier in ("base", "hard", "frontier")), True)
 check("the file hash reads the ends, not the whole file",
       len(evalrun.file_hash(Path(__file__))), 16)
 spend = [{"at": "2026-01-01 00:00", "hash": "h1", "items": [
@@ -1072,6 +1203,10 @@ check("and a gap inside the noise is not",
 out = io.StringIO()
 evalrun.compare(good, dict(poor, items_hash="other"), out.write)
 check("runs on different questions are refused, not compared",
+      "not comparable" in out.getvalue(), True)
+out = io.StringIO()
+evalrun.compare(good, dict(poor, suite_version=1), out.write)
+check("an older suite version is refused even with a matching item hash",
       "not comparable" in out.getvalue(), True)
 check("what a model spent last time beats a constant, per suite",
       (evalrun.spent("h1", spend), evalrun.spent("nope", spend)),

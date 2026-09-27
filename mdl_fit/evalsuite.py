@@ -34,7 +34,7 @@ from pathlib import Path
 
 from . import hw
 
-SUITE_VERSION = 4
+SUITE_VERSION = 5
 # Bump when a grader changes what it pays for, without the questions
 # changing: scores either side of it are not the same measurement.
 # 2: the code grader stopped reading the harness's stdout and exit code.
@@ -42,8 +42,10 @@ GRADER_VERSION = 2
 SUITES = ("code", "tools", "longctx", "instruct", "reason")
 DOMAIN = {"code": "coding", "tools": "agentic", "longctx": "long-context",
           "instruct": "general", "reason": "reasoning", "custom": "general"}
-SIZE = {"code": 40, "tools": 30, "longctx": 24, "instruct": 20,
-        "reason": 20}
+SIZE = {"code": 46, "tools": 36, "longctx": 33, "instruct": 26,
+        "reason": 26}
+FRONTIER = {"code": 6, "tools": 6, "longctx": 9, "instruct": 6,
+            "reason": 6}
 # max_tokens per request. A thinking model spends most of it thinking; a
 # reply that hits the cap is graded as it stands and counted as capped.
 CAP = {"code": 6144, "tools": 3072, "longctx": 2048, "instruct": 3072,
@@ -1376,10 +1378,84 @@ def _splitter(rng):
         cases.append(["".join(rng.choice(alphabet) for _ in range(n))])
     return ("split_line", prompt, src, cases)
 
+def _repair_index(rng):
+    """Repair a two-function revision index. A large case rejects scans
+    for each query as well as exercising ties and tombstones."""
+    keys = ["%s-%04d" % (rng.choice(WORDS), i) for i in range(30000)]
+    later_wins = rng.choice([True, False])
+    starter = (
+        "def _newest(events):\n"
+        "    index = {}\n"
+        "    for event in events:\n"
+        "        if event['kind'] == 'delete':\n"
+        "            continue\n"
+        "        key = event['key']\n"
+        "        if key not in index or event['rev'] > index[key]['rev']:\n"
+        "            index[key] = event\n"
+        "    return index\n\n"
+        "def reconcile(events, keys):\n"
+        "    index = _newest(events)\n"
+        "    return [index.get(key, {}).get('value') for key in keys]\n")
+    src = (
+        "def _newest(events):\n"
+        "    index = {}\n"
+        "    for event in events:\n"
+        "        key = event['key']\n"
+        "        if key not in index or event['rev'] %s index[key]['rev']:\n"
+        "            index[key] = event\n"
+        "    return index\n\n"
+        "def reconcile(events, keys):\n"
+        "    index = _newest(events)\n"
+        "    return [index[key]['value'] if key in index and "
+        "index[key]['kind'] == 'put' else None for key in keys]\n"
+        % (">=" if later_wins else ">"))
+    a, b, c = keys[:3]
+
+    def ev(key, rev, kind="put", value=None):
+        row = {"key": key, "rev": rev, "kind": kind}
+        if kind == "put":
+            row["value"] = value
+        return row
+
+    cases = [
+        [[], [a]],
+        [[ev(a, 1, value="old"), ev(a, 1, value="new")], [a]],
+        [[ev(a, 3, value="high"), ev(a, 2, value="low")], [a]],
+        [[ev(a, 4, value="x"), ev(a, 4, "delete")], [a, b]],
+        [[ev(a, 4, "delete"), ev(a, 4, value="back")], [a]],
+        [[ev(a, 8, value=None), ev(b, 3, value=0)], [a, b, c]],
+        [[ev(a, 8, value="keep"), ev(a, 7, "delete")], [a]],
+    ]
+    for _ in range(8):
+        events = [ev(rng.choice(keys[:12]), rng.randint(0, 6),
+                     rng.choice(["put", "put", "delete"]),
+                     rng.choice([None, 0, "ok", "changed"]))
+                  for _ in range(40)]
+        cases.append([events, rng.sample(keys[:15], 12)])
+    large = [ev(key, i % 7, value=i) for i, key in enumerate(keys)]
+    cases.append([large, keys])
+    prompt = (
+        "Fix the bugs in this existing Python module. Return the full "
+        "corrected module, keeping both `_newest` and `reconcile`. "
+        "Each event has `key` (str), `rev` (non-negative int), and `kind` "
+        "(`put` or `delete`). A put also has `value`, which may itself be "
+        "None. For each key, the event with the greatest revision wins; "
+        "if revisions tie, the event appearing %s in the input wins. "
+        "`reconcile(events, keys)` returns one value per requested key "
+        "in order, or None when the latest event is a delete or the key "
+        "is absent. Inputs can contain tens of thousands of events and "
+        "keys, so build the index once and use it for every lookup. "
+        "Example keys in this workload include `%s` and `%s`.\n\n"
+        "```python\n%s```" % ("later" if later_wins else "earlier",
+                              a, b, starter))
+    return "reconcile", prompt, src, cases
+
+
 def gen_code(rng):
     items, order = [], {}
-    n_hard = round(SIZE["code"] * HARD_SHARE)
-    tiers = ["hard"] * n_hard + ["base"] * (SIZE["code"] - n_hard)
+    old_size = SIZE["code"] - FRONTIER["code"]
+    n_hard = round(old_size * HARD_SHARE)
+    tiers = ["hard"] * n_hard + ["base"] * (old_size - n_hard)
     rng.shuffle(tiers)
     for i, tier in enumerate(tiers):
         if tier == "base":
@@ -1397,6 +1473,16 @@ def gen_code(rng):
                     "code block; do not include tests or example usage.",
                     _grade_code(name, cases, want))
         item.meta.update(reference=src, tier=tier)
+        items.append(item)
+    for i in range(FRONTIER["code"]):
+        name, prompt, src, cases = _repair_index(rng)
+        item = Item("code", "code-%02d-repair" % (old_size + i),
+                    prompt + " Reply in one ```python code block without "
+                    "tests or example usage.",
+                    _grade_code(name, cases, expected(src, name, cases)))
+        item.meta.update(reference=src, tier="frontier",
+                         cases_hash=hashlib.sha256(json.dumps(cases).encode())
+                         .hexdigest()[:12])
         items.append(item)
     return items
 
@@ -2650,6 +2736,124 @@ HARD_WORLDS = [_world_refund, _world_restock, _world_incident, _world_team,
 WORLDS = [_world_orders, _world_prices, _world_files, _world_calendar]
 
 
+class Queue(World):
+    """Paged review queue with a policy fetched separately and transient
+    read and write errors. Only the final ticket state earns credit."""
+
+    tools = ("list_queue", "get_policy", "get_ticket", "approve_ticket",
+             "search_people", "get_metrics", "export_queue")
+    schemas = [
+        _fn("list_queue", "One page of ticket ids; follow next_page.",
+            {"page": _i("Page number, starting at 1")}, ["page"]),
+        _fn("get_policy", "Current approval limits by category.", {}),
+        _fn("get_ticket", "Read a ticket's category, amount and state.",
+            {"ticket_id": _s("Ticket id from the queue")}),
+        _fn("approve_ticket", "Approve one open ticket. This action does "
+            "not enforce the policy.",
+            {"ticket_id": _s("Ticket id")}),
+        _fn("search_people", "Search the staff directory.",
+            {"query": _s("Name fragment")}),
+        _fn("get_metrics", "Summary dashboard for the queue.", {}),
+        _fn("export_queue", "Export queue data as CSV.", {})]
+
+    def __init__(self, tickets, limits, transient_reads, transient_write):
+        super().__init__()
+        self.tickets = copy.deepcopy(tickets)
+        self.limits = dict(limits)
+        self.transient_reads = set(transient_reads)
+        self.transient_write = transient_write
+        self.read_attempts = {}
+        self.write_attempts = {}
+        self.policy_seen = False
+        self.read = set()
+
+    def t_list_queue(self, page):
+        if type(page) is not int or not 1 <= page <= 4:
+            return {"error": "page must be 1 through 4"}
+        ids = list(self.tickets)[(page - 1) * 3:page * 3]
+        return {"ticket_ids": ids, "next_page": page + 1 if page < 4
+                else None}
+
+    def t_get_policy(self):
+        self.policy_seen = True
+        return {"minimum_amount": dict(self.limits)}
+
+    def t_get_ticket(self, ticket_id):
+        if ticket_id not in self.tickets:
+            return {"error": "unknown ticket"}
+        n = self.read_attempts.get(ticket_id, 0) + 1
+        self.read_attempts[ticket_id] = n
+        if ticket_id in self.transient_reads and n == 1:
+            return {"error": "temporary read failure; retry",
+                    "ticket_id": ticket_id}
+        self.read.add(ticket_id)
+        return dict(self.tickets[ticket_id], ticket_id=ticket_id)
+
+    def t_approve_ticket(self, ticket_id):
+        ticket = self.tickets.get(ticket_id)
+        if ticket is None:
+            return {"error": "unknown ticket"}
+        if not self.policy_seen or ticket_id not in self.read:
+            return {"error": "fetch policy and ticket before approval"}
+        if ticket["state"] != "open":
+            return {"error": "ticket is not open"}
+        n = self.write_attempts.get(ticket_id, 0) + 1
+        self.write_attempts[ticket_id] = n
+        if ticket_id == self.transient_write and n == 1:
+            return {"error": "temporary write failure; retry",
+                    "ticket_id": ticket_id}
+        ticket["state"] = "approved"
+        return {"approved": ticket_id}
+
+    def t_search_people(self, query):
+        return {"people": []}
+
+    def t_get_metrics(self):
+        return {"open": sum(t["state"] == "open"
+                            for t in self.tickets.values())}
+
+    def t_export_queue(self):
+        return {"queued": True}
+
+
+def _world_queue(rng):
+    limits = {c: rng.randint(40, 90) for c in ("field", "office", "lab")}
+    ids = ["TK-%05d" % n for n in rng.sample(range(10000, 99999), 12)]
+    tickets = {}
+    for i, ticket_id in enumerate(ids):
+        category = rng.choice(list(limits))
+        margin = rng.randint(5, 30)
+        amount = limits[category] + margin if i % 2 else limits[category] - margin
+        tickets[ticket_id] = {"category": category, "amount": amount,
+                              "state": "open"}
+    transient_reads = [ids[3], ids[8]]
+    transient_write = ids[7]
+    eligible = {k for k, t in tickets.items()
+                if t["amount"] >= limits[t["category"]]}
+    key = hashlib.sha256(json.dumps([tickets, limits], sort_keys=True)
+                         .encode()).hexdigest()[:12]
+
+    def grade(reply, env, world):
+        approved = {k for k, t in world.tickets.items()
+                    if t["state"] == "approved"}
+        if not approved:
+            return 0.0, "approved none of %d" % len(eligible)
+        if approved - eligible:
+            return 0.0, "approved an ineligible ticket"
+        score = len(approved) / len(eligible)
+        return score, "ok" if score == 1.0 else "approved %d of %d" % (
+            len(approved), len(eligible))
+
+    return ("Review the entire paged queue. Fetch the current policy and "
+            "each ticket's details. Approve every open ticket whose amount "
+            "meets or exceeds the minimum for its category, and leave all "
+            "other tickets open. Some reads or writes may return temporary "
+            "errors; retry those calls. Finish only after the queue is in "
+            "the requested state.",
+            lambda: Queue(tickets, limits, transient_reads, transient_write),
+            Queue.schemas, grade, 40, key)
+
+
 def gen_tools(rng):
     # Single calls were eighteen of thirty in v3, and a 35B coder at 3 bits
     # passed every base one: a suite most of which everything passes ranks
@@ -2657,7 +2861,7 @@ def gen_tools(rng):
     # are hard.
     items = []
     n_multi = 18
-    n_single = SIZE["tools"] - n_multi
+    n_single = SIZE["tools"] - FRONTIER["tools"] - n_multi
     for i in range(n_single):
         if i % 6 == 5:                          # a request no tool fits
             offered = rng.sample(["get_weather", "get_stock_price",
@@ -2703,6 +2907,12 @@ def gen_tools(rng):
         items.append(Item("tools", "tools-%02d-%s" % (
             n_single + j, maker.__name__[7:]), prompt, grade, AGENT,
             schemas, world=world, meta=meta))
+    for i in range(FRONTIER["tools"]):
+        prompt, world, schemas, grade, turns, key = _world_queue(rng)
+        items.append(Item("tools", "tools-%02d-queue" % (n_single + n_multi + i),
+                          prompt, grade, AGENT, schemas, world=world,
+                          meta={"tier": "frontier", "turns": turns,
+                                "world_key": key}))
     return items
 
 
@@ -2880,6 +3090,17 @@ def _absent_answer(question):
     return grade
 
 
+def _missing_code(want):
+    """Identifying the missing record requires reading all nearby codes;
+    a generic refusal has no record id and earns nothing."""
+    def grade(reply, env, world=None):
+        said = _said(reply)
+        if re.fullmatch(re.escape(want), said, re.I):
+            return 1.0, "ok"
+        return 0.0, "wanted %s, got %.60r" % (want, said)
+    return grade
+
+
 def _contains(want):
     def grade(reply, env, world=None):
         said = _said(reply)
@@ -2981,6 +3202,49 @@ def gen_longctx(rng):
                           "if the records do not give it." % projects[11],
                           "", "absent"))
         tiers.append("hard")
+        # Each consignment reaches a floor only through its bundle, clerk
+        # and room. Similar ids and codes for other consignments make a
+        # nearby match an unsafe shortcut.
+        prefix = _code_word(rng)
+        consignments = ["%s-%02d" % (prefix, i) for i in range(8)]
+        bundles = ["B%s-%02d" % (prefix, i) for i in range(8)]
+        clerks = rng.sample(share, 3) + rng.sample(share, 1)
+        clerks += rng.sample([s for s in staff if s not in share], 3)
+        clerks.append(rng.choice([s for s in staff if s not in share]))
+        rng.shuffle(clerks)
+        crates = [rng.randint(7, 48) for _ in consignments]
+        for i, (con, bundle, clerk, count) in enumerate(zip(
+                consignments, bundles, clerks, crates, strict=True)):
+            for sentence in (
+                    "Consignment %s belongs to bundle %s." % (con, bundle),
+                    "Bundle %s is filed by %s." % (bundle, clerk),
+                    "Consignment %s carries %d crates." % (con, count)):
+                facts.append((rng.random(), sentence))
+            if i < 7:
+                facts.append((rng.random(),
+                              "Authorization code for consignment %s is %s."
+                              % (con, _code_word(rng))))
+        total = sum(n for s, n in zip(clerks, crates, strict=True)
+                    if floors[s] == hot)
+        questions.append((
+            "How many crates in total are carried by all consignments "
+            "whose filing clerk works on floor %d? Follow each bundle, "
+            "clerk and room. Reply with just the number." % hot,
+            str(total), "floor"))
+        tiers.append("frontier")
+        target_i = rng.randrange(8)
+        questions.append((
+            "Which floor does the filing clerk for consignment %s work "
+            "on? Follow the bundle and room. Reply with just the floor "
+            "number." % consignments[target_i],
+            str(floors[clerks[target_i]]), "floor"))
+        tiers.append("frontier")
+        questions.append((
+            "One consignment has no authorization code recorded. Which "
+            "one? Reply exactly `<consignment id>: NONE`, with the id "
+            "of that consignment.", consignments[-1] + ": NONE",
+            "missing"))
+        tiers.append("frontier")
         doc_seed = rng.random()
         cache = {}
 
@@ -3001,10 +3265,12 @@ def gen_longctx(rng):
                         _set_answer(want.split(", "), STAFF)
                         if kind == "set"
                         else _absent_answer(q) if kind == "absent"
+                        else _missing_code(want) if kind == "missing"
                         else _floor_answer(want) if kind == "floor"
                         else _contains(want))
             item.meta.update(doc=label, tokens=target, answer=want,
-                             tier=tiers[k])
+                             tier=tiers[k], kind=kind,
+                             unanswerable=kind == "absent")
             items.append(item)
     return items
 
@@ -3216,10 +3482,44 @@ HARD_LEX_CLASH = {("lower", "acrostic"), ("lower", "typed_json"),
                   ("starts", "lipogram")}
 
 
+def _frontier_format(rng):
+    """Several dependent format rules with one generated valid answer."""
+    names = rng.sample(WORDS, 4)
+    rows = [(name, rng.randint(2, 19)) for name in names]
+    factor, offset = rng.randint(3, 7), rng.randint(1, 9)
+    ordered = sorted(rows, key=lambda row: (-row[1], row[0]))
+    totals = [n * factor + offset for _, n in ordered]
+    answer = "\n".join(
+        ["RANK,ITEM,TOTAL"] +
+        ["%d,%s,%d" % (i, name.upper(), total)
+         for i, ((name, _), total) in enumerate(
+             zip(ordered, totals, strict=True), 1)] +
+        ["CHECKSUM,,%d" % sum(totals)])
+    prompt = (
+        "Write only a six-line CSV report, with no code fence or prose. "
+        "Line 1 must be exactly `RANK,ITEM,TOTAL`. Lines 2-5 contain the "
+        "four input records sorted by UNITS descending (break ties by "
+        "ITEM alphabetically). For each record, use a one-based rank, "
+        "the ITEM in uppercase, and TOTAL = UNITS * %d + %d. Use exactly "
+        "three comma-separated fields and no spaces on every line. "
+        "Line 6 must be `CHECKSUM,,N`, with N the sum of the four TOTAL "
+        "values. Preserve the header's capitalization. Input records:\n%s"
+        % (factor, offset, "\n".join("%s %d" % row for row in rows)))
+    return prompt, answer
+
+
+def _grade_frontier_format(want):
+    def grade(reply, env, world=None):
+        got = (reply.content or "").rstrip("\r\n")
+        return (1.0, "ok") if got == want else (0.0, "wrong report")
+    return grade
+
+
 def gen_instruct(rng):
     items = []
-    n_hard = round(SIZE["instruct"] * HARD_SHARE)
-    tiers = ["hard"] * n_hard + ["base"] * (SIZE["instruct"] - n_hard)
+    old_size = SIZE["instruct"] - FRONTIER["instruct"]
+    n_hard = round(old_size * HARD_SHARE)
+    tiers = ["hard"] * n_hard + ["base"] * (old_size - n_hard)
     rng.shuffle(tiers)
     for i, tier in enumerate(tiers):
         while True:
@@ -3244,6 +3544,12 @@ def gen_instruct(rng):
             i, sk + "-" if sk else "", lk, "-" + hk if hk else ""),
             prompt, _grade_rules(rules, prompt))
         item.meta["tier"] = tier
+        items.append(item)
+    for i in range(FRONTIER["instruct"]):
+        prompt, answer = _frontier_format(rng)
+        item = Item("instruct", "instruct-%02d-report" % (old_size + i),
+                    prompt, _grade_frontier_format(answer))
+        item.meta.update(tier="frontier", reference=answer)
         items.append(item)
     return items
 
@@ -3689,6 +3995,54 @@ def _grade_answer(want):
     return grade
 
 
+def _route_minimum(labels, costs, before, closed):
+    """Exhaust the small route space; the grader derives the answer from
+    the generated graph and constraints instead of trusting a stored key."""
+    best = None
+    for path in itertools.permutations(labels):
+        places = {name: i for i, name in enumerate(path)}
+        if any(places[a] >= places[b] for a, b in before):
+            continue
+        route = ("DEPOT",) + path + (("DEPOT",) if closed else ())
+        cost = sum(costs[a][b] for a, b in itertools.pairwise(route))
+        best = cost if best is None else min(best, cost)
+    return best
+
+
+def _frontier_route(rng):
+    labels = rng.sample(["Aster", "Birch", "Cedar", "Dune", "Elm",
+                         "Fjord", "Grove", "Haven", "Iris"], 5)
+    nodes = ["DEPOT"] + labels
+    costs = {a: {b: rng.randint(3, 28) for b in nodes if b != a}
+             for a in nodes}
+    before = [(labels[0], labels[3]), (labels[1], labels[4])]
+    closed = rng.choice([True, False])
+    lines = ["from/to " + " ".join(nodes)]
+    for a in nodes:
+        lines.append("%s %s" % (a, " ".join(
+            "-" if a == b else str(costs[a][b]) for b in nodes)))
+    prompt = (
+        "A courier leaves DEPOT and must visit each of %s exactly once%s. "
+        "Travel times are directed: use the row for the place you leave "
+        "and the column for the place you reach. The table gives minutes. "
+        "%s must be visited before %s, and %s before %s. Among all valid "
+        "routes, what is the smallest total travel time?\n%s"
+        % (", ".join(labels), " and return to DEPOT" if closed else "",
+           before[0][0], before[0][1], before[1][0], before[1][1],
+           "\n".join(lines)))
+    return prompt, labels, costs, before, closed
+
+
+def _grade_route(labels, costs, before, closed):
+    def grade(reply, env, world=None):
+        want = _route_minimum(labels, costs, before, closed)
+        got = final_answer(reply.content)
+        if same_answer(got, str(want)):
+            return 1.0, "ok"
+        return 0.0, "answered %r, wanted %s" % ((got or "")[:40], want)
+    return grade
+
+
 # Most of the suite is the harder tier: the single-step templates alone
 # put every competent model at the ceiling, where nothing can be told
 # apart. HARD_SHARE of the items are multi-step.
@@ -3697,8 +4051,9 @@ HARD_SHARE = 0.6
 
 def gen_reason(rng):
     items, order = [], {}
-    n_hard = round(SIZE["reason"] * HARD_SHARE)
-    tiers = ["hard"] * n_hard + ["base"] * (SIZE["reason"] - n_hard)
+    old_size = SIZE["reason"] - FRONTIER["reason"]
+    n_hard = round(old_size * HARD_SHARE)
+    tiers = ["hard"] * n_hard + ["base"] * (old_size - n_hard)
     rng.shuffle(tiers)
     for i, tier in enumerate(tiers):
         if tier == "base":
@@ -3715,6 +4070,14 @@ def gen_reason(rng):
                     q + " End your reply with a line of the form "
                     "'Answer: <answer>'.", _grade_answer(want))
         item.meta.update(answer=want, tier=tier)
+        items.append(item)
+    for i in range(FRONTIER["reason"]):
+        q, labels, costs, before, closed = _frontier_route(rng)
+        want = _route_minimum(labels, costs, before, closed)
+        item = Item("reason", "reason-%02d-route" % (old_size + i),
+                    q + " End with 'Answer: <number>'.",
+                    _grade_route(labels, costs, before, closed))
+        item.meta.update(answer=str(want), tier="frontier")
         items.append(item)
     return items
 

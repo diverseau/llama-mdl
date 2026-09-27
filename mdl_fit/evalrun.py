@@ -41,17 +41,18 @@ usage: mdl eval <name> [--suite code,tools,longctx,instruct,reason,custom]
 Runs a private, auto-graded suite against <name> the way models.toml
 runs it - starting it if it is not running - and stores the scores:
 
-  code      40  functions, graded by hidden unit tests that are executed
-  tools     30  tool calls, single and multi-step against mock worlds,
-                one of them paged and a dozen calls long
-  longctx   24  retrieval, multi-hop, counting, finding every match, and
-                one question the document does not answer, at 32k/64k/128k
-  instruct  20  checkable format rules
-  reason    20  exact-answer maths and logic
+  code      46  functions and bug repairs, graded by executed hidden tests
+  tools     36  single and multi-step calls against mock worlds, including
+                paged queues with temporary errors
+  longctx   33  retrieval, multi-hop, aggregation and missing answers
+                at 32k/64k/128k
+  instruct  26  checkable format rules and constrained reports
+  reason    26  exact-answer maths, logic and solver-checked routes
   custom        your own tasks, from ~/.config/mdl/evals/*.toml
 
-Three of every five items are the harder tier, scored separately, and
-code and format items are marked in parts rather than all or nothing.
+Base, hard and frontier items are scored separately. Frontier adds harder
+tasks without raising the per-suite reply token caps. Existing code and
+format items can earn part marks; frontier reports require a full answer.
 
 The items are generated from a seed kept in ~/.config/mdl/eval-seed, so
 they exist on this machine only. Model-written code runs in a throwaway
@@ -845,6 +846,9 @@ def verdict(lo, hi, a, b):
 
 def compare(a, b, w):
     """Two runs, item by item, with a verdict that survives the noise."""
+    if a.get("suite_version") != b.get("suite_version"):
+        w("note     different suite versions; the two runs are not comparable\n")
+        return None
     if a.get("items_hash") != b.get("items_hash"):
         w("note     different item sets; the two runs are not comparable\n")
         return None
