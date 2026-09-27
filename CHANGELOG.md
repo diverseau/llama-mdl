@@ -13,6 +13,26 @@ Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
   config has changed since it started. `mdl tui`'s edit form and the
   page read what is typed through the same code.
 
+### Security
+
+- `mdl pull` on Windows would write a file the Hub listed at a drive
+  path (`C:/...`, `C:x`) there, outside the models folder: the check for
+  unsafe paths caught `..` and a leading slash but not a drive. Any
+  path with a drive, share or root is now refused, on every OS.
+- A GGUF header with arrays nested thousands deep crashed `mdl fit`,
+  `mdl pull` and `mdl find` with a traceback; one claiming billions of
+  layers made them try to allocate lists that long. Both are now
+  refused as not a GGUF, in one line - including headers read from a
+  Hub repo.
+
+### Fixed
+
+- A quick hardware probe (`mdl manifest`, `mdl fit calibrate`, `mdl
+  lab`, `mdl eval`) with no nvidia-smi reported the backend as CPU on an
+  AMD, Intel or Apple GPU. It now takes the backend a full probe booked
+  for the binary, or the one its libraries are built for, so Vulkan's
+  4 GiB single-allocation limit is applied.
+
 ## [0.13.0] - 2026-09-26
 
 Getting started, made shorter: from installing to a model answering.

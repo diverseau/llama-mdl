@@ -222,8 +222,19 @@ try:
     hw.nvidia = lambda: []
     hw.llama_devices = lambda binary: []
     m = hw.probe(str(binary), quick=True)
+    check("with no nvidia-smi a quick probe keeps the backend booked "
+          "(an AMD, Intel or Apple GPU)", m.backend, "Vulkan")
+    (TMP / "vk").mkdir()
+    (TMP / "vk" / "llama-server").write_text("")
+    (TMP / "vk" / "ggml-vulkan.dll").write_text("")
+    m = hw.probe(str(TMP / "vk" / "llama-server"), quick=True)
+    check("or the one its libraries are built for", m.backend, "Vulkan")
+    (TMP / "none").mkdir()
+    (TMP / "none" / "llama-server").write_text("")
+    m = hw.probe(str(TMP / "none" / "llama-server"), quick=True)
     check("with no GPU at all it is a CPU machine, planned at idle",
-          (m.backend, m.vram_total, m.plan), ("CPU", 0, "idle"))
+          (m.backend, m.vram_total, m.plan),
+          ("Metal" if sys.platform == "darwin" else "CPU", 0, "idle"))
     writes, real_update = [], hw.update
     hw.update = lambda change, busy_ok=False: (
         writes.append(1), real_update(change, busy_ok))[1]

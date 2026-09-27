@@ -173,8 +173,8 @@ def cpu_cores():
         physical = len(cores) or None
         base = Path("/sys/devices/system/cpu")
         for d in base.glob("cpu[0-9]*/cpufreq/cpuinfo_max_freq"):
-            classes[d.read_text().strip()] = classes.get(
-                d.read_text().strip(), 0) + 1
+            freq = d.read_text().strip()
+            classes[freq] = classes.get(freq, 0) + 1
         perf = None
         if len(classes) > 1 and physical:
             top = max(classes, key=int)
@@ -441,6 +441,13 @@ def probe(binary="llama-server", quick=False, now=False):
                   vram_free=free)
     elif gpus:
         kw["backend"] = backend_for(binary, saved)
+    else:
+        # no nvidia-smi: an AMD, Intel or Apple GPU, or none. What a
+        # probe booked or the libraries say still holds; backend_for's
+        # last resort of CUDA does not, with no NVIDIA card to run it on
+        guess = backend_for(binary, saved)
+        if guess != "CUDA":
+            kw["backend"] = guess
     total, avail = ram()
     kw.update(ram_total=total or 0, ram_avail=avail or 0,
               cores=cpu_cores())
@@ -536,16 +543,6 @@ def backend_for(binary, saved=None):
         return "CPU"            # its ggml libraries, and none for a GPU
     # nothing beside it: a static build, as Metal ones usually are
     return "Metal" if sys.platform == "darwin" else "CUDA"
-
-
-def _guess_backend(binary):
-    here = Path(shutil.which(binary) or binary).parent
-    names = " ".join(p.name.lower() for p in here.glob("*ggml*"))
-    for key, name in (("cuda", "CUDA"), ("vulkan", "Vulkan"),
-                      ("hip", "ROCm"), ("metal", "Metal")):
-        if key in names:
-            return name
-    return "CUDA"
 
 
 def record_bench(values):
