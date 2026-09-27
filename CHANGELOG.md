@@ -7,12 +7,25 @@ Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
 ### Added
 
 - `mdl eval` adds a frontier tier above base and hard, reported separately
-  across all five suites. It includes generated bug repairs with large
-  hidden cases, paged tool worlds with transient failures and a checked
-  final state, scattered long-context aggregation and absent answers,
-  interacting report constraints, and solver-checked route puzzles. The
-  existing per-suite reply token caps stay in place. Suite version 5
-  prevents comparisons with older item sets.
+  across all five suites: three task families per suite, two items each
+  (longctx: three questions per document). Code: a multi-bug ledger
+  repair, a pair count that needs an O(n log n) rewrite, and interval set
+  algebra with open and closed ends, graded all or nothing with large
+  hidden cases. Tools: a cursor-paged review queue with rule precedence
+  and transient errors, a depot transfer against reserved stock, and a
+  duplicate-charge refund whose policy, currency, fee and rate all have
+  to be looked up, each with a tempting wrong tool. Long context:
+  aggregation and linked lookups through bundles that are refiled later
+  in the document, and a missing record. Format: a grouped CSV report, a
+  text under five simultaneous rules, and a JSON regroup. Reasoning: a
+  directed route, a pruned logic grid, and an inclusion-exclusion count.
+  Per-suite reply token caps are unchanged. Suite version 6 prevents
+  comparisons with older item sets.
+
+### Fixed
+
+- `mdl eval`: a base format item could be a lone "no more than N words"
+  rule, which any short reply keeps; such an item is drawn again.
 - `mdl ui`: Edit config on every model in your config, a page of its
   keys in the panel's own rows. Save writes only the keys changed and
   keeps comments and hand edits; a refused save says why on the page;
