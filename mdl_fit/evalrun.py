@@ -794,12 +794,15 @@ def report(rec, w):
         else ""))
     for title, part in (("suite", rec["suites"]), ("domain", rec["domains"]),
                         ("tier", rec.get("tiers") or {})):
-        w("  %-13s score  95%% CI       items  forced  capped  errors\n"
-          % title)
+        w("  %-13s score  95%% CI       items  forced  capped  errors"
+          "  s/item  tok/right\n" % title)
         for k, v in part.items():
-            w("  %-13s %.2f   %.2f–%.2f    %-6d %-7d %-7d %d\n" % (
+            per = v.get("per_point")
+            w("  %-13s %.2f   %.2f–%.2f    %-6d %-7d %-7d %-7d %-7s %s\n" % (
                 k, v["score"], v["lo"], v["hi"], v["n"], v.get("forced", 0),
-                v["capped"], v["errors"]))
+                v["capped"], v["errors"],
+                "%.0f" % (v.get("seconds", 0) / v["n"]) if v["n"] else "-",
+                "{:,}".format(per) if per else "-"))
     # one number, and it weights the five abilities equally: weighting by
     # item count would move the headline whenever a suite changes size,
     # which says nothing about the model
