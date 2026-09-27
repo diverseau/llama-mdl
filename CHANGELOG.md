@@ -4,6 +4,12 @@ Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-09-28
+
+A frontier tier for `mdl eval`, editing a model's config from its page
+in `mdl ui`, and fixes from a review of the core: Hub paths, hostile
+GGUF headers, and the backend a quick probe reports.
+
 ### Added
 
 - `mdl eval` adds a frontier tier above base and hard, reported separately
@@ -21,17 +27,22 @@ Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
   directed route, a pruned logic grid, and an inclusion-exclusion count.
   Per-suite reply token caps are unchanged. Suite version 6 prevents
   comparisons with older item sets.
-
-### Fixed
-
-- `mdl eval`: a base format item could be a lone "no more than N words"
-  rule, which any short reply keeps; such an item is drawn again.
 - `mdl ui`: Edit config on every model in your config, a page of its
   keys in the panel's own rows. Save writes only the keys changed and
   keeps comments and hand edits; a refused save says why on the page;
   a running model has Save and restart, and its page says when its
   config has changed since it started. `mdl tui`'s edit form and the
   page read what is typed through the same code.
+
+### Fixed
+
+- `mdl eval`: a base format item could be a lone "no more than N words"
+  rule, which any short reply keeps; such an item is drawn again.
+- A quick hardware probe (`mdl manifest`, `mdl fit calibrate`, `mdl
+  lab`, `mdl eval`) with no nvidia-smi reported the backend as CPU on an
+  AMD, Intel or Apple GPU. It now takes the backend a full probe booked
+  for the binary, or the one its libraries are built for, so Vulkan's
+  4 GiB single-allocation limit is applied.
 
 ### Security
 
@@ -44,14 +55,6 @@ Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
   layers made them try to allocate lists that long. Both are now
   refused as not a GGUF, in one line - including headers read from a
   Hub repo.
-
-### Fixed
-
-- A quick hardware probe (`mdl manifest`, `mdl fit calibrate`, `mdl
-  lab`, `mdl eval`) with no nvidia-smi reported the backend as CPU on an
-  AMD, Intel or Apple GPU. It now takes the backend a full probe booked
-  for the binary, or the one its libraries are built for, so Vulkan's
-  4 GiB single-allocation limit is applied.
 
 ## [0.13.0] - 2026-09-26
 
