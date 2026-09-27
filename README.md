@@ -426,21 +426,23 @@ mdl eval --compare qwen-small ornith   which of two is actually better
 ```
 
 It starts the model as models.toml runs it (or uses it if it is already
-up) and runs five suites: code (40 functions, graded by hidden unit
-tests that are actually executed), tools (30 tool-calling tasks, single
-and multi-step, against mock worlds), long-context (24 questions over
-documents at 32k, 64k and 128k, those beyond the configured context
-skipped), instruct (20 checkable format rules) and reason (20
-exact-answer problems). Add your own as `[[task]]` entries in
+up) and runs five suites: code (46 functions and bug repairs, graded by
+hidden unit tests that are actually executed), tools (36 tool-calling
+tasks, single and multi-step, against mock worlds), long-context (33
+questions over documents at 32k, 64k and 128k, those beyond the
+configured context skipped), instruct (26 checkable format rules) and
+reason (26 exact-answer problems). Add your own as `[[task]]` entries in
 `~/.config/mdl/evals/*.toml`, checked by `contains`, `regex`, `exact`
 or a Python snippet. A task that cannot run - no prompt, a regex that
 does not compile, a domain the report has no row for, an id used twice -
 is refused when the suite is built, naming the file and the task, not
 found an hour into the run.
 
-Three of every five items are the harder tier, and the report scores
-the tiers separately. A suite everything passes ranks nothing, so the
-hard items are built to be failed - and, more importantly, built so
+The report scores base, hard and frontier separately. The base and hard
+mix stays in place; frontier adds 33 generated items across the five
+suites. The per-suite reply token caps stay the same, and the report
+counts replies that hit them. A suite everything passes ranks nothing,
+so the hard items are built to be failed - and, more importantly, built so
 that recognising them does not help. Half of the hard code and reason
 items are generated rather than named: a price with five clauses that
 interact, a validator with a stated precedence over its rules, a stack
@@ -457,6 +459,25 @@ and they are kept because they still catch arithmetic slips, but on
 their own they measured memory rather than reasoning: a 35B coder in a
 3-bit quant answered 36 of 40 of them.
 
+The frontier tier is three task families per suite, two items of each,
+and every family is hard in what it asks rather than in how long the
+answer is. Frontier code is a transfer ledger to repair - float cents, a
+duplicate check that forgets rejected ids, the overdraft sign,
+self-transfers, accounts a rejected transfer conjures up, malformed
+lines, and a list scan that 200,000 lines time out; a pair count that
+only becomes an O(n log n) problem once `a[i] - c*i` is seen, with
+120,000 values to time out a double loop; and set algebra on intervals
+with open and closed ends, where touching, point, empty and reversed
+intervals are the cases. Frontier reasoning is a directed route over
+four stops (twelve valid routes, few enough to work through within the
+cap), a four-house logic grid pruned until no clue can go, and a
+divisibility count whose shared factors make multiplying divisors the
+wrong lcm; a solver or a formula checked against a loop grades each.
+Frontier format tasks are a grouped CSV report (voids dropped, refunds
+netted, shares rounded half up), five lines that keep an
+acrostic, a word count per line, a banned letter and three required
+words at once, and a JSON list to deduplicate, clean and regroup.
+
 The tool worlds take four to a dozen dependent calls. One forbids the
 action the request asks for, and doing it anyway is the failure. One
 fails a call the first time. One offers eight tools, four of them
@@ -467,8 +488,21 @@ the rules once at the start is not enough. One has four customers with
 the same name, and only reading each one says which to cancel. One has
 another writer change a counter between the read and the write, so
 retrying the value already worked out erases their change - a 35B coder
-in a 3-bit quant did exactly that. Eighteen of the thirty tools items
-are worlds like these, and two in three of those are the hard ones.
+in a 3-bit quant did exactly that. Eighteen of the original thirty tools
+items are worlds like these, and two in three of those are the hard ones.
+The frontier worlds check the final state, not the calls. The queue is
+twenty tickets behind a cursor, a policy in dollars against amounts in
+cents, five rules that take precedence over one another (holds, blocked
+requesters, ceilings, minimums), transient read and write errors, and a
+bulk-approve tool that skips the policy; one wrong action scores the
+item nothing. The depot order is short of two SKUs, partly because of
+its own warehouse's reserve: the shortfall comes from the warehouse
+with the most unreserved units first, the one holding the most units
+has the least to spare, and an administrative override that would make
+the counts come out scores nothing. The billing case names only an email
+and an invoice: the policy, the customer's currency, the fee and which
+day's rate to use all have to be looked up, and a convert tool at
+today's rate is the wrong one.
 
 The long-context questions are not all needles. One per document asks
 for every match rather than one - three of six people share a floor,
@@ -477,12 +511,19 @@ overlap, so stopping after two is worth more than nothing and less than
 finishing. One counts something that has to be read for in full. And
 one has no answer in the document at all: the project is real and nine
 others do list a code, so the pull towards writing one down is strong,
-and saying it is not recorded is the only reply that scores. Nothing
-else in the suite measures making things up.
+and saying it is not recorded is the only reply that scores. Frontier
+documents add scattered consignment facts linked through bundles,
+clerks and rooms, then ask for a floor-wide crate total, another linked
+floor, and the one consignment whose code the records never give. Two
+bundles are refiled to a clerk on another floor later in the document,
+so the first clerk found is the wrong one for both the total and the
+floor.
 
-Code and format items are marked in parts, so a function that handles
-the ordinary cases and trips on one edge does not score the same as one
-that does not run.
+The original code and format items are marked in parts, so a function
+that handles the ordinary cases and trips on one edge does not score
+the same as one that does not run. Frontier code and format items are
+all or nothing: each is one job, and a repair that fixes most of the
+bugs still ships one.
 
 Every grader is checked against replies that contain no knowledge -
 nothing, a refusal, a guessed number, the instructions read back - and

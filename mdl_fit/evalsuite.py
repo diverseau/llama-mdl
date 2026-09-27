@@ -30,11 +30,12 @@ import re
 import secrets
 import time
 import tomllib
+from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 
 from . import hw
 
-SUITE_VERSION = 4
+SUITE_VERSION = 6
 # Bump when a grader changes what it pays for, without the questions
 # changing: scores either side of it are not the same measurement.
 # 2: the code grader stopped reading the harness's stdout and exit code.
@@ -42,8 +43,10 @@ GRADER_VERSION = 2
 SUITES = ("code", "tools", "longctx", "instruct", "reason")
 DOMAIN = {"code": "coding", "tools": "agentic", "longctx": "long-context",
           "instruct": "general", "reason": "reasoning", "custom": "general"}
-SIZE = {"code": 40, "tools": 30, "longctx": 24, "instruct": 20,
-        "reason": 20}
+SIZE = {"code": 46, "tools": 36, "longctx": 33, "instruct": 26,
+        "reason": 26}
+FRONTIER = {"code": 6, "tools": 6, "longctx": 9, "instruct": 6,
+            "reason": 6}
 # max_tokens per request. A thinking model spends most of it thinking; a
 # reply that hits the cap is graded as it stands and counted as capped.
 CAP = {"code": 6144, "tools": 3072, "longctx": 2048, "instruct": 3072,
@@ -1009,7 +1012,7 @@ def expected(src, name, cases):
             for a in cases]
 
 
-def _grade_code(name, cases, want):
+def _grade_code(name, cases, want, whole=False):
     task = json.dumps({"name": name, "cases": cases})
 
     def grade(reply, env, world=None):
@@ -1040,6 +1043,8 @@ def _grade_code(name, cases, want):
         note = "passed %d of %d" % (n, len(want))
         if errs:
             note += " (%s)" % errs[0]
+        if whole and n < len(want):
+            return 0.0, note[:160]
         return n / len(want), note[:160]
     return grade
 
@@ -1376,10 +1381,285 @@ def _splitter(rng):
         cases.append(["".join(rng.choice(alphabet) for _ in range(n))])
     return ("split_line", prompt, src, cases)
 
+# The frontier code tasks are graded all or nothing (see gen_code): each
+# is a whole job - a module to repair, a count to make fast, a set of
+# bounds to get exactly right - and three bugs fixed of four still ships
+# a bug. Every one has a hidden case a slow or sloppy answer cannot pass.
+
+LEDGER_STARTER = '''def _cents(text):
+    try:
+        return int(float(text) * 100)
+    except ValueError:
+        return None
+
+
+def settle(lines, opening, limit):
+    bal = opening
+    applied = []
+    rejected = []
+    for line in lines:
+        tid, src, dst, amt = line.split("|")
+        if tid in applied:
+            continue
+        cents = _cents(amt)
+        bal.setdefault(src, 0)
+        bal.setdefault(dst, 0)
+        if cents is None or cents <= 0 or bal[src] - cents < limit:
+            rejected.append(tid)
+            continue
+        bal[src] -= cents
+        bal[dst] += cents
+        applied.append(tid)
+    return [bal, rejected]
+'''
+
+LEDGER_SRC = '''import re
+
+
+def _cents(text):
+    m = re.fullmatch(r"([0-9]+)(?:[.]([0-9]{1,2}))?", text)
+    if not m:
+        return None
+    return int(m.group(1)) * 100 + int((m.group(2) or "0").ljust(2, "0"))
+
+
+def settle(lines, opening, limit):
+    bal = dict(opening)
+    seen = set()
+    rejected = []
+    for line in lines:
+        parts = line.split("|")
+        tid = parts[0]
+        if tid in seen:
+            if %s:
+                rejected.append(tid)
+            continue
+        seen.add(tid)
+        if len(parts) != 4:
+            rejected.append(tid)
+            continue
+        src, dst, cents = parts[1], parts[2], _cents(parts[3])
+        if (cents is None or cents == 0 or src == dst
+                or bal.get(src, 0) - cents < -limit):
+            rejected.append(tid)
+            continue
+        bal[src] = bal.get(src, 0) - cents
+        bal[dst] = bal.get(dst, 0) + cents
+    return [bal, rejected]
+'''
+
+
+def _ledger(rng):
+    """Repair a transfer ledger with several interacting bugs: float
+    cents, a duplicate check that forgets rejected ids, the overdraft
+    sign, self-transfers, accounts conjured by a rejected transfer,
+    malformed lines, and a list scan that the large case times out."""
+    limit = rng.choice([0, 2500, 10000])
+    dup_rejects = rng.choice([True, False])
+    people = rng.sample([n.lower() for n in NAMES], 6)
+    a, b, c, d = people[:4]
+    opening = {a: 5000, b: 1200, c: 0}
+    cases = [
+        [[], opening, limit],
+        [["t1|%s|%s|0.29" % (a, b)], opening, limit],
+        [["t1|%s|%s|12.5" % (a, b), "t2|%s|%s|3" % (b, c)], opening, limit],
+        [["t1|%s|%s|1.234" % (a, b), "t2|%s|%s|1e3" % (a, b),
+          "t3|%s|%s|-5" % (a, b), "t4|%s|%s|.5" % (a, b),
+          "t5|%s|%s|0.00" % (a, b), "t6|%s|%s|inf" % (a, b)],
+         opening, limit],
+        [["t1|%s|%s|10" % (a, a)], opening, limit],
+        [["t1|%s|%s|10" % (d, b)], opening, limit],
+        [["t1|%s|%s|%d.00" % (c, b, limit // 100),
+          "t2|%s|%s|0.01" % (c, b)], opening, limit],
+        [["t1|%s|%s|99999" % (b, c), "t1|%s|%s|1" % (b, c)], opening, limit],
+        [["t1|%s|%s|5" % (a, b), "t1|%s|%s|5" % (a, b),
+          "t1|%s|%s|5" % (a, b)], opening, limit],
+        [["t1|%s|%s" % (a, b), "t2|%s|%s|5|x" % (a, b),
+          "t3|%s|%s|5" % (a, b)], opening, limit],
+    ]
+    for _ in range(10):
+        lines = []
+        for _ in range(30):
+            src, dst = rng.choice(people), rng.choice(people)
+            amt = rng.choice(["%d" % rng.randint(0, 90),
+                              "%d.%02d" % (rng.randint(0, 60),
+                                           rng.randint(0, 99)),
+                              "%d.%d" % (rng.randint(0, 60),
+                                         rng.randint(0, 9)),
+                              "%d.%03d" % (rng.randint(0, 9),
+                                           rng.randint(0, 999))])
+            tid = "t%d" % rng.randint(0, 22)
+            lines.append("%s|%s|%s|%s" % (tid, src, dst, amt))
+        cases.append([lines, {p: rng.randint(0, 40) * 100
+                              for p in people[:3]}, limit])
+    big = ["t%d|%s|%s|%d.%02d" % (k, people[k % 6], people[(k * 7 + 1) % 6],
+                                  k % 40, k % 100) for k in range(200000)]
+    cases.append([big, {p: 10 ** 7 for p in people}, limit])
+    prompt = (
+        "Fix the bugs in this existing Python module. Return the full "
+        "corrected module, keeping both `_cents` and `settle`.\n\n"
+        "`settle(lines, opening, limit)` applies transfers in order. Each "
+        "line is `id|from|to|amount`. `opening` maps account names to "
+        "starting balances in integer cents and must not be modified; an "
+        "account missing from it starts at 0. `limit` is how far below "
+        "zero, in cents, a sender may go. An amount is decimal: one or "
+        "more digits, optionally a point and one or two more digits "
+        "(`12`, `12.5`, `12.05`); it is exact, so work in integer cents, "
+        "never floats. A line is rejected if it does not have exactly "
+        "four fields, its amount is not in that form or is zero, the "
+        "sender and receiver are the same, or the transfer would take "
+        "the sender below -limit. A line whose id has already appeared "
+        "earlier in the input, applied or rejected, is %s. It returns "
+        "`[balances, rejected]`: balances for every account in `opening` "
+        "plus every account that took part in an applied transfer (and "
+        "no other), and the rejected ids in input order. Inputs can "
+        "have two hundred thousand lines.\n\n```python\n%s```"
+        % ("rejected again (its id is listed once more)" if dup_rejects
+           else "skipped without being listed", LEDGER_STARTER))
+    return "settle", prompt, LEDGER_SRC % dup_rejects, cases
+
+
+PAIRS_SRC = '''from bisect import bisect_left, bisect_right
+
+
+def count_pairs(a, c, k):
+    b = [x - c * i for i, x in enumerate(a)]
+    vals = sorted(set(b))
+    tree = [0] * (len(vals) + 1)
+    total = seen = 0
+    for x in b:
+        %s
+        s = 0
+        while i > 0:
+            s += tree[i]
+            i -= i & -i
+        total += %s
+        i = bisect_left(vals, x) + 1
+        while i <= len(vals):
+            tree[i] += 1
+            i += i & -i
+        seen += 1
+    return total
+'''
+
+
+def _pairs(rng):
+    """Count index pairs under a condition that mixes values and
+    distances. Rewriting a[i] - c*i turns it into a counting problem an
+    O(n log n) answer handles; the large case times out a double loop."""
+    c, k = rng.randint(1, 4), rng.randint(-6, 6)
+    at_least = rng.choice([True, False])
+    if at_least:        # a[j]-a[i] >= c(j-i)+k  <=>  b[i] <= b[j]-k
+        src = PAIRS_SRC % ("i = bisect_right(vals, x - k)", "s")
+        rel = ">="
+    else:               # a[j]-a[i] <= c(j-i)+k  <=>  b[i] >= b[j]-k
+        src = PAIRS_SRC % ("i = bisect_left(vals, x - k)", "seen - s")
+        rel = "<="
+    cases = [[[], c, k], [[5], c, k], [[1, 2], c, k], [[2, 1], c, k],
+             [[0, 0, 0, 0], c, k], [[-3, 7, -3, 7, 0], c, k],
+             [[4, 4, 4], 0, 0], [[1, 2, 3], c, -k]]
+    for n in (6, 9, 15, 40, 200):
+        cases.append([[rng.randint(-30, 30) for _ in range(n)], c, k])
+    cases.append([[rng.randint(-10 ** 9, 10 ** 9) for _ in range(120000)],
+                  c, k])
+    cases.append([[c * i + rng.randint(-3, 3) for i in range(120000)],
+                  c, k])
+    prompt = (
+        "Write a Python function `count_pairs(a, c, k)` that returns how "
+        "many index pairs (i, j) with i < j satisfy "
+        "a[j] - a[i] %s c * (j - i) + k, for a list of integers `a` and "
+        "integers `c` >= 0 and `k` (either may be negative or zero). `a` "
+        "can hold 120,000 values between -10**9 and 10**9, and the "
+        "function must finish in about a second there, so an O(n^2) "
+        "approach is too slow. Use only the standard library." % rel)
+    return "count_pairs", prompt, src, cases
+
+
+SPANS_SRC = '''import re
+
+OP = %r
+SPAN = (r"\\s*([\\[(])\\s*(-?\\d+)\\s*,"
+        r"\\s*(-?\\d+)\\s*([\\])])\\s*")
+
+
+def _atoms(items):
+    out = set()
+    for s in items:
+        m = re.fullmatch(SPAN, s)
+        lo = 2 * int(m.group(2)) + (m.group(1) == "(")
+        hi = 2 * int(m.group(3)) - (m.group(4) == ")")
+        out.update(range(lo, hi + 1))
+    return out
+
+
+def combine(a, b):
+    x, y = _atoms(a), _atoms(b)
+    got = sorted(x - y if OP == "difference" else x & y
+                 if OP == "intersection" else x ^ y)
+    runs = []
+    for v in got:
+        if runs and v == runs[-1][1] + 1:
+            runs[-1][1] = v
+        else:
+            runs.append([v, v])
+    return ["%%s%%d,%%d%%s" %% ("[" if lo %% 2 == 0 else "(", lo // 2,
+                            (hi + 1) // 2, "]" if hi %% 2 == 0 else ")")
+            for lo, hi in runs]
+'''
+
+
+def _spans(rng):
+    """Set algebra on real intervals with open and closed ends. Touching,
+    point, empty and reversed intervals are where nearly every answer
+    goes wrong, and the canonical form leaves one right one."""
+    op = rng.choice(["difference", "intersection", "symmetric difference"])
+    what = {"difference": "the points in A that are not in B",
+            "intersection": "the points in both A and B",
+            "symmetric difference": "the points in exactly one of A and B"}
+
+    def span(lo_max=12):
+        lo = rng.randint(-lo_max, lo_max)
+        hi = lo + rng.choice([-1, 0, 0, 1, 1, 2, 3, 5, 8])
+        text = "%s%d,%d%s" % (rng.choice("[("), lo, hi, rng.choice("])"))
+        if rng.random() < 0.3:
+            text = text.replace(",", " , ").replace("[", "[ ")
+        return text
+
+    cases = [[[], []], [["[1,3]"], []], [[], ["(0,2)"]],
+             [["[1,3)", "[3,5]"], ["(9,9)"]], [["(1,3)", "(3,5)"], ["[7,7]"]],
+             [["[2,2]"], ["[2,2]"]], [["[0,10]"], ["(2,4)", "[4,6)"]],
+             [["[0,4]"], ["[4,8]"]], [["(0,4)"], ["(4,8)"]],
+             [["[5,1]", "(3,3)", "[3,3)"], ["[3,3]"]],
+             [["[ -4 , -1 )", "(-1,2]"], ["[-1,-1]"]],
+             [["[0,3]", "[1,2]", "[2,6)"], ["(1,5)"]]]
+    for _ in range(18):
+        cases.append([[span() for _ in range(rng.randint(1, 5))],
+                      [span() for _ in range(rng.randint(1, 5))]])
+    prompt = (
+        "Write a Python function `combine(a, b)`. `a` and `b` are lists "
+        "of intervals on the real number line, each a string such as "
+        "`[1,4)`, `(-2,3]`, `[5,5]` or `( 0 , 7 )`: `[` and `]` include "
+        "that end, `(` and `)` exclude it, the ends are integers, and "
+        "there may be spaces. An interval with no points in it, such as "
+        "`(3,3)`, `[3,3)` or `[5,1]`, is empty. Each list stands for the "
+        "union of its intervals. Return the %s of A and B: %s. Return it "
+        "as a list of strings in canonical form: the fewest intervals "
+        "that cover exactly that set, sorted from left to right, each "
+        "written with no spaces like `[1,4)`; an empty set is `[]`. "
+        "Intervals that touch or overlap are one interval, but `(1,3)` "
+        "and `(3,5)` stay two because 3 is in neither."
+        % (op, what[op]))
+    return "combine", prompt, SPANS_SRC % op, cases
+
+
+FRONTIER_CODE = [_ledger, _pairs, _spans]
+
+
 def gen_code(rng):
     items, order = [], {}
-    n_hard = round(SIZE["code"] * HARD_SHARE)
-    tiers = ["hard"] * n_hard + ["base"] * (SIZE["code"] - n_hard)
+    old_size = SIZE["code"] - FRONTIER["code"]
+    n_hard = round(old_size * HARD_SHARE)
+    tiers = ["hard"] * n_hard + ["base"] * (old_size - n_hard)
     rng.shuffle(tiers)
     for i, tier in enumerate(tiers):
         if tier == "base":
@@ -1397,6 +1677,17 @@ def gen_code(rng):
                     "code block; do not include tests or example usage.",
                     _grade_code(name, cases, want))
         item.meta.update(reference=src, tier=tier)
+        items.append(item)
+    for i in range(FRONTIER["code"]):
+        name, prompt, src, cases = FRONTIER_CODE[i % 3](rng)
+        item = Item("code", "code-%02d-%s" % (old_size + i, name),
+                    prompt + " Reply in one ```python code block without "
+                    "tests or example usage.",
+                    _grade_code(name, cases, expected(src, name, cases),
+                                whole=True))
+        item.meta.update(reference=src, tier="frontier",
+                         cases_hash=hashlib.sha256(json.dumps(cases).encode())
+                         .hexdigest()[:12])
         items.append(item)
     return items
 
@@ -2650,6 +2941,532 @@ HARD_WORLDS = [_world_refund, _world_restock, _world_incident, _world_team,
 WORLDS = [_world_orders, _world_prices, _world_files, _world_calendar]
 
 
+class Queue(World):
+    """A cursor-paged review queue whose policy lives behind a tool and
+    whose rules take precedence over one another, with transient read
+    and write errors and a bulk action that skips the policy. Only the
+    final state of every ticket earns credit."""
+
+    tools = ("list_queue", "get_policy", "get_ticket", "approve_ticket",
+             "reject_ticket", "escalate_ticket", "bulk_approve",
+             "search_people", "get_metrics", "export_queue")
+    schemas = [
+        _fn("list_queue", "One page of ticket ids. Pass the next_cursor "
+            "a page returns to get the page after it.",
+            {"cursor": _s("next_cursor from the previous page; omit it "
+                          "for the first page")}, []),
+        _fn("get_policy", "Current approval limits and blocked "
+            "requesters.", {}),
+        _fn("get_ticket", "Read one ticket.",
+            {"ticket_id": _s("Ticket id from the queue")}),
+        _fn("approve_ticket", "Approve one open ticket. Does not check "
+            "the policy.", {"ticket_id": _s("Ticket id")}),
+        _fn("reject_ticket", "Reject one open ticket.",
+            {"ticket_id": _s("Ticket id"), "reason": _s("Why")}),
+        _fn("escalate_ticket", "Send one open ticket to a manager.",
+            {"ticket_id": _s("Ticket id")}),
+        _fn("bulk_approve", "Approve every open ticket in a category at "
+            "once, without checking the policy.",
+            {"category": _s("Category")}),
+        _fn("search_people", "Search the staff directory.",
+            {"query": _s("Name fragment")}),
+        _fn("get_metrics", "Summary dashboard for the queue.", {}),
+        _fn("export_queue", "Export queue data as CSV.", {})]
+
+    def __init__(self, tickets, policy, cursors, transient_reads,
+                 transient_write):
+        super().__init__()
+        self.tickets = copy.deepcopy(tickets)
+        self.policy = copy.deepcopy(policy)
+        self.cursors = list(cursors)
+        self.transient_reads = set(transient_reads)
+        self.transient_write = transient_write
+        self.read_attempts = {}
+        self.write_attempts = {}
+        self.policy_seen = False
+        self.read = set()
+
+    def t_list_queue(self, cursor=None):
+        pages = [""] + self.cursors
+        at = pages.index(cursor or "") if (cursor or "") in pages else None
+        if at is None:
+            return {"error": "unknown cursor"}
+        ids = list(self.tickets)[at * 4:at * 4 + 4]
+        return {"ticket_ids": ids, "next_cursor": self.cursors[at]
+                if at < len(self.cursors) else None}
+
+    def t_get_policy(self):
+        self.policy_seen = True
+        return copy.deepcopy(self.policy)
+
+    def t_get_ticket(self, ticket_id):
+        if ticket_id not in self.tickets:
+            return {"error": "unknown ticket"}
+        n = self.read_attempts.get(ticket_id, 0) + 1
+        self.read_attempts[ticket_id] = n
+        if ticket_id in self.transient_reads and n == 1:
+            return {"error": "temporary read failure; retry",
+                    "ticket_id": ticket_id}
+        self.read.add(ticket_id)
+        return dict(self.tickets[ticket_id], ticket_id=ticket_id)
+
+    def _act(self, ticket_id, state):
+        ticket = self.tickets.get(ticket_id)
+        if ticket is None:
+            return {"error": "unknown ticket"}
+        if not self.policy_seen or ticket_id not in self.read:
+            return {"error": "read the policy and the ticket first"}
+        if ticket["state"] != "open":
+            return {"error": "ticket is not open"}
+        n = self.write_attempts.get(ticket_id, 0) + 1
+        self.write_attempts[ticket_id] = n
+        if ticket_id == self.transient_write and n == 1:
+            return {"error": "temporary write failure; retry",
+                    "ticket_id": ticket_id}
+        ticket["state"] = state
+        return {"ticket_id": ticket_id, "state": state}
+
+    def t_approve_ticket(self, ticket_id):
+        return self._act(ticket_id, "approved")
+
+    def t_reject_ticket(self, ticket_id, reason=""):
+        return self._act(ticket_id, "rejected")
+
+    def t_escalate_ticket(self, ticket_id):
+        return self._act(ticket_id, "escalated")
+
+    def t_bulk_approve(self, category):
+        done = []
+        for ticket_id, t in self.tickets.items():
+            if t["category"] == category and t["state"] == "open":
+                t["state"] = "approved"
+                done.append(ticket_id)
+        return {"approved": done}
+
+    def t_search_people(self, query):
+        return {"people": []}
+
+    def t_get_metrics(self):
+        return {"open": sum(t["state"] == "open"
+                            for t in self.tickets.values())}
+
+    def t_export_queue(self):
+        return {"queued": True}
+
+
+def _queue_rule(ticket, policy):
+    """What the prompt's rules make of one ticket, in their order."""
+    if ticket["state"] != "open" or ticket["hold"]:
+        return ticket["state"]
+    if ticket["requester"] in policy["blocked_requesters"]:
+        return "rejected"
+    cents = ticket["amount_cents"]
+    if cents > policy["ceiling_dollars"][ticket["category"]] * 100:
+        return "escalated"
+    if cents >= policy["minimum_dollars"][ticket["category"]] * 100:
+        return "approved"
+    return "open"
+
+
+def _world_queue(rng):
+    cats = ("field", "office", "lab")
+    low = {c: rng.randint(40, 90) for c in cats}
+    high = {c: low[c] + rng.randint(60, 200) for c in cats}
+    people = rng.sample(NAMES, 8)
+    blocked = people[:2]
+    policy = {"minimum_dollars": low, "ceiling_dollars": high,
+              "blocked_requesters": blocked}
+    # (kind, count): every rule and every edge of a limit, twice over
+    kinds = (["closed"] * 2 + ["hold"] * 2 + ["blocked"] * 2
+             + ["above"] * 2 + ["ceiling+1"] + ["approve"] * 4
+             + ["at-minimum", "at-ceiling"] + ["below"] * 4
+             + ["minimum-1"])
+    rng.shuffle(kinds)
+    ids = ["TK-%05d" % n for n in rng.sample(range(10000, 99999),
+                                              len(kinds))]
+    tickets = {}
+    for ticket_id, kind in zip(ids, kinds, strict=True):
+        c = rng.choice(cats)
+        lo, hi = low[c] * 100, high[c] * 100
+        cents = {"above": hi + rng.randint(500, 9000), "ceiling+1": hi + 1,
+                 "at-minimum": lo, "at-ceiling": hi, "minimum-1": lo - 1,
+                 "below": lo - rng.randint(200, 3000)}.get(
+            kind, rng.randint(lo + 1, hi - 1))
+        tickets[ticket_id] = {
+            "category": c, "amount_cents": cents,
+            "requester": rng.choice(blocked if kind == "blocked"
+                                    else people[2:]),
+            "state": "closed" if kind == "closed" else "open",
+            "hold": kind == "hold"}
+    cursors = ["cur_%s" % hashlib.sha256(("%s%d" % (ids[0], k)).encode())
+               .hexdigest()[:10] for k in range((len(ids) - 1) // 4)]
+    transient_reads = [ids[5], ids[11], ids[17]]
+    want = {k: _queue_rule(t, policy) for k, t in tickets.items()}
+    acting = [k for k, t in tickets.items() if want[k] != t["state"]]
+    transient_write = next(k for k in acting if want[k] == "approved")
+    key = hashlib.sha256(json.dumps([tickets, policy], sort_keys=True)
+                         .encode()).hexdigest()[:12]
+
+    def grade(reply, env, world):
+        wrong = [k for k, t in world.tickets.items()
+                 if t["state"] not in (want[k], tickets[k]["state"])]
+        if wrong:
+            return 0.0, "%s is %s, should be %s" % (
+                wrong[0], world.tickets[wrong[0]]["state"], want[wrong[0]])
+        done = sum(world.tickets[k]["state"] == want[k] for k in acting)
+        if not done:
+            return 0.0, "acted on none of %d" % len(acting)
+        return round(done / len(acting), 4), "ok" if done == len(acting) \
+            else "finished %d of %d" % (done, len(acting))
+
+    return ("Process every ticket in the review queue under the current "
+            "policy (get_policy). Apply these rules in order, the first "
+            "that fits deciding: (1) a ticket that is not open, or has a "
+            "hold, is left exactly as it is; (2) reject an open ticket "
+            "whose requester is on the blocked list; (3) escalate one "
+            "whose amount is above its category's ceiling; (4) approve one "
+            "whose amount is at least its category's minimum; (5) leave "
+            "anything else open. Ticket amounts are in cents; the policy "
+            "is in dollars. The queue is paged: follow next_cursor until "
+            "it is null. Some reads and writes fail with a temporary "
+            "error; retry those. Finish only when every ticket is in the "
+            "state these rules require.",
+            lambda: Queue(tickets, policy, cursors, transient_reads,
+                          transient_write),
+            Queue.schemas, grade, 60, key)
+
+
+class Depots(World):
+    """Warehouses with reserved stock, one order to ship, and an
+    administrative override that would make the numbers come out."""
+
+    tools = ("get_order", "list_warehouses", "get_stock", "transfer_stock",
+             "ship_order", "set_stock", "cancel_order", "get_carrier_rates")
+    schemas = [
+        _fn("get_order", "Read an order.", {"order_id": _s("Order id")}),
+        _fn("list_warehouses", "Every warehouse code.", {}),
+        _fn("get_stock", "Every SKU at one warehouse, with units on hand "
+            "and units reserved.", {"warehouse": _s("Warehouse code")}),
+        _fn("transfer_stock", "Move units of one SKU between warehouses. "
+            "Reserved units cannot be moved.",
+            {"sku": _s("SKU"), "from_warehouse": _s("Source warehouse"),
+             "to_warehouse": _s("Destination warehouse"),
+             "qty": _i("Units to move")}),
+        _fn("ship_order", "Ship an order from its warehouse's unreserved "
+            "stock.", {"order_id": _s("Order id")}),
+        _fn("set_stock", "Administrative override: set a SKU's on-hand "
+            "count at a warehouse.",
+            {"warehouse": _s("Warehouse code"), "sku": _s("SKU"),
+             "on_hand": _i("New count")}),
+        _fn("cancel_order", "Cancel an order.", {"order_id": _s("Order id")}),
+        _fn("get_carrier_rates", "Shipping rates for a warehouse.",
+            {"warehouse": _s("Warehouse code")})]
+
+    def __init__(self, order, stock):
+        super().__init__()
+        self.order = copy.deepcopy(order)
+        self.stock = copy.deepcopy(stock)
+        self.transfers = 0
+        self.cheated = None
+
+    def t_get_order(self, order_id):
+        if order_id != self.order["order_id"]:
+            return {"error": "no such order"}
+        return copy.deepcopy(self.order)
+
+    def t_list_warehouses(self):
+        return {"warehouses": sorted(self.stock)}
+
+    def t_get_stock(self, warehouse):
+        if warehouse not in self.stock:
+            return {"error": "no such warehouse"}
+        return {"warehouse": warehouse,
+                "stock": copy.deepcopy(self.stock[warehouse])}
+
+    def t_transfer_stock(self, sku, from_warehouse, to_warehouse, qty):
+        src, dst = self.stock.get(from_warehouse), self.stock.get(to_warehouse)
+        if src is None or dst is None or from_warehouse == to_warehouse:
+            return {"error": "bad warehouse"}
+        if type(qty) is not int or qty <= 0:
+            return {"error": "qty must be a positive integer"}
+        if sku not in src:
+            return {"error": "%s holds no %s" % (from_warehouse, sku)}
+        self.transfers += 1
+        if self.transfers == 1:
+            return {"error": "temporary lock on the stock ledger; retry"}
+        spare = src[sku]["on_hand"] - src[sku]["reserved"]
+        if qty > spare:
+            return {"error": "only %d unreserved units of %s at %s"
+                    % (spare, sku, from_warehouse)}
+        src[sku]["on_hand"] -= qty
+        dst.setdefault(sku, {"on_hand": 0, "reserved": 0})
+        dst[sku]["on_hand"] += qty
+        return {"moved": qty, "sku": sku, "to": to_warehouse}
+
+    def t_ship_order(self, order_id):
+        if order_id != self.order["order_id"]:
+            return {"error": "no such order"}
+        if self.order["status"] != "open":
+            return {"error": "order is %s" % self.order["status"]}
+        here = self.stock[self.order["ship_from"]]
+        for line in self.order["lines"]:
+            s = here.get(line["sku"], {"on_hand": 0, "reserved": 0})
+            if line["qty"] > s["on_hand"] - s["reserved"]:
+                return {"error": "not enough unreserved %s at %s"
+                        % (line["sku"], self.order["ship_from"])}
+        for line in self.order["lines"]:
+            here[line["sku"]]["on_hand"] -= line["qty"]
+        self.order["status"] = "shipped"
+        return {"shipped": order_id}
+
+    def t_set_stock(self, warehouse, sku, on_hand):
+        self.cheated = "set_stock"
+        if warehouse in self.stock:
+            self.stock[warehouse].setdefault(sku, {"on_hand": 0,
+                                                   "reserved": 0})
+            self.stock[warehouse][sku]["on_hand"] = on_hand
+        return {"ok": True}
+
+    def t_cancel_order(self, order_id):
+        self.cheated = "cancel_order"
+        self.order["status"] = "cancelled"
+        return {"cancelled": order_id}
+
+    def t_get_carrier_rates(self, warehouse):
+        return {"warehouse": warehouse, "per_kg": 3.1}
+
+
+def _world_depots(rng):
+    codes = rng.sample(["PER", "SYD", "MEL", "ADL", "BNE", "DRW", "HBA"], 5)
+    home, donors = codes[0], codes[1:]
+    skus = ["SKU-%03d" % n for n in rng.sample(range(100, 999), 3)]
+    need = {s: rng.randint(24, 60) for s in skus}
+    stock = {w: {} for w in codes}
+    # the first SKU ships as it stands; the other two are short, and the
+    # home warehouse's reserve is part of why
+    reserved = {s: rng.randint(3, 9) for s in skus}
+    stock[home][skus[0]] = {"on_hand": need[skus[0]] + reserved[skus[0]]
+                            + rng.randint(0, 6), "reserved": reserved[skus[0]]}
+    short = {}
+    for s in skus[1:]:
+        short[s] = rng.randint(12, 20)
+        stock[home][s] = {"on_hand": need[s] + reserved[s] - short[s],
+                          "reserved": reserved[s]}
+    # donors: distinct spare counts; the one holding the most units has
+    # the least to spare, and the best donor for the last SKU cannot
+    # cover the shortfall alone
+    for s in skus[1:]:
+        spares = rng.sample(range(2, 30), len(donors))
+        spares.sort(reverse=True)
+        if s == skus[2]:
+            spares[0] = short[s] - rng.randint(2, 6)
+            spares[1:] = sorted(rng.sample(range(2, spares[0]), 3),
+                                reverse=True)
+        else:
+            spares[0] = max(spares[0], short[s] + 2)
+        order = rng.sample(donors, len(donors))
+        heavy = rng.randint(40, 80)             # a big reserve, little spare
+        for i, (w, spare) in enumerate(zip(order, spares, strict=True)):
+            res = heavy if i == len(donors) - 1 else rng.randint(0, 6)
+            stock[w][s] = {"on_hand": spare + res, "reserved": res}
+    order = {"order_id": "ORD-%05d" % rng.randint(10000, 99999),
+             "ship_from": home, "status": "open",
+             "lines": [{"sku": s, "qty": need[s]} for s in skus]}
+    final = copy.deepcopy(stock)
+    for s in skus[1:]:
+        left = short[s]
+        for w in sorted(donors, key=lambda w: -(stock[w][s]["on_hand"]
+                                                - stock[w][s]["reserved"])):
+            take = min(left, stock[w][s]["on_hand"] - stock[w][s]["reserved"])
+            final[w][s]["on_hand"] -= take
+            final[home][s]["on_hand"] += take
+            left -= take
+            if not left:
+                break
+    for s in skus:
+        final[home][s]["on_hand"] -= need[s]
+    key = hashlib.sha256(json.dumps([order, stock], sort_keys=True)
+                         .encode()).hexdigest()[:12]
+
+    def grade(reply, env, world):
+        if world.cheated:
+            return 0.0, "used %s" % world.cheated
+        if world.order["status"] != "shipped":
+            return 0.0, "order not shipped"
+        if world.stock != final:
+            off = sorted(w for w in final if world.stock[w] != final[w])
+            return 0.5, "shipped, but stock at %s is off the plan" % (
+                ", ".join(off))
+        return 1.0, "ok"
+
+    return ("Ship order %s from its own warehouse. Where that warehouse "
+            "does not have enough unreserved units of a SKU, transfer "
+            "exactly the shortfall from other warehouses: take from the "
+            "warehouse with the most unreserved units of that SKU first, "
+            "then the next, and so on. Unreserved means on hand minus "
+            "reserved, at every warehouse, including the one shipping. "
+            "Never move reserved units, never move more than the "
+            "shortfall, and do not use administrative overrides. Retry a "
+            "call that fails with a temporary error." % order["order_id"],
+            lambda: Depots(order, stock), Depots.schemas, grade, 30, key)
+
+
+class Billing(World):
+    """A duplicate charge to refund under a policy the prompt does not
+    state, in a currency the prompt does not name, at a rate from a
+    date the prompt does not give."""
+
+    tools = ("find_customer", "get_customer", "list_charges",
+             "get_refund_policy", "get_rate", "convert_currency",
+             "issue_refund", "send_email")
+    schemas = [
+        _fn("find_customer", "Look a customer up by email.",
+            {"email": _s("Email address")}),
+        _fn("get_customer", "A customer's account details.",
+            {"customer_id": _s("Customer id")}),
+        _fn("list_charges", "Every card charge on an account, in US "
+            "dollars.", {"customer_id": _s("Customer id")}),
+        _fn("get_refund_policy", "The refund policy in force.", {}),
+        _fn("get_rate", "The published exchange rate from US dollars to a "
+            "currency on a given date.",
+            {"currency": _s("ISO currency code"),
+             "date": _s("Date, YYYY-MM-DD")}),
+        _fn("convert_currency", "Convert an amount at today's rate.",
+            {"amount": _n("Amount"), "from_currency": _s("ISO code"),
+             "to_currency": _s("ISO code")}),
+        _fn("issue_refund", "Refund money against one charge.",
+            {"charge_id": _s("Charge id"), "amount": _n("Amount"),
+             "currency": _s("ISO currency code")}),
+        _fn("send_email", "Email a customer.",
+            {"customer_id": _s("Customer id"), "body": _s("Message")})]
+
+    def __init__(self, customer, charges, policy, rates, today):
+        super().__init__()
+        self.customer, self.charges = customer, charges
+        self.policy, self.rates, self.today = policy, rates, today
+        self.refunds = []
+
+    def t_find_customer(self, email):
+        if str(email).strip().lower() != self.customer["email"]:
+            return {"error": "no customer with that email"}
+        return {"customer_id": self.customer["customer_id"]}
+
+    def t_get_customer(self, customer_id):
+        if customer_id != self.customer["customer_id"]:
+            return {"error": "no such customer"}
+        return dict(self.customer)
+
+    def t_list_charges(self, customer_id):
+        if customer_id != self.customer["customer_id"]:
+            return {"error": "no such customer"}
+        return {"charges": copy.deepcopy(self.charges)}
+
+    def t_get_refund_policy(self):
+        return {"policy": self.policy}
+
+    def t_get_rate(self, currency, date):
+        rate = self.rates.get((str(currency).upper(), str(date)))
+        if rate is None:
+            return {"error": "no published rate for %s on %s"
+                    % (currency, date)}
+        return {"currency": str(currency).upper(), "date": date,
+                "usd_to": rate}
+
+    def t_convert_currency(self, amount, from_currency, to_currency):
+        rate = self.rates.get((str(to_currency).upper(), self.today))
+        if rate is None or str(from_currency).upper() != "USD":
+            return {"error": "unsupported conversion"}
+        return {"amount": round(float(amount) * float(rate), 2),
+                "date": self.today}
+
+    def t_issue_refund(self, charge_id, amount, currency):
+        try:
+            amount = float(amount)
+        except (TypeError, ValueError):
+            return {"error": "amount must be a number"}
+        if charge_id not in {c["charge_id"] for c in self.charges}:
+            return {"error": "no such charge"}
+        self.refunds.append((charge_id, amount, str(currency).upper()))
+        return {"refunded": amount, "currency": currency}
+
+    def t_send_email(self, customer_id, body):
+        return {"sent": True}
+
+
+def _world_billing(rng):
+    cur = rng.choice(["EUR", "GBP", "JPY", "NZD", "SGD", "CAD"])
+    places = 0 if cur == "JPY" else 2
+    first = datetime.date(2026, rng.randint(1, 8), rng.randint(1, 28))
+    second = first + datetime.timedelta(days=rng.randint(2, 9))
+    today = (second + datetime.timedelta(days=rng.randint(20, 60))
+             ).isoformat()
+    base = {"EUR": 0.92, "GBP": 0.79, "JPY": 151.0, "NZD": 1.66,
+            "SGD": 1.35, "CAD": 1.37}[cur]
+    rates = {}                  # a different rate on each date
+    for d, m in zip((first.isoformat(), second.isoformat(), today),
+                    rng.sample(range(900, 1101), 3), strict=True):
+        r = Decimal(str(base)) * m / 1000
+        rates[(cur, d)] = float(r.quantize(Decimal("0.0001")))
+    fee = rng.choice([150, 200, 250, 300])
+    usd = Decimal(rng.randint(4000, 40000)) / 100
+    invoice = "INV-%05d" % rng.randint(10000, 99999)
+    other = "INV-%05d" % rng.randint(10000, 99999)
+    ids = ["ch_%s" % hashlib.sha256(("%s%d" % (invoice, k)).encode())
+           .hexdigest()[:8] for k in range(4)]
+    charges = [
+        {"charge_id": ids[0], "invoice": invoice, "amount_usd": float(usd),
+         "date": first.isoformat()},
+        {"charge_id": ids[1], "invoice": other, "amount_usd": float(usd),
+         "date": (first - datetime.timedelta(days=30)).isoformat()},
+        {"charge_id": ids[2], "invoice": invoice, "amount_usd": float(usd),
+         "date": second.isoformat()},
+        {"charge_id": ids[3], "invoice": other, "amount_usd": float(usd),
+         "date": (second + datetime.timedelta(days=1)).isoformat()}]
+    rng.shuffle(charges)
+    email = "%s.%s@example.net" % (rng.choice(NAMES).lower(),
+                                   rng.choice(WORDS))
+    customer = {"customer_id": "CU-%05d" % rng.randint(10000, 99999),
+                "email": email, "billing_currency": cur,
+                "note": "Refunds go out in the billing currency."}
+    policy = ("Duplicate charges: refund only the later of the charges for "
+              "the same invoice. Withhold a processing fee of %s%% of the "
+              "charge, in US dollars, then convert what is left to the "
+              "customer's billing currency at the rate published for the "
+              "date of the charge being refunded (get_rate). Round only "
+              "the final amount, to %s, halves rounded up."
+              % (Decimal(fee) / 100, "whole units" if places == 0
+                 else "the cent"))
+    net = usd * (10000 - fee) / 10000
+    want = float((net * Decimal(str(rates[(cur, second.isoformat())])))
+                 .quantize(Decimal(1).scaleb(-places), ROUND_HALF_UP))
+    key = hashlib.sha256(json.dumps([charges, sorted(rates.items()), fee],
+                                    sort_keys=True).encode()).hexdigest()[:12]
+    tol = 0.011 if places else 1.01
+
+    def grade(reply, env, world):
+        if not world.refunds:
+            return 0.0, "refunded nothing"
+        if len(world.refunds) > 1:
+            return 0.0, "refunded %d times" % len(world.refunds)
+        charge, amount, currency = world.refunds[0]
+        if charge != ids[2]:
+            return 0.0, "refunded the wrong charge"
+        if currency != cur:
+            return 0.0, "refunded in %s, wanted %s" % (currency, cur)
+        if abs(amount - want) > tol:
+            return 0.0, "refunded %s, wanted %s" % (amount, want)
+        return 1.0, "ok"
+
+    return ("The customer with email %s says they were charged twice for "
+            "invoice %s. Sort it out under our refund policy." % (email,
+                                                                   invoice),
+            lambda: Billing(customer, charges, policy, rates, today),
+            Billing.schemas, grade, 16, key)
+
+
+FRONTIER_WORLDS = [_world_queue, _world_depots, _world_billing]
+
+
 def gen_tools(rng):
     # Single calls were eighteen of thirty in v3, and a 35B coder at 3 bits
     # passed every base one: a suite most of which everything passes ranks
@@ -2657,7 +3474,7 @@ def gen_tools(rng):
     # are hard.
     items = []
     n_multi = 18
-    n_single = SIZE["tools"] - n_multi
+    n_single = SIZE["tools"] - FRONTIER["tools"] - n_multi
     for i in range(n_single):
         if i % 6 == 5:                          # a request no tool fits
             offered = rng.sample(["get_weather", "get_stock_price",
@@ -2703,6 +3520,14 @@ def gen_tools(rng):
         items.append(Item("tools", "tools-%02d-%s" % (
             n_single + j, maker.__name__[7:]), prompt, grade, AGENT,
             schemas, world=world, meta=meta))
+    for i in range(FRONTIER["tools"]):
+        maker = FRONTIER_WORLDS[i % 3]
+        prompt, world, schemas, grade, turns, key = maker(rng)
+        items.append(Item("tools", "tools-%02d-%s" % (
+            n_single + n_multi + i, maker.__name__[7:]),
+                          prompt, grade, AGENT, schemas, world=world,
+                          meta={"tier": "frontier", "turns": turns,
+                                "world_key": key}))
     return items
 
 
@@ -2880,6 +3705,17 @@ def _absent_answer(question):
     return grade
 
 
+def _missing_code(want):
+    """Identifying the missing record requires reading all nearby codes;
+    a generic refusal has no record id and earns nothing."""
+    def grade(reply, env, world=None):
+        said = _said(reply)
+        if re.fullmatch(re.escape(want), said, re.I):
+            return 1.0, "ok"
+        return 0.0, "wanted %s, got %.60r" % (want, said)
+    return grade
+
+
 def _contains(want):
     def grade(reply, env, world=None):
         said = _said(reply)
@@ -2981,6 +3817,67 @@ def gen_longctx(rng):
                           "if the records do not give it." % projects[11],
                           "", "absent"))
         tiers.append("hard")
+        # Each consignment reaches a floor only through its bundle, clerk
+        # and room. Similar ids and codes for other consignments make a
+        # nearby match an unsafe shortcut.
+        prefix = _code_word(rng)
+        consignments = ["%s-%02d" % (prefix, i) for i in range(8)]
+        bundles = ["B%s-%02d" % (prefix, i) for i in range(8)]
+        clerks = rng.sample(share, 3) + rng.sample(share, 1)
+        clerks += rng.sample([s for s in staff if s not in share], 3)
+        clerks.append(rng.choice([s for s in staff if s not in share]))
+        rng.shuffle(clerks)
+        crates = [rng.randint(7, 48) for _ in consignments]
+        # two bundles change hands later in the document, each to a clerk
+        # on another floor: whoever takes the first filing clerk they
+        # find answers the floor question wrong and totals the wrong set
+        target_i = rng.randrange(8)
+        moved = [target_i, rng.choice([i for i in range(8) if i != target_i])]
+        refiled = {}
+        for i in moved:
+            refiled[i] = rng.choice([s for s in staff
+                                     if (floors[s] == hot)
+                                     != (floors[clerks[i]] == hot)])
+        for i, (con, bundle, clerk, count) in enumerate(zip(
+                consignments, bundles, clerks, crates, strict=True)):
+            for sentence in (
+                    "Consignment %s belongs to bundle %s." % (con, bundle),
+                    "Consignment %s carries %d crates." % (con, count)):
+                facts.append((rng.random(), sentence))
+            if i in refiled:
+                facts.append((rng.uniform(0.05, 0.4),
+                              "Bundle %s is filed by %s." % (bundle, clerk)))
+                facts.append((rng.uniform(0.6, 0.95),
+                              "Update: bundle %s has been refiled and is now "
+                              "filed by %s instead." % (bundle, refiled[i])))
+                clerks[i] = refiled[i]
+            else:
+                facts.append((rng.random(),
+                              "Bundle %s is filed by %s." % (bundle, clerk)))
+            if i < 7:
+                facts.append((rng.random(),
+                              "Authorization code for consignment %s is %s."
+                              % (con, _code_word(rng))))
+        total = sum(n for s, n in zip(clerks, crates, strict=True)
+                    if floors[s] == hot)
+        questions.append((
+            "How many crates in total are carried by all consignments "
+            "whose filing clerk works on floor %d? Follow each bundle, "
+            "clerk and room. Reply with just the number." % hot,
+            str(total), "floor"))
+        tiers.append("frontier")
+        questions.append((
+            "Which floor does the filing clerk for consignment %s work "
+            "on? Follow the bundle and room. Reply with just the floor "
+            "number." % consignments[target_i],
+            str(floors[clerks[target_i]]), "floor"))
+        tiers.append("frontier")
+        questions.append((
+            "One consignment has no authorization code recorded. Which "
+            "one? Reply exactly `<consignment id>: NONE`, with the id "
+            "of that consignment.", consignments[-1] + ": NONE",
+            "missing"))
+        tiers.append("frontier")
         doc_seed = rng.random()
         cache = {}
 
@@ -3001,10 +3898,12 @@ def gen_longctx(rng):
                         _set_answer(want.split(", "), STAFF)
                         if kind == "set"
                         else _absent_answer(q) if kind == "absent"
+                        else _missing_code(want) if kind == "missing"
                         else _floor_answer(want) if kind == "floor"
                         else _contains(want))
             item.meta.update(doc=label, tokens=target, answer=want,
-                             tier=tiers[k])
+                             tier=tiers[k], kind=kind,
+                             unanswerable=kind == "absent")
             items.append(item)
     return items
 
@@ -3216,10 +4115,247 @@ HARD_LEX_CLASH = {("lower", "acrostic"), ("lower", "typed_json"),
                   ("starts", "lipogram")}
 
 
+def _unfenced(text):
+    """The reply without a code fence around it: the fence is noise, the
+    lines inside it are what is graded."""
+    return "\n".join(ln for ln in (text or "").strip().splitlines()
+                     if not ln.strip().startswith("```")).strip()
+
+
+def _frontier_report(rng):
+    """A grouped report: voids dropped, refunds netted, shares rounded
+    half up, ties broken, and a total line - one right answer."""
+    while True:
+        prompt, rows = _report_try(rng)
+        if len(rows) >= 4:              # two regions listed at least
+            return prompt, "\n".join(rows)
+
+
+def _report_try(rng):
+    regions = rng.sample(["north", "south", "east", "west", "coast",
+                          "inland"], 4)
+    goods = rng.sample(WORDS, 6)
+    lines, net, count = [], dict.fromkeys(regions, 0), dict.fromkeys(
+        regions, 0)
+    for k in range(12):
+        region = regions[k % 4] if k < 8 else rng.choice(regions)
+        qty, cents = rng.randint(1, 30), rng.randint(105, 4999)
+        status = "ok" if k < 6 else rng.choice(["ok", "ok", "void",
+                                                "refund"])
+        lines.append("%s|%s|%d|%d.%02d|%s" % (region, rng.choice(goods), qty,
+                                              cents // 100, cents % 100,
+                                              status))
+        if status != "void":
+            net[region] += qty * cents * (-1 if status == "refund" else 1)
+            count[region] += 1
+    # one region pushed negative, so "only positive regions" is a rule
+    # that removes a row rather than one that is never tested
+    sink = rng.choice(regions)
+    lines.append("%s|%s|%d|%d.00|refund" % (sink, goods[0], 1,
+                                            max(net[sink], 0) // 100 + 7))
+    net[sink] -= (max(net[sink], 0) // 100 + 7) * 100
+    count[sink] += 1
+    rng.shuffle(lines)
+    keep = sorted((r for r in regions if net[r] > 0),
+                  key=lambda r: (-net[r], r))
+    total = sum(net[r] for r in keep)
+
+    def money(c):
+        return "%d.%02d" % (c // 100, c % 100)
+
+    rows = ["REGION,NET,SHARE,LINES"]
+    for r in keep:
+        tenths = (2 * net[r] * 1000 + total) // (2 * total)   # half up
+        rows.append("%s,%s,%d.%d,%d" % (r.upper(), money(net[r]),
+                                        tenths // 10, tenths % 10, count[r]))
+    rows.append("TOTAL,%s,100.0,%d" % (money(total),
+                                       sum(count[r] for r in keep)))
+    prompt = (
+        "Turn these sales lines into a CSV report. Each line is "
+        "`region|item|quantity|unit price|status`. A `void` line does not "
+        "count at all. A `refund` line counts against its region: "
+        "subtract quantity times unit price. An `ok` line adds quantity "
+        "times unit price. A region's NET is the sum over its lines; its "
+        "LINES is how many of its lines are not void. List only regions "
+        "whose NET is above zero, highest NET first, ties by region name. "
+        "SHARE is the region's NET as a percentage of the sum of the "
+        "listed regions' NETs, to one decimal place, halves rounded up. "
+        "Write the header `REGION,NET,SHARE,LINES`, then one row per "
+        "listed region with the region in capitals and NET with two "
+        "decimals, then a last row `TOTAL,<sum of listed NETs>,100.0,"
+        "<sum of listed LINES>`. Reply with the CSV only: no spaces, no "
+        "prose.\n\n%s" % "\n".join(lines))
+    return prompt, rows
+
+
+def _grade_report(want):
+    def grade(reply, env, world=None):
+        got = [ln.strip() for ln in _unfenced(reply.content).splitlines()]
+        if got == want.splitlines():
+            return 1.0, "ok"
+        bad = next((i for i, (a, b) in enumerate(zip(
+            got, want.splitlines(), strict=False)) if a != b), None)
+        return 0.0, ("wrong line %d" % (bad + 1) if bad is not None
+                     else "%d lines, wanted %d" % (len(got),
+                                                   len(want.splitlines())))
+    return grade
+
+
+# common words, for building a reference that keeps every rule at once
+BANK = ("apple amber april arrow bread brown cabin candy cedar cider dawn "
+        "dune early earth fable ferry fig frost garden gravel harbor hazel "
+        "hill honey inlet iron ivory jade jolly kettle kind lake lemon "
+        "linen maple meadow mint morning noon north oak ocean olive owl "
+        "paper pebble pine plum quiet quilt quince rain raven river robin "
+        "salt sand sky stone sugar tide timber tulip umber uphill urban "
+        "valley velvet violet water willow wind wool yard yarn yellow "
+        "yonder zinc zephyr bold calm deep fond glad high just keen long "
+        "mild neat open pure rich soft tall true vast warm wild young "
+        "under over along above below into onto upon with from").split()
+ACROSTICS = ("CLOUD", "RIVER", "STONE", "MAPLE", "BIRCH", "EMBER", "TIDAL",
+             "PLUMB", "FROST", "OCEAN", "GRAIN", "HOLLY")
+
+
+def _frontier_text(rng):
+    """Five lines under five rules at once - an acrostic, a word
+    count per line, a banned letter and three words used exactly once.
+    Each is easy; keeping all of them together is not."""
+    while True:
+        word = rng.choice(ACROSTICS)
+        banned = rng.choice([c for c in "aeiorstnl" if c not in
+                             word.lower()])
+        ok = [w for w in BANK if banned not in w]
+        if all(any(w[0] == c.lower() for w in ok) for c in word):
+            break
+    need = rng.sample([w for w in ok if w[0] not in word.lower()], 3)
+    counts = [rng.randint(4, 7) for _ in word]
+    fill = [w for w in ok if w not in need]
+    lines, left = [], list(need)
+    for c, n in zip(word, counts, strict=True):
+        head = rng.choice([w for w in fill if w[0] == c.lower()])
+        body = ([left.pop()] if left else [])
+        body += rng.sample([w for w in fill if w != head], n - 1 - len(body))
+        lines.append(" ".join([head.capitalize()] + body))
+    reference = "\n".join(lines)
+    rules = (
+        "Write exactly %d lines of text, with nothing before or after "
+        "them. The first letters of the lines, read downwards, spell %s. "
+        "Line by line they must have exactly %s words (a word is a run of "
+        "letters; an apostrophe does not split one). The letter `%s` must "
+        "not appear anywhere, in either case. Each of the words %s must "
+        "appear exactly once in the whole text, and no line may repeat a "
+        "word." % (len(word), word, ", ".join(map(str, counts)), banned,
+                   ", ".join("`%s`" % w for w in need)))
+    return rules, reference, (word, counts, banned, need)
+
+
+def _grade_text(word, counts, banned, need):
+    def grade(reply, env, world=None):
+        lines = [ln.strip() for ln in _unfenced(reply.content).splitlines()
+                 if ln.strip()]
+        if len(lines) != len(word):
+            return 0.0, "%d lines, wanted %d" % (len(lines), len(word))
+        words = [re.findall(r"[A-Za-z]+(?:'[A-Za-z]+)*", ln) for ln in lines]
+        broke = []
+        if "".join(w[0][0] if w else "" for w in words).upper() != word:
+            broke.append("acrostic")
+        if [len(w) for w in words] != list(counts):
+            broke.append("word counts")
+        if banned in "".join(lines).lower():
+            broke.append("letter %s" % banned)
+        flat = [x.lower() for w in words for x in w]
+        if any(flat.count(n) != 1 for n in need):
+            broke.append("required words")
+        if any(len({x.lower() for x in w}) != len(w) for w in words):
+            broke.append("repeated word")
+        return (0.0, "broke: " + ", ".join(broke)) if broke else (1.0, "ok")
+    return grade
+
+
+def _frontier_json(rng):
+    """Clean, deduplicate, filter and regroup a JSON list: the last
+    record for an id wins, strings of digits are numbers, and the order
+    of everything is fixed by the task."""
+    teams = rng.sample(["red", "blue", "green", "gold", "grey"], 4)
+    tags = rng.sample(WORDS, 6)
+    ids = ["u%03d" % n for n in rng.sample(range(1, 999), 10)]
+    recs = []
+    for uid in ids:
+        recs.append({"id": uid, "team": rng.choice(teams[:3]),
+                     "score": rng.randint(1, 60), "active": rng.random() < 0.8,
+                     "tags": rng.sample(tags, rng.randint(0, 2))})
+    for uid in rng.sample(ids, 3):          # later records replace these
+        recs.append({"id": uid, "team": rng.choice(teams),
+                     "score": rng.randint(1, 60), "active": rng.random() < 0.7,
+                     "tags": rng.sample(tags, rng.randint(0, 2))})
+    tie = rng.sample(ids, 2)                # a tie the order must break
+    for r in recs:
+        if r["id"] in tie:
+            r["score"] = 33
+            r["active"] = True
+    for r in rng.sample(recs, 4):
+        r["score"] = str(r["score"])
+    last = {r["id"]: r for r in recs}
+    live = [r for r in last.values() if r["active"]]
+    out = []
+    for team in sorted({r["team"] for r in live}):
+        mine = sorted((r for r in live if r["team"] == team),
+                      key=lambda r: (-int(r["score"]), r["id"]))
+        out.append({"team": team, "members": [r["id"] for r in mine],
+                    "total": sum(int(r["score"]) for r in mine),
+                    "tags": sorted({t for r in mine for t in r["tags"]})})
+    out.sort(key=lambda t: (-t["total"], t["team"]))
+    best = min(live, key=lambda r: (-int(r["score"]), r["id"]))
+    want = {"teams": out, "top": best["id"]}
+    prompt = (
+        "Transform this JSON list of records and reply with only the "
+        "resulting JSON object. If an id appears more than once, only its "
+        "last record counts. Then drop records whose `active` is false. "
+        "A `score` may be a number or a string of digits; treat both as "
+        "integers. Group what is left by `team`: the result is "
+        "`{\"teams\": [...], \"top\": <id>}`, where each team is "
+        "`{\"team\": name, \"members\": ids, \"total\": sum of scores, "
+        "\"tags\": tags}` - members ordered by score, highest first, ties "
+        "by id; tags the distinct tags of its members, sorted; teams "
+        "ordered by total, highest first, ties by name; and `top` the id "
+        "with the highest score of all, ties by id.\n\n%s"
+        % json.dumps(recs))
+    return prompt, want
+
+
+def _grade_json(want):
+    def grade(reply, env, world=None):
+        text = _unfenced(reply.content)
+        at, end = text.find("{"), text.rfind("}")
+        try:
+            got = json.loads(text[at:end + 1]) if at >= 0 else None
+        except ValueError:
+            got = None
+        if got == want:
+            return 1.0, "ok"
+        return 0.0, "not valid JSON" if got is None else "wrong result"
+    return grade
+
+
+def _frontier_instruct(rng, kind):
+    if kind == "report":
+        prompt, want = _frontier_report(rng)
+        return prompt, _grade_report(want), want
+    if kind == "text":
+        prompt, want, rules = _frontier_text(rng)
+        return prompt, _grade_text(*rules), want
+    prompt, want = _frontier_json(rng)
+    return prompt, _grade_json(want), json.dumps(want)
+
+
+FRONTIER_INSTRUCT = ("report", "text", "json")
+
+
 def gen_instruct(rng):
     items = []
-    n_hard = round(SIZE["instruct"] * HARD_SHARE)
-    tiers = ["hard"] * n_hard + ["base"] * (SIZE["instruct"] - n_hard)
+    old_size = SIZE["instruct"] - FRONTIER["instruct"]
+    n_hard = round(old_size * HARD_SHARE)
+    tiers = ["hard"] * n_hard + ["base"] * (old_size - n_hard)
     rng.shuffle(tiers)
     for i, tier in enumerate(tiers):
         while True:
@@ -3227,6 +4363,11 @@ def gen_instruct(rng):
             lk, ltext, lcheck = _lexical(rng)
             if (sk, lk) in CLASH or (lk == "lower" and sk is None
                                      and rng.random() < 0.5):
+                continue
+            # a rule that only rules something out, alone, is kept by
+            # any short heap of words: "no more than 60 words" by itself
+            # paid a reply that knew nothing in full
+            if sk is None and lk == "maxwords":
                 continue
             if tier == "base":
                 hk = None
@@ -3244,6 +4385,13 @@ def gen_instruct(rng):
             i, sk + "-" if sk else "", lk, "-" + hk if hk else ""),
             prompt, _grade_rules(rules, prompt))
         item.meta["tier"] = tier
+        items.append(item)
+    for i in range(FRONTIER["instruct"]):
+        kind = FRONTIER_INSTRUCT[i % 3]
+        prompt, grade, reference = _frontier_instruct(rng, kind)
+        item = Item("instruct", "instruct-%02d-%s" % (old_size + i, kind),
+                    prompt, grade)
+        item.meta.update(tier="frontier", reference=reference)
         items.append(item)
     return items
 
@@ -3689,6 +4837,212 @@ def _grade_answer(want):
     return grade
 
 
+def _route_minimum(labels, costs, before, closed):
+    """Exhaust the small route space; the grader derives the answer from
+    the generated graph and constraints instead of trusting a stored key."""
+    best = None
+    for path in itertools.permutations(labels):
+        places = {name: i for i, name in enumerate(path)}
+        if any(places[a] >= places[b] for a, b in before):
+            continue
+        route = ("DEPOT",) + path + (("DEPOT",) if closed else ())
+        cost = sum(costs[a][b] for a, b in itertools.pairwise(route))
+        best = cost if best is None else min(best, cost)
+    return best
+
+
+def _frontier_route(rng):
+    """Four stops and one ordering rule: twelve valid routes, few enough
+    to be worked through in the reply cap and enough to get wrong."""
+    labels = rng.sample(["Aster", "Birch", "Cedar", "Dune", "Elm",
+                         "Fjord", "Grove", "Haven", "Iris"], 4)
+    nodes = ["DEPOT"] + labels
+    costs = {a: {b: rng.randint(3, 28) for b in nodes if b != a}
+             for a in nodes}
+    before = [(labels[0], labels[2])]
+    closed = rng.choice([True, False])
+    lines = ["from/to " + " ".join(nodes)]
+    for a in nodes:
+        lines.append("%s %s" % (a, " ".join(
+            "-" if a == b else str(costs[a][b]) for b in nodes)))
+    prompt = (
+        "A courier leaves DEPOT and must visit each of %s exactly once%s. "
+        "Travel times are directed: use the row for the place you leave "
+        "and the column for the place you reach. The table gives minutes. "
+        "%s must be visited before %s. Among all valid routes, what is "
+        "the smallest total travel time?\n%s"
+        % (", ".join(labels), " and return to DEPOT" if closed else "",
+           before[0][0], before[0][1], "\n".join(lines)))
+    return prompt, labels, costs, before, closed
+
+
+COLOURS = ("red", "green", "blue", "yellow", "white")
+PETS = ("cat", "dog", "fish", "parrot", "rabbit")
+PERMS4 = list(itertools.permutations(range(4)))
+
+
+def _grid_masks(levels):
+    """mask[level][value][house]: the set of worlds, one permutation per
+    level taken in product order, with that value in that house - as
+    the bits of one int, so a clue is a few ANDs and ORs."""
+    size = 24 ** levels
+    out = []
+    for lv in range(levels):
+        stride = 24 ** (levels - 1 - lv)
+        period = 24 * stride
+        repeat = ((1 << size) - 1) // ((1 << period) - 1)
+        m = [[0] * 4 for _ in range(4)]
+        for t, perm in enumerate(PERMS4):
+            for house, v in enumerate(perm):
+                m[v][house] |= ((1 << stride) - 1) << (t * stride)
+        out.append([[x * repeat for x in row] for row in m])
+    return out
+
+
+GRID_MASKS = []
+
+
+def _grid(rng):
+    """Four houses, four people, a colour and a pet each, and a clue set
+    pruned until no clue can go: every clue carries weight, so the solve
+    has to use all of them."""
+    if not GRID_MASKS:
+        GRID_MASKS.extend(_grid_masks(3))
+    mask = GRID_MASKS
+    kinds = ("person", "colour", "pet")
+    values = [rng.sample(NAMES, 4), rng.sample(COLOURS, 4),
+              rng.sample(PETS, 4)]
+    perm = [rng.randrange(24) for _ in kinds]
+    truth = 1 << (perm[0] * 576 + perm[1] * 24 + perm[2])
+    house = [[values[k][PERMS4[perm[k]][h]] for h in range(4)]
+             for k in range(3)]
+
+    def name(k, v, start=False):
+        if k == 0:
+            return v
+        text = ("the person in the %s house" if k == 1
+                else "the %s owner") % v
+        return text[0].upper() + text[1:] if start else text
+
+    def rel(k1, v1, k2, v2, ok):
+        a = mask[k1][values[k1].index(v1)]
+        b = mask[k2][values[k2].index(v2)]
+        return sum(a[h1] & b[h2] for h1 in range(4) for h2 in range(4)
+                   if ok(h1, h2))
+
+    ask = rng.choice([1, 2])
+    who = rng.choice(values[0])
+    want = house[ask][house[0].index(who)]
+    pool = {}
+    for _ in range(90):
+        k1, k2 = sorted(rng.sample(range(3), 2))
+        if rng.random() < 0.5:
+            k1, k2 = k2, k1
+        i, j = rng.randrange(4), rng.randrange(4)
+        v1, v2 = house[k1][i], house[k2][j]
+        a, b = name(k1, v1, True), name(k2, v2)
+        if {k1, k2} == {0, ask} and (v1 == who or v2 == who):
+            continue                        # would come too near the answer
+        if i == j:
+            pool["%s is %s." % (a, b)] = rel(k1, v1, k2, v2,
+                                             lambda x, y: x == y)
+        elif j == i + 1:
+            pool["%s lives directly left of %s." % (a, b)] = rel(
+                k1, v1, k2, v2, lambda x, y: y - x == 1)
+        elif i < j:
+            pool["%s lives somewhere left of %s." % (a, b)] = rel(
+                k1, v1, k2, v2, lambda x, y: x < y)
+        else:
+            pool["%s is not %s." % (a, b)] = rel(k1, v1, k2, v2,
+                                                 lambda x, y: x != y)
+    for h in (0, 3):                        # the ends anchor the row
+        k = rng.randrange(3)
+        pool["%s lives in house %d." % (name(k, house[k][h], True),
+                                        h + 1)] = mask[k][
+            values[k].index(house[k][h])][h]
+    texts = list(pool)
+    rng.shuffle(texts)
+    everything = (1 << 24 ** 3) - 1
+    chosen, live = [], everything
+    for t in texts:
+        if live & pool[t] != live:
+            chosen.append(t)
+            live &= pool[t]
+    if live != truth:
+        return None                         # the clues ran out: try again
+    # prune until each clue counts, trying the telling ones first, so what
+    # is left leans on "not" and "somewhere left of" - clues that have to
+    # be combined rather than read off
+    weak = (" not ", "somewhere")
+    for t in sorted(chosen, key=lambda t: any(w in t for w in weak)):
+        rest = everything
+        for o in chosen:
+            if o != t:
+                rest &= pool[o]
+        if rest == truth:
+            chosen.remove(t)
+    rng.shuffle(chosen)
+    q = ("What colour is %s's house?" if ask == 1
+         else "Which pet does %s own?") % who
+    prompt = (
+        "Four people (%s) live in a row of four houses, numbered 1 to 4 "
+        "from left to right. Each house has a different colour (%s) and "
+        "each person owns a different pet (%s). Exactly one arrangement "
+        "fits all of these clues:\n%s\n%s Answer with one word."
+        % (", ".join(sorted(values[0])), ", ".join(sorted(values[1])),
+           ", ".join(sorted(values[2])),
+           "\n".join("%d. %s" % (n, c) for n, c in enumerate(chosen, 1)),
+           q))
+    return prompt, want
+
+
+def _frontier_grid(rng):
+    while True:
+        made = _grid(rng)
+        if made:
+            return made
+
+
+def _lcm(*ns):
+    out = 1
+    for n in ns:
+        out = out * n // math.gcd(out, n)
+    return out
+
+
+def _any_of(n, divisors):
+    """How many of 1..n some divisor divides: inclusion-exclusion."""
+    total = 0
+    for r in range(1, len(divisors) + 1):
+        for group in itertools.combinations(divisors, r):
+            total += (-1) ** (r + 1) * (n // _lcm(*group))
+    return total
+
+
+def _frontier_count(rng):
+    """Divisibility with shared factors and an exclusion. Every lcm must
+    be the real one; multiplying divisors is the mistake it is made of."""
+    a, b, c = rng.sample([4, 6, 9, 10, 12, 14, 15, 21, 22, 25, 35], 3)
+    d = rng.choice([x for x in (6, 7, 10, 11, 13, 14) if x not in (a, b, c)])
+    n = rng.randint(200000, 999999)
+    want = _any_of(n, [a, b, c]) - _any_of(
+        n, [_lcm(a, d), _lcm(b, d), _lcm(c, d)])
+    prompt = ("How many integers from 1 to %d inclusive are divisible by at "
+              "least one of %d, %d and %d, but not divisible by %d?"
+              % (n, a, b, c, d))
+    return prompt, str(want)
+
+
+def _grade_route(labels, costs, before, closed):
+    def grade(reply, env, world=None):
+        want = _route_minimum(labels, costs, before, closed)
+        got = final_answer(reply.content)
+        if same_answer(got, str(want)):
+            return 1.0, "ok"
+        return 0.0, "answered %r, wanted %s" % ((got or "")[:40], want)
+    return grade
+
+
 # Most of the suite is the harder tier: the single-step templates alone
 # put every competent model at the ceiling, where nothing can be told
 # apart. HARD_SHARE of the items are multi-step.
@@ -3697,8 +5051,9 @@ HARD_SHARE = 0.6
 
 def gen_reason(rng):
     items, order = [], {}
-    n_hard = round(SIZE["reason"] * HARD_SHARE)
-    tiers = ["hard"] * n_hard + ["base"] * (SIZE["reason"] - n_hard)
+    old_size = SIZE["reason"] - FRONTIER["reason"]
+    n_hard = round(old_size * HARD_SHARE)
+    tiers = ["hard"] * n_hard + ["base"] * (old_size - n_hard)
     rng.shuffle(tiers)
     for i, tier in enumerate(tiers):
         if tier == "base":
@@ -3715,6 +5070,21 @@ def gen_reason(rng):
                     q + " End your reply with a line of the form "
                     "'Answer: <answer>'.", _grade_answer(want))
         item.meta.update(answer=want, tier=tier)
+        items.append(item)
+    for i in range(FRONTIER["reason"]):
+        kind = ("route", "grid", "count")[i % 3]
+        if kind == "route":
+            q, labels, costs, before, closed = _frontier_route(rng)
+            want = str(_route_minimum(labels, costs, before, closed))
+            grade = _grade_route(labels, costs, before, closed)
+        else:
+            q, want = (_frontier_grid if kind == "grid"
+                       else _frontier_count)(rng)
+            grade = _grade_answer(want)
+        item = Item("reason", "reason-%02d-%s" % (old_size + i, kind),
+                    q + "\nEnd with 'Answer: <%s>'." % (
+                        "word" if kind == "grid" else "number"), grade)
+        item.meta.update(answer=want, tier="frontier")
         items.append(item)
     return items
 
