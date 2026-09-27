@@ -296,6 +296,56 @@ check("it is turned away with the reason in its header",
 check("and its sibling is not sized from the impostor's header",
       (fetched_now, drafts[1].inv), (["Giant-BF16.gguf"], None))
 
+# An MTP head exported with its model's metadata: it declares every block
+# and holds the last one. aj9o9/Qwen3.8-27B-Escha-W2-GGUF's is 2.9 GB of a
+# 27B, and find ran it as the model - F16, 256K context, all on the GPU.
+def head_of(source, layers=8):
+    full = inv_of(source, layers=layers)
+    ts = [x for x in full.tensors if x.layer in (None, layers - 1)]
+    return gguf.Inventory(source, full.meta, ts,
+                          [sum(x.nbytes for x in ts)], [0])
+
+
+bare = inv_of("bare")
+bare.tensors = [x for x in bare.tensors if x.layer is None]
+check("a header holding under half its declared layers is a fragment; "
+      "a whole model, or one with no blk.N tensors at all, is not",
+      [head_of("h").partial, inv_of("m").partial, bare.partial],
+      [(1, 8), None, None])
+check("and find turns it away as auxiliary, whatever its name",
+      find.header_problem(head_of("model-F16.gguf"), qm, "Fam/Base-Instruct"),
+      ("auxiliary", "its header holds 1 of the 8 layers it declares - an "
+                    "MTP head or draft, not the model"))
+read_now = []
+
+
+def head_first(c, cache_only=False):
+    read_now.append(c.key)
+    return head_of(c.key) if "head" in c.key else inv_of(c.key)
+
+
+find.fetch = head_first
+try:
+    pair = [find.Cand("Fam/Base-Instruct", "Fam/Base-Instruct", q, size,
+                      "q/Head-GGUF", key, [])
+            for q, key, size in (
+                ("F16", "Base-MTP-F16-headQ4.gguf", 4_000_000),
+                ("Q8_0", "Base-Q8_0.gguf", 32_000_000))]
+    find.fit_all(pair, qm, mach, opts, "agent", binary, False, [])
+finally:
+    find.fetch = real_fetch
+check("a head read first is turned away, and the file beside it reads its "
+      "own header rather than being sized from the head's",
+      (pair[0].reject and pair[0].reject[0], read_now, pair[1].exact,
+       pair[1].reject and pair[1].reject[0]),
+      ("auxiliary", ["Base-MTP-F16-headQ4.gguf", "Base-Q8_0.gguf"], True,
+       None))
+local_head = find.Cand(None, "head", "F16", 1, local="head", path=Path("h"))
+local_head.inv, local_head.exact = head_of("h.gguf"), True
+find.evaluate(local_head, qm, mach, opts, "agent", binary)
+check("a head in models.toml is turned away too; it has no card to check",
+      local_head.reject and local_head.reject[0], "auxiliary")
+
 rescaled = find.rescale(inv_of("a"), 16_000_000, "b")
 check("a sized sibling keeps the shapes and takes the file size",
       (len(rescaled.tensors), rescaled.file_size <= 16_000_000,

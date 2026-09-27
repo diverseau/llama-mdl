@@ -358,6 +358,19 @@ class Inventory:
         return out
 
     @property
+    def partial(self):
+        """(held, declared) for a file holding under half the layers its
+        header declares, else None. An MTP head exported with its model's
+        metadata declares 65 blocks and holds blk.64 alone: 2.9 GB of a
+        27B that read as the whole model at F16. A file with no blk.N
+        tensors at all is some other layout, not a fragment."""
+        declared = int(self.hp("block_count", 0) or 0)
+        held = len(self.layer_tensors())
+        if held and held * 2 < declared:
+            return held, declared
+        return None
+
+    @property
     def n_params(self):
         return sum(t.n_elements for t in self.tensors)
 

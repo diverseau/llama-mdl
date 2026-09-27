@@ -29,6 +29,7 @@ GPU_TTL = 2.0                   # nvidia-smi is ~100 ms; not every snapshot
 AGENTS_TTL = 30.0               # which agents are installed changes rarely
 PICKS_TTL = 12 * 3600           # mdl find again after this, or a config change
 PICKS = 6                       # find's picks offered beside your own models
+PICKS_VERSION = 2               # 2: find turns away MTP heads by header
 TAKEN = 0.6                     # a card this full with nothing of ours on it
 
 
@@ -254,6 +255,7 @@ def refresh_picks(force=False):
         old = {}
     stamp = _config_stamp()
     if (not force and old.get("config") == stamp
+            and old.get("v") == PICKS_VERSION
             and time.time() - (old.get("at") or 0) < PICKS_TTL):
         return False
     from . import proc
@@ -265,7 +267,8 @@ def refresh_picks(force=False):
         rows = old.get("rows", [])      # keep the last good ones
     picks_path().parent.mkdir(parents=True, exist_ok=True)
     mdl.write_atomic(picks_path(), json.dumps(
-        {"at": time.time(), "config": stamp, "rows": rows}))
+        {"v": PICKS_VERSION, "at": time.time(), "config": stamp,
+         "rows": rows}))
     return True
 
 
@@ -276,13 +279,17 @@ def picks(models):
         rows = json.loads(picks_path().read_text(encoding="utf-8"))["rows"]
     except (OSError, ValueError, KeyError, TypeError):
         return []
+    from mdl_fit import remote
     have = {w["repository"] for cfg in models.values()
             for w in weights(cfg.get("model"))}
     out, seen = [], set()
     for r in rows:
         repo, f = r.get("repo"), r.get("file")
+        # picks saved before find knew a head by its name are shown until
+        # the next run replaces them; the name catches the known shapes
         if (not str(r.get("spec", "")).startswith("hf:") or not repo
-                or not f or repo in have or repo in seen):
+                or not f or repo in have or repo in seen
+                or remote.auxiliary(f)):
             continue
         seen.add(repo)
         # picks saved before the name reader knew a quant say "?"
