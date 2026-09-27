@@ -1487,4 +1487,59 @@ check("the command line says whether it thinks",
                                           ["--reasoning-budget", "0"], [])],
       [True, False, False, None])
 
+# a later look at one suite must not stand in for the whole run before it
+whole_run = dict(run_of("m", [1.0] * 4), at="2026-05-05 00:00", full=True)
+one_suite = dict(run_of("m", [0.0] * 4), at="2026-06-06 00:00", full=False)
+check("the newest full run speaks for a model, not a later subset",
+      evalrun.latest("m", [whole_run, one_suite]) is whole_run, True)
+check("and a subset is still found when it is all there is",
+      evalrun.latest("m", [one_suite]) is one_suite, True)
+check("an old record without the flag is full if it scored every suite",
+      [evalrun.is_full({"suites": dict.fromkeys(evalsuite.SUITES, {})}),
+       evalrun.is_full({"suites": {"code": {}}})], [True, False])
+
+
+class Uncounted:
+    """A server that answers but reports no usage, as TabbyAPI does."""
+
+    def chat(self, messages, tools=None, max_tokens=0, seed=None):
+        return R("Answer: 1", prompt_tokens=None, completion_tokens=None)
+
+
+blind = evalrun.run_item(Uncounted(), by["reason"][0], env)
+check("tokens a server did not report are unknown, not zero",
+      (blind["prompt_tokens"], blind["completion_tokens"]), (None, None))
+blind_sum = evalrun.summarize([dict(blind, score=1.0)], "suite")["reason"]
+check("and so is what a right answer cost",
+      (blind_sum["tokens"], blind_sum["per_point"]), (None, None))
+blind_out = io.StringIO()
+evalrun.report(dict(run_of("m", [1.0]), suites={"reason": blind_sum},
+                    domains={}, tiers={}, name="m", suite_version=6,
+                    items=[]), blind_out.write)
+check("the report says the server did not count, not that it was free",
+      "did not report tokens" in blind_out.getvalue(), True)
+
+
+class Flat:
+    """A perf model where a decoded token takes a second and nothing
+    else takes any time, so an estimate counts tokens."""
+
+    Placement = staticmethod(lambda shape, flags: None)
+    params = staticmethod(lambda mach: None)
+    prefill_time = staticmethod(lambda *a: 0.0)
+    decode_time = staticmethod(lambda *a: 1.0)
+
+
+world_item = [i for i in by["tools"] if i.world and i.meta.get("turns")][0]
+real_perf, evalrun.perf = evalrun.perf, Flat
+try:
+    flags = type("F", (), {"ctx": 65536, "ub": 512})()
+    guessed = evalrun.estimate([world_item], None, flags, None)
+    measured = evalrun.estimate([world_item], None, flags, None,
+                                seen={"tools": 900.0})
+finally:
+    evalrun.perf = real_perf
+check("a model's own spend on a tool world is counted once, not per turn",
+      (measured, guessed > measured), (900.0, True))
+
 sys.exit(t.done())

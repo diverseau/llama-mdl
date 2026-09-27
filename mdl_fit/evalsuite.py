@@ -1294,6 +1294,19 @@ def _machine(rng):
     return ("run", prompt, src, cases)
 
 
+# Punctuation named in words: %r showed a lone backslash as '\\', which
+# reads as two of them, and a backtick in backticks cannot be read at all.
+CHAR_NAMES = {"|": "vertical bar", ";": "semicolon", ":": "colon",
+              "#": "hash", "'": "single quote", '"': "double quote",
+              "`": "backtick", "~": "tilde", "^": "caret",
+              "\\": "backslash", "%": "percent sign",
+              "!": "exclamation mark", "@": "at sign"}
+
+
+def _shown(c):
+    return "The %s (%s)" % (CHAR_NAMES[c], c)
+
+
 @_spec_code
 def _splitter(rng):
     """Four pieces of punctuation, chosen by the seed, and the rules for
@@ -1335,23 +1348,25 @@ def _splitter(rng):
         "Write a Python function `split_line(s)` that splits the string "
         "`s` into a list of fields, reading it one character at a time "
         "from the left.\n"
-        "- %r separates one field from the next.\n"
-        "- %r before any character puts that character into the field as "
-        "it is, and the %r itself is not kept. This holds everywhere, "
-        "inside quotes as well as outside. A %r as the very last "
+        "- %s separates one field from the next.\n"
+        "- %s before any character puts that character into the field as "
+        "it is, and the %s itself is not kept. This holds everywhere, "
+        "inside quotes as well as outside. A %s as the very last "
         "character of `s` is dropped.\n"
-        "- %r turns quoting on, and the next %r turns it off. The %r "
-        "characters themselves are never kept. While quoting is on, %r "
-        "and %r are ordinary characters. Quoting that is never turned "
-        "off simply runs to the end of `s`.\n"
-        "- %r, when quoting is off, ends the line: it and everything "
+        "- %s turns quoting on, and the next %s turns it off. The %s "
+        "characters themselves are never kept. While quoting is on, the "
+        "%s and the %s are ordinary characters. Quoting that is never "
+        "turned off simply runs to the end of `s`.\n"
+        "- %s, when quoting is off, ends the line: it and everything "
         "after it are dropped.\n"
         "- Spaces are never stripped from anything.\n"
         "- If `s` is empty, or nothing at all is left once a comment is "
-        "dropped, return []. Otherwise a `s` that ends in %r has an "
-        "empty last field, and two %r in a row have an empty field "
-        "between them."
-        % (sep, esc, esc, esc, quo, quo, quo, sep, com, com, sep, sep))
+        "dropped, return []. Otherwise a `s` that ends in a %s has an "
+        "empty last field, and two %s characters in a row have an empty "
+        "field between them."
+        % (_shown(sep), _shown(esc), CHAR_NAMES[esc], CHAR_NAMES[esc],
+           _shown(quo), CHAR_NAMES[quo], CHAR_NAMES[quo], CHAR_NAMES[sep],
+           CHAR_NAMES[com], _shown(com), CHAR_NAMES[sep], CHAR_NAMES[sep]))
 
     cases = [
         [""],

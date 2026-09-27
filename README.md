@@ -418,7 +418,7 @@ Leaderboards say how a model does in someone else's setup. `mdl eval`
 says how it does here, at your quant, KV type and context:
 
 ```
-mdl eval qwen-small                    every suite (~15-90 min, see --estimate)
+mdl eval qwen-small                    every suite (an hour or more; --estimate)
 mdl eval qwen-small --suite code,tools --limit 5
 mdl eval qwen-small --estimate         how long it would take
 mdl eval --results                     past runs, with 95% intervals

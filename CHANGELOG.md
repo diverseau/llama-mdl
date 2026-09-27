@@ -4,6 +4,24 @@ Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- `mdl eval`: a later `--suite` or `--limit` run of a model no longer
+  stands in for its full run. `--compare` and `mdl find` take the newest
+  full run, so one quick look at one suite does not shut every full
+  run out of `mdl find`'s local evidence.
+- `mdl eval --estimate` counted a tool world's tokens once per turn over
+  what the model had actually spent on it, so worlds of up to sixty
+  turns were estimated many times too long.
+- `mdl eval`: a resumed run's minutes now include the items finished
+  before the resume.
+- `mdl eval`: a server that reports no token usage is recorded as
+  unknown, not as zero tokens, and the cost line says so instead of
+  showing the run as free.
+- `mdl eval`: the line-splitter items name their punctuation in words;
+  a lone backslash was shown as `'\'`, which reads as two.
+- `mdl eval --help` lists `--port`.
+
 ## [0.14.0] - 2026-09-28
 
 A frontier tier for `mdl eval`, editing a model's config from its page

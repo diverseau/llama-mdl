@@ -35,7 +35,7 @@ IMAGE = "python:3.12-slim"
 USAGE = """\
 usage: mdl eval <name> [--suite code,tools,longctx,instruct,reason,custom]
                        [--limit N] [--resume] [--no-sandbox] [--estimate]
-                       [--json]
+                       [--port N] [--json]
        mdl eval --results [name]
 
 Runs a private, auto-graded suite against <name> the way models.toml
@@ -71,6 +71,7 @@ dropped connection, an HTTP error) is retried, not scored as wrong.
                 runtime is available
   --sandbox     require the container; fail if there is none
   --estimate    say how long it would take, and stop
+  --port N      the port to start the server on, when eval starts it
   --results     past runs
   --compare A B  two models on the same items, scored item by item
 """
@@ -169,8 +170,8 @@ class Client:
         usage = data.get("usage") or {}
         r = Reply(content, (msg.get("reasoning_content") or "") + inline,
                   calls, choice.get("finish_reason") or "",
-                  usage.get("prompt_tokens", 0),
-                  usage.get("completion_tokens", 0))
+                  usage.get("prompt_tokens"),
+                  usage.get("completion_tokens"))
         r.timings = data.get("timings") if isinstance(data, dict) else None
         return r
 
@@ -344,13 +345,17 @@ def run_item(client, item, env, cpt=4.0):
     seed = int(hashlib.sha256(item.id.encode()).hexdigest()[:8], 16)
     world = item.world() if item.world else None
     prompt = completion = 0
+    counted = True        # a server that reports no usage leaves it unknown
     capped = thought = False
     speed = []
     budget = item.meta.get("turns", MAX_TURNS) if world else 1
     for _ in range(budget):
         r = client.chat(msgs, item.tools, item.max_tokens, seed)
-        prompt += r.prompt_tokens
-        completion += r.completion_tokens
+        if r.prompt_tokens is None or r.completion_tokens is None:
+            counted = False
+        else:
+            prompt += r.prompt_tokens
+            completion += r.completion_tokens
         capped = capped or r.finish == "length"
         thought = thought or bool(r.reasoning)
         t = r.timings or {}
@@ -382,7 +387,8 @@ def run_item(client, item, env, cpt=4.0):
             "score": float(score), "why": why, "capped": capped,
             "error": bool(r.error), "thinking": thought,
             "reply": (r.content or "")[-400:],
-            "prompt_tokens": prompt, "completion_tokens": completion,
+            "prompt_tokens": prompt if counted else None,
+            "completion_tokens": completion if counted else None,
             "seconds": round(time.time() - t0, 2), "speed": speed}
 
 
@@ -446,7 +452,11 @@ def summarize(results, key):
     out = {}
     for k, rs in sorted(groups.items()):
         mean, lo, hi = bootstrap([r["score"] for r in rs], seed=len(rs))
-        spend = sum(r.get("completion_tokens", 0) for r in rs)
+        # one reply the server did not count makes the total unknown:
+        # a sum that silently leaves it out reads as cheaper than it was
+        known = [r.get("completion_tokens") for r in rs]
+        spend = (None if any(t is None for t in known)
+                 else sum(known))
         earned = sum(r["score"] for r in rs)
         out[k] = {"n": len(rs), "score": round(mean, 4), "lo": round(lo, 4),
                   "hi": round(hi, 4),
@@ -456,7 +466,8 @@ def summarize(results, key):
                   "seconds": round(sum(r.get("seconds", 0) for r in rs), 1),
                   # what a right answer cost: a model that thinks four
                   # times as long for the same score is not as good
-                  "per_point": round(spend / earned) if earned else None}
+                  "per_point": round(spend / earned)
+                  if earned and spend is not None else None}
     return out
 
 
@@ -516,7 +527,7 @@ def spent(name_hash, records=None, version=None):
         return {}
     total, n = {}, {}
     for r in best.get("items", []):
-        if "completion_tokens" in r and "suite" in r:
+        if r.get("completion_tokens") is not None and "suite" in r:
             total[r["suite"]] = total.get(r["suite"], 0) + r["completion_tokens"]
             n[r["suite"]] = n.get(r["suite"], 0) + 1
     return {k: total[k] / n[k] for k in total if n[k]}
@@ -545,14 +556,19 @@ def estimate(items, shape, flags, mach, eff=None, thinking=False, cpt=4.0,
         else:
             depth = 0
             n_in = (len(it.text(cpt)) + len(json.dumps(it.tools or ""))) / cpt
-        n_out = seen.get(it.suite) or evalsuite.EXPECT.get(it.suite, 400) * (
-            evalsuite.THINK_FACTOR if thinking else 1)
-        n_out = min(n_out, it.max_tokens)
         turns = (it.meta["turns"] // 2 if it.meta.get("turns")
                  else 3) if it.world else 1
-        total += turns * (
-            perf.prefill_time(pl, p, n_in + 150, flags.ub, depth, e_pp)
-            + n_out * perf.decode_time(pl, p, depth + n_in, e_tg))
+        if seen.get(it.suite):
+            # what this model spent last time is per item, every turn of
+            # a tool world already in it: multiplying it by the turns
+            # again counted a sixty-turn world thirty times over
+            n_out = min(seen[it.suite], it.max_tokens * turns)
+        else:
+            n_out = turns * min(evalsuite.EXPECT.get(it.suite, 400) * (
+                evalsuite.THINK_FACTOR if thinking else 1), it.max_tokens)
+        total += (turns * perf.prefill_time(pl, p, n_in + 150, flags.ub,
+                                            depth, e_pp)
+                  + n_out * perf.decode_time(pl, p, depth + n_in, e_tg))
     return total
 
 
@@ -749,9 +765,12 @@ def report(rec, w):
             "overall", sum(v.get("score", 0) for v in doms.values())
             / len(doms)))
     whole = rec.get("suites") or {}
-    spend = sum(v.get("tokens", 0) for v in whole.values())
+    spend = sum(v.get("tokens") or 0 for v in whole.values())
     earned = sum(v.get("score", 0) * v.get("n", 0) for v in whole.values())
-    if spend:
+    if any(v.get("tokens", 0) is None for v in whole.values()):
+        w("cost     the server did not report tokens · %s\n"
+          % minutes(rec.get("minutes", 0) * 60))
+    elif spend:
         w("cost     %s reply tokens · %s per right answer · %s\n" % (
             "{:,}".format(spend),
             "{:,}".format(round(spend / earned)) if earned else "-",
@@ -796,13 +815,24 @@ def report(rec, w):
         w("         ... and %d more\n" % (len(misses) - 5))
 
 
+def is_full(rec):
+    """A run of every built-in suite, every item. Older records do not
+    say, so one is taken as full if it scored all five suites."""
+    if "full" in rec:
+        return bool(rec["full"])
+    return set(evalsuite.SUITES) <= set(rec.get("suites") or {})
+
+
 def latest(name, records):
-    """The newest finished run of one model."""
+    """The newest finished run of one model, preferring a full one: a
+    later `--suite code` run is a look at one suite, and must not stand
+    in for the whole run it came after."""
     best = None
     for rec in records:
         if rec.get("name") != name or rec.get("partial"):
             continue
-        if best is None or rec.get("at", "") > best.get("at", ""):
+        key = (is_full(rec), rec.get("at", ""))
+        if best is None or key > (is_full(best), best.get("at", "")):
             best = rec
     return best
 
@@ -874,7 +904,7 @@ def compare(a, b, w):
             verdict(lo, hi, na, nb)))
     for rec in (a, b):
         whole = rec.get("suites") or {}
-        spend = sum(v.get("tokens", 0) for v in whole.values())
+        spend = sum(v.get("tokens") or 0 for v in whole.values())
         if spend:
             w("cost     %-10s %s reply tokens · %s\n" % (
                 rec["name"], "{:,}".format(spend),
@@ -1139,6 +1169,9 @@ def main(args, out=None):
         if not prior:
             ckpt.unlink(missing_ok=True)
         done.extend(prior.values())
+        # the minutes a result reports are the whole run's, not this
+        # sitting's: items finished before a resume took time too
+        t0 -= sum(r.get("seconds", 0) for r in prior.values())
         keep = checkpoint(ckpt)
         try:
             run_items(client, items, env, cpt, n_ctx, done, progress,
@@ -1173,6 +1206,8 @@ def _finish(o, w, name, target, flags, build, mach, seed, items, done,
     failed save leaves the run resumable - and book its timings."""
     if not any("score" in r for r in done):
         die("no items finished; nothing saved")
+    full = ("limit" not in o
+            and set(evalsuite.SUITES) <= set(pick_suites(o.get("suite"))))
     rec = {"at": time.strftime("%Y-%m-%d %H:%M"), "name": name,
            "model": str(target.model_path), "file": target.model_path.name,
            "hash": file_hash(target.model_path),
@@ -1186,6 +1221,7 @@ def _finish(o, w, name, target, flags, build, mach, seed, items, done,
            "grader_version": evalsuite.GRADER_VERSION,
            "seed_id": evalsuite.seed_id(seed),
            "items_hash": evalsuite.fingerprint(items),
+           "full": full,
            "suites": summarize(done, "suite"),
            "tiers": summarize(done, "tier"),
            "domains": summarize(done, "domain"),
