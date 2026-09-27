@@ -4,6 +4,7 @@ scripted agent stand in for one, and a stand-in server for llama-server.
 """
 import http.server
 import io
+import itertools
 import json
 import os
 import random
@@ -154,7 +155,7 @@ cheats = {
                          "def %s(*a):\n    return \"no such answer\"\n",
 }
 for label, src in cheats.items():
-    for it in by["code"][:3] + [i for i in frontier if i.suite == "code"][:1]:
+    for it in by["code"][:3] + [i for i in frontier if i.suite == "code"][:3]:
         name = it.id.split("-", 2)[2]
         check("a submission that %s scores nothing (%s)" % (label, name),
               it.grade(R("```python\n%s```" % (src % name)), env)[0], 0.0)
@@ -167,22 +168,46 @@ check("the code block that defines the function wins",
       evalsuite.extract_code("```python\nprint(1)\n```\n```python\ndef f(x):"
                              "\n    return x\n```\n```\nf(2)\n```", "f"),
       "def f(x):\n    return x\n")
-frontier_code = [i for i in frontier if i.suite == "code"]
-check("a wrong frontier repair fails on hidden cases",
-      [i.grade(R("```python\ndef reconcile(events, keys):\n"
-                 "    return [None for key in keys]\n```"), env)[0] < 1.0
-       for i in frontier_code], [True] * len(frontier_code))
-quadratic = ("```python\ndef reconcile(events, keys):\n"
-             "    out = []\n    for key in keys:\n"
-             "        matches = [e for e in events if e['key'] == key]\n"
-             "        e = max(enumerate(matches), "
-             "key=lambda pair: (pair[1]['rev'], pair[0]))[1] "
-             "if matches else None\n"
-             "        out.append(e.get('value') if e and e['kind'] == "
-             "'put' else None)\n    return out\n```")
-score, why = frontier_code[0].grade(R(quadratic), evalrun.Env(timeout=3))
-check("a quadratic repair times out on the large hidden case",
+frontier_code = {}
+for it in frontier:
+    if it.suite == "code":
+        frontier_code.setdefault(it.id.split("-", 2)[2], it)
+check("three frontier code families, two of each",
+      (sorted(frontier_code), sorted(i.id.split("-", 2)[2] for i in frontier
+                                     if i.suite == "code")),
+      (["combine", "count_pairs", "settle"],
+       ["combine", "combine", "count_pairs", "count_pairs", "settle",
+        "settle"]))
+check("every frontier code reference passes its hidden cases",
+      [i.grade(R("```python\n%s```" % i.meta["reference"]), env)[0]
+       for i in frontier if i.suite == "code"], [1.0] * 6)
+ledger = frontier_code["settle"]
+check("the ledger module as handed over fails",
+      ledger.grade(R("```python\n%s```" % evalsuite.LEDGER_STARTER),
+                   evalrun.Env(timeout=3))[0], 0.0)
+# all or nothing: a module right everywhere but one edge still has a bug
+floats = ledger.meta["reference"].replace(
+    "def _cents(text):\n",
+    "def _cents(text):\n    if '.' in text and text.replace('.', '')"
+    ".isdigit():\n        return int(float(text) * 100)\n")
+score, why = ledger.grade(R("```python\n%s```" % floats), env)
+check("and a repair that keeps float cents scores nothing, not most",
+      (score, why.startswith("passed ") and not why.startswith(
+          "passed 0")), (0.0, True))
+pairs = frontier_code["count_pairs"]
+rel = ">=" if ">=" in pairs.text() else "<="
+naive = ("```python\ndef count_pairs(a, c, k):\n    n = 0\n"
+         "    for j in range(len(a)):\n        for i in range(j):\n"
+         "            if a[j] - a[i] %s c * (j - i) + k:\n"
+         "                n += 1\n    return n\n```" % rel)
+score, why = pairs.grade(R(naive), evalrun.Env(timeout=3))
+check("a quadratic pair count times out on the large hidden case",
       (score, "timed out" in why), (0.0, True))
+spans = frontier_code["combine"]
+closed = spans.meta["reference"].replace(
+    '(m.group(1) == "(")', "0").replace('(m.group(4) == ")")', "0")
+check("interval algebra that ignores open ends fails",
+      spans.grade(R("```python\n%s```" % closed), env)[0], 0.0)
 
 # ============================================================= reason ===
 
@@ -192,9 +217,67 @@ check("exact answers grade right", sum(ok), len(ok))
 check("and a wrong one does not",
       by["reason"][0].grade(R("Answer: 1234567"), env)[0], 0.0)
 frontier_reason = [i for i in frontier if i.suite == "reason"]
-check("solver-graded route puzzles reject a wrong total",
-      [i.grade(R("Answer: 999999"), env)[0] for i in frontier_reason],
-      [0.0] * len(frontier_reason))
+check("frontier reasoning is three families, two of each",
+      sorted(i.id.split("-")[2] for i in frontier_reason),
+      ["count", "count", "grid", "grid", "route", "route"])
+check("every frontier puzzle takes its answer and rejects a wrong one",
+      [(i.grade(R("Answer: %s" % i.meta["answer"]), env)[0],
+        i.grade(R("Answer: 999999"), env)[0]) for i in frontier_reason],
+      [(1.0, 0.0)] * len(frontier_reason))
+
+
+def grid_solutions(prompt):
+    """Every arrangement the clues allow, read from the clues as the
+    model sees them - not from the masks that chose them."""
+    people, colours, pets = (re.search(r"%s \(([^)]*)\)" % k, prompt)
+                             .group(1).split(", ")
+                             for k in ("people", "colour", "pet"))
+    clues = re.findall(r"^\d+\. (.*)\.$", prompt, re.M)
+    found = []
+    for row in itertools.product(*(itertools.permutations(v) for v in (
+            people, colours, pets))):
+        pos = {v: i for part in row for i, v in enumerate(part)}
+
+        def at(text):
+            m = re.fullmatch(r"the (?:person in the )?(\w+) (?:house|owner)",
+                             text, re.I)
+            return pos[m.group(1) if m else text]  # noqa: B023 - used at once
+
+        def holds(c):
+            for sep, fn in ((" lives directly left of ",
+                             lambda a, b: at(b) - at(a) == 1),
+                            (" lives somewhere left of ",
+                             lambda a, b: at(a) < at(b)),
+                            (" lives in house ",
+                             lambda a, b: at(a) == int(b) - 1),
+                            (" is not ", lambda a, b: at(a) != at(b)),
+                            (" is ", lambda a, b: at(a) == at(b))):
+                if sep in c:
+                    return fn(*c.split(sep))
+            raise ValueError(c)
+
+        if all(holds(c) for c in clues):
+            found.append(row)
+    return found
+
+
+grids = [i for i in frontier_reason if i.id.endswith("grid")]
+solved = [grid_solutions(i.text()) for i in grids]
+asked = [re.search(r"(What colour is|Which pet does) (\w+)", i.text()).groups()
+         for i in grids]
+check("each grid has exactly one arrangement, and it gives the answer",
+      [(len(s), s[0][1 if q.startswith("What") else 2][s[0][0].index(who)])
+       for s, (q, who) in zip(solved, asked, strict=True)],
+      [(1, i.meta["answer"]) for i in grids])
+for i in [i for i in frontier_reason if i.id.endswith("count")]:
+    n, a, b, c, d = map(int, re.findall(r"\d+", i.text())[1:6])
+    small = [x for x in range(1, 3001)
+             if (x % a == 0 or x % b == 0 or x % c == 0) and x % d]
+    check("inclusion-exclusion counts what a loop counts (%d %d %d / %d)"
+          % (a, b, c, d),
+          evalsuite._any_of(3000, [a, b, c]) - evalsuite._any_of(
+              3000, [evalsuite._lcm(a, d), evalsuite._lcm(b, d),
+                     evalsuite._lcm(c, d)]), len(small))
 check("answers are read the way people write them",
       [evalsuite.same_answer(evalsuite.final_answer(x), w) for x, w in (
           ("so it is\n**Answer:** $1,250.", "1250"),
@@ -245,8 +328,11 @@ class Agent:
         seen = [json.loads(m["content"]) for m in messages
                 if m["role"] == "tool"]
         names = {t["function"]["name"] for t in tools}
-        if "list_queue" in names:
-            return self._frontier_queue(task, seen)
+        for tool, play in (("list_queue", self._frontier_queue),
+                           ("transfer_stock", self._frontier_depots),
+                           ("get_refund_policy", self._frontier_billing)):
+            if tool in names:
+                return play(task, seen)
         return getattr(self, "_" + sorted(names)[0])(task, seen)
 
     @staticmethod
@@ -256,15 +342,14 @@ class Agent:
                                                                 # `name` arg
 
     def _frontier_queue(self, task, seen):
-        policy = next((s["minimum_amount"] for s in seen
-                       if "minimum_amount" in s), None)
+        policy = next((s for s in seen if "blocked_requesters" in s), None)
         if policy is None:
             return self.call("get_policy")
         pages = [s for s in seen if "ticket_ids" in s]
         if not pages:
-            return self.call("list_queue", page=1)
-        if pages[-1]["next_page"]:
-            return self.call("list_queue", page=pages[-1]["next_page"])
+            return self.call("list_queue")
+        if pages[-1]["next_cursor"]:
+            return self.call("list_queue", cursor=pages[-1]["next_cursor"])
         ids = [ticket_id for page in pages for ticket_id in page["ticket_ids"]]
         if seen[-1].get("error", "").startswith("temporary read"):
             return self.call("get_ticket", ticket_id=seen[-1]["ticket_id"])
@@ -272,16 +357,88 @@ class Agent:
         for ticket_id in ids:
             if ticket_id not in details:
                 return self.call("get_ticket", ticket_id=ticket_id)
-        if seen[-1].get("error", "").startswith("temporary write"):
-            return self.call("approve_ticket",
-                             ticket_id=seen[-1]["ticket_id"])
-        approved = {s["approved"] for s in seen if "approved" in s}
+        done = {s["ticket_id"] for s in seen
+                if "state" in s and "category" not in s}
         for ticket_id in ids:
-            ticket = details[ticket_id]
-            if (ticket["amount"] >= policy[ticket["category"]]
-                    and ticket_id not in approved):
+            t = details[ticket_id]
+            cents, cat = t["amount_cents"], t["category"]
+            if t["state"] != "open" or t["hold"] or ticket_id in done:
+                continue
+            if t["requester"] in policy["blocked_requesters"]:
+                return self.call("reject_ticket", ticket_id=ticket_id,
+                                 reason="blocked requester")
+            if cents > 100 * policy["ceiling_dollars"][cat]:
+                return self.call("escalate_ticket", ticket_id=ticket_id)
+            if cents >= 100 * policy["minimum_dollars"][cat]:
                 return self.call("approve_ticket", ticket_id=ticket_id)
-        return R("The queue is reviewed.")
+        return R("The queue is processed.")
+
+    def _frontier_depots(self, task, seen):
+        order_id = re.search(r"order (ORD-\d+)", task).group(1)
+        order = next((s for s in seen if "lines" in s), None)
+        if order is None:
+            return self.call("get_order", order_id=order_id)
+        codes = next((s["warehouses"] for s in seen if "warehouses" in s),
+                     None)
+        if codes is None:
+            return self.call("list_warehouses")
+        stock = {s["warehouse"]: s["stock"] for s in seen if "stock" in s}
+        for w in codes:
+            if w not in stock:
+                return self.call("get_stock", warehouse=w)
+        home = order["ship_from"]
+
+        def spare(w, sku):
+            s = stock[w].get(sku)
+            return s["on_hand"] - s["reserved"] if s else 0
+
+        plan = []
+        for line in order["lines"]:
+            short = line["qty"] - spare(home, line["sku"])
+            for w in sorted((w for w in codes if w != home),
+                            key=lambda w: -spare(w, line["sku"])):
+                if short <= 0:
+                    break
+                take = min(short, spare(w, line["sku"]))
+                plan.append({"sku": line["sku"], "from_warehouse": w,
+                             "to_warehouse": home, "qty": take})
+                short -= take
+        moved = sum("moved" in s for s in seen)
+        if moved < len(plan):
+            return self.call("transfer_stock", **plan[moved])
+        if not any("shipped" in s for s in seen):
+            return self.call("ship_order", order_id=order_id)
+        return R("Shipped.")
+
+    def _frontier_billing(self, task, seen):
+        from decimal import ROUND_HALF_UP, Decimal
+        email = re.search(r"email (\S+) says", task).group(1)
+        invoice = re.search(r"invoice (INV-\d+)", task).group(1)
+        got = {k: s for s in seen for k in s}
+        if "customer_id" not in got:
+            return self.call("find_customer", email=email)
+        cid = got["customer_id"]["customer_id"]
+        if "billing_currency" not in got:
+            return self.call("get_customer", customer_id=cid)
+        if "charges" not in got:
+            return self.call("list_charges", customer_id=cid)
+        if "policy" not in got:
+            return self.call("get_refund_policy")
+        cur = got["billing_currency"]["billing_currency"]
+        dup = max((c for c in got["charges"]["charges"]
+                   if c["invoice"] == invoice), key=lambda c: c["date"])
+        if "usd_to" not in got:
+            return self.call("get_rate", currency=cur, date=dup["date"])
+        if "refunded" in got:
+            return R("Refunded the duplicate charge.")
+        policy = got["policy"]["policy"]
+        fee = Decimal(re.search(r"fee of ([\d.]+)%", policy).group(1))
+        net = Decimal(str(dup["amount_usd"])) * (100 - fee) / 100
+        unit = Decimal(1) if "whole units" in policy else Decimal("0.01")
+        amount = (net * Decimal(str(got["usd_to"]["usd_to"]))).quantize(
+            unit, ROUND_HALF_UP)
+        return self.call("issue_refund", charge_id=dup["charge_id"],
+                         amount=float(amount), currency=cur)
 
     def _book(self, task, seen):            # calendar
         need = int(re.search(r"(\d+)-minute", task).group(1))
@@ -481,49 +638,134 @@ check("a careful agent solves every multi-step item",
       [(r["id"], 1.0) for r in got])
 check("every world is in the suite, the hard ones too",
       sorted({i.id.split("-", 2)[2] for i in multi}),
-      ["calendar", "conflict", "files", "freeze", "incident", "ledger",
-       "namesake", "orders", "prices", "queue", "refund", "restock", "team"])
-check("the old world mix remains and six frontier queues are added",
+      ["billing", "calendar", "conflict", "depots", "files", "freeze",
+       "incident", "ledger", "namesake", "orders", "prices", "queue",
+       "refund", "restock", "team"])
+check("the old world mix remains and six frontier worlds are added",
       (len(multi), sum(i.meta["tier"] == "hard" for i in multi),
        sum(i.meta["tier"] == "frontier" for i in multi)), (24, 12, 6))
-queue = [i for i in multi if i.meta["tier"] == "frontier"]
-check("a wrong no-op leaves every frontier queue unsolved",
-      [i.grade(R("done"), env, i.world())[0] for i in queue],
-      [0.0] * len(queue))
-world = queue[0].world()
-ids = [ticket_id for page in range(1, 5)
-       for ticket_id in world.call("list_queue", {"page": page})["ticket_ids"]]
-check("a frontier queue has enough dependent calls and retriable errors",
-      (len(ids), "error" in world.call("get_ticket", {"ticket_id": ids[3]}),
-       "category" in world.call("get_ticket", {"ticket_id": ids[3]}),
-       queue[0].meta["turns"] >= 30),
-      (12, True, True, True))
-wrong_world = queue[0].world()
-wrong_world.call("get_policy", {})
-wrong_world.call("get_ticket", {"ticket_id": ids[0]})
-wrong_world.call("approve_ticket", {"ticket_id": ids[0]})
-check("blind approval changes the final state and loses credit",
-      (wrong_world.tickets[ids[0]]["state"],
-       queue[0].grade(R("done"), env, wrong_world)[0]),
-      ("approved", 0.0))
+fworld = {}
+for it in multi:
+    if it.meta["tier"] == "frontier":
+        fworld.setdefault(it.id.split("-", 2)[2], []).append(it)
+check("three frontier worlds, two of each",
+      {k: len(v) for k, v in fworld.items()},
+      {"queue": 2, "depots": 2, "billing": 2})
+check("a wrong no-op leaves every frontier world unsolved",
+      [i.grade(R("done"), env, i.world())[0] for v in fworld.values()
+       for i in v], [0.0] * 6)
+
+queue = fworld["queue"][0]
+world = queue.world()
+ids, cursor = [], None
+while True:
+    page = world.call("list_queue", {"cursor": cursor} if cursor else {})
+    ids += page["ticket_ids"]
+    cursor = page["next_cursor"]
+    if not cursor:
+        break
+check("a frontier queue is twenty tickets behind a cursor, with errors",
+      (len(ids), "error" in world.call("list_queue", {"cursor": "2"}),
+       "error" in world.call("get_ticket", {"ticket_id": ids[5]}),
+       "category" in world.call("get_ticket", {"ticket_id": ids[5]}),
+       queue.meta["turns"] >= 45),
+      (20, True, True, True, True))
+bulk = queue.world()
+bulk.call("get_policy", {})
+for cat in ("field", "office", "lab"):
+    bulk.call("bulk_approve", {"category": cat})
+check("approving in bulk, past the policy, scores nothing",
+      queue.grade(R("done"), env, bulk)[0], 0.0)
+lax = queue.world()
+lax.call("get_policy", {})
+for ticket_id in ids:                      # rule 4 alone: no blocks, no
+    tk = lax.call("get_ticket", {"ticket_id": ticket_id})   # ceilings
+    if "error" in tk:
+        tk = lax.call("get_ticket", {"ticket_id": ticket_id})
+    if tk["state"] == "open" and tk["amount_cents"] >= 100 * lax.policy[
+            "minimum_dollars"][tk["category"]]:
+        lax.call("approve_ticket", {"ticket_id": ticket_id})
+        lax.call("approve_ticket", {"ticket_id": ticket_id})
+check("and so does approving everything over the minimum",
+      queue.grade(R("done"), env, lax)[0], 0.0)
 played = []
 
 
 def counted_queue():
-    w = queue[0].world()
+    w = queue.world()
     played.append(w)
     return w
 
 
-sample = evalsuite.Item("tools", queue[0].id, queue[0].prompt,
-                        queue[0].grade, queue[0].system, queue[0].tools,
-                        world=counted_queue, meta=queue[0].meta)
-check("the frontier reference finishes in 20-40 calls with retries",
+sample = evalsuite.Item("tools", queue.id, queue.prompt, queue.grade,
+                        queue.system, queue.tools, world=counted_queue,
+                        meta=queue.meta)
+check("the queue reference finishes within its turns, retrying",
       (evalrun.run_item(Agent(), sample, env)["score"],
-       20 <= len(played[0].log) <= 40,
-       played[0].read_attempts[ids[3]],
-       played[0].write_attempts[ids[7]]),
+       len(played[0].log) <= queue.meta["turns"],
+       played[0].read_attempts[ids[5]],
+       played[0].write_attempts[played[0].transient_write]),
       (1.0, True, 2, 2))
+
+depots = fworld["depots"][0]
+w = depots.world()
+order = w.call("get_order", {"order_id": w.order["order_id"]})
+check("a depot order cannot ship as it stands",
+      "error" in w.call("ship_order", {"order_id": order["order_id"]}), True)
+for line in order["lines"]:
+    w.call("set_stock", {"warehouse": order["ship_from"], "sku": line["sku"],
+                         "on_hand": 999})
+w.call("ship_order", {"order_id": order["order_id"]})
+check("and shipping it by overriding the counts scores nothing",
+      (w.order["status"], depots.grade(R("done"), env, w)[0]),
+      ("shipped", 0.0))
+greedy = depots.world()                    # the most units on hand, not
+home = greedy.order["ship_from"]           # the most unreserved
+for line in greedy.order["lines"]:
+    have = greedy.stock[home][line["sku"]]
+    short = line["qty"] - have["on_hand"] + have["reserved"]
+    for code in sorted((c for c in greedy.stock if c != home),
+                       key=lambda c: -greedy.stock[c].get(
+                           line["sku"], {"on_hand": 0})["on_hand"]):
+        if short <= 0:
+            break
+        s = greedy.stock[code].get(line["sku"])
+        take = min(short, s["on_hand"] - s["reserved"]) if s else 0
+        if take > 0:
+            for _ in range(2):             # the first transfer is locked
+                if "moved" in greedy.call("transfer_stock", {
+                        "sku": line["sku"], "from_warehouse": code,
+                        "to_warehouse": home, "qty": take}):
+                    break
+            short -= take
+greedy.call("ship_order", {"order_id": greedy.order["order_id"]})
+check("taking from the fullest warehouse ships, but off the plan",
+      depots.grade(R("done"), env, greedy), (0.5, depots.grade(
+          R("done"), env, greedy)[1]))
+
+billing = fworld["billing"][0]
+
+
+def refund_with(pick, rate_date):
+    """Everything right but the one thing named."""
+    w = billing.world()
+    charges = sorted((c for c in w.charges
+                      if c["invoice"] in billing.prompt),
+                     key=lambda c: c["date"])
+    c = charges[pick]
+    cur = w.customer["billing_currency"]
+    rate = w.rates[(cur, rate_date(w, c))]
+    fee = float(re.search(r"fee of ([\d.]+)%", w.policy).group(1))
+    w.call("issue_refund", {"charge_id": c["charge_id"],
+                            "amount": round(c["amount_usd"] * (1 - fee / 100)
+                                            * rate, 2), "currency": cur})
+    return billing.grade(R("done"), env, w)[0]
+
+
+check("the refund has to be the later charge at that day's rate",
+      [refund_with(-1, lambda w, c: c["date"]),
+       refund_with(0, lambda w, c: c["date"]),
+       refund_with(-1, lambda w, c: w.today)], [1.0, 0.0, 0.0])
 
 
 class Hasty(Agent):
@@ -718,6 +960,11 @@ check("frontier document answers are solvable and a wrong answer fails",
         i.grade(R("Answer: 999999"), env)[0])
        for i in frontier_ctx if i.meta["kind"] == "floor"],
       [(1.0, 0.0)] * 6)
+check("two bundles in every document change clerk after first being named",
+      sorted({i.meta["doc"]: i.text(4.0).count(" has been refiled and is "
+                                               "now filed by ")
+              for i in frontier_ctx}.items()),
+      [("128k", 2), ("32k", 2), ("64k", 2)])
 missing_code = [i for i in frontier_ctx if i.meta["kind"] == "missing"]
 check("the missing-code question needs the right record, not a refusal",
       [(i.grade(R(i.meta["answer"]), env)[0],
@@ -986,9 +1233,32 @@ frontier_format = [i for i in frontier if i.suite == "instruct"]
 check("a generated report passes every interacting format constraint",
       [i.grade(R(i.meta["reference"]), env)[0] for i in frontier_format],
       [1.0] * len(frontier_format))
-check("a report with a wrong checksum fails",
-      [i.grade(R(i.meta["reference"] + "0"), env)[0]
-       for i in frontier_format], [0.0] * len(frontier_format))
+check("and so does the same answer in a code fence",
+      [i.grade(R("```\n%s\n```" % i.meta["reference"]), env)[0]
+       for i in frontier_format], [1.0] * len(frontier_format))
+
+
+def near_miss(it):
+    """The reference, wrong in one small place."""
+    ref = it.meta["reference"]
+    if it.id.endswith("report"):
+        return ref[:-1] + str((int(ref[-1]) + 1) % 10)      # LINES total
+    if it.id.endswith("json"):
+        want = json.loads(ref)
+        want["teams"][0]["members"].reverse()
+        if len(want["teams"][0]["members"]) == 1:
+            want["top"] = "u000"
+        return json.dumps(want)
+    lines = ref.splitlines()                               # one word more
+    return "\n".join(lines[:-1] + [lines[-1] + " " + lines[-1].split()[1]])
+
+
+check("one slip anywhere in a frontier format answer fails it",
+      [i.grade(R(near_miss(i)), env)[0] for i in frontier_format],
+      [0.0] * len(frontier_format))
+check("three frontier format families, two of each",
+      sorted(i.id.split("-")[2] for i in frontier_format),
+      ["json", "json", "report", "report", "text", "text"])
 
 # ============================================================= custom ===
 
