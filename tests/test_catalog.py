@@ -191,8 +191,10 @@ AUX = ["MTP/mtp-Qwen3.8-27B-Q4_0.gguf", "mtp-Qwen3.8-27B-BF16.gguf",
        "Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-FastMTP-32K.gguf",
        "doctors/TAARDIS-27B-Doctors-V3.lora.gguf", "mmproj-F16.gguf",
        "imatrix.gguf", "imatrix_unsloth.gguf",
-       "dspark/dspark-DeepSeek-V4-Flash-0731-BF16.gguf"]
+       "dspark/dspark-DeepSeek-V4-Flash-0731-BF16.gguf",
+       "Escha-Qwen3.8-27B-W2-MTP-F16-headQ4.gguf"]
 MODELS = ["RVN-Q4_K_M-mtp.gguf", "RVN-IQ1_S-multilingual-mtp.gguf",
+          "M-APEX-Quality-MTP.gguf", "Qwen3.8-27B-Heretic-Q4_K_M-mtp.gguf",
           "Qwen3.8-27B-Uncensored-noMTP-Q4_K_M.gguf",
           "Huihui-Qwen3.8-27B-abliterated-GSQ-RCO-IQ3_S-mtp.gguf",
           "RVN-Q3_K_M-vision.gguf", "Bonsai-27B-Q1_0.gguf",

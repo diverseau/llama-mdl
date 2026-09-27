@@ -158,6 +158,19 @@ def impostor(inv, qm, nid):
         inv.n_params / 1e9, nid, card_params(qm, nid) / 1e9)
 
 
+def header_problem(inv, qm, nid, card=True):
+    """Why a header cannot stand for the model filed as nid - a (code,
+    message) - or None. `card` False skips the size check, for a local
+    file the catalog did not describe."""
+    part = inv.partial
+    if part:
+        return ("auxiliary", "its header holds %d of the %d layers it "
+                "declares - an MTP head or draft, not the model" % part)
+    if card and not same_model(inv, qm, nid):
+        return ("impostor", impostor(inv, qm, nid))
+    return None
+
+
 def rescale(inv, size, source):
     """Another quant of the same model, from one header: the same tensors,
     each scaled to the file. Close enough to rank on."""
@@ -262,8 +275,9 @@ def evaluate(c, qm, mach, opts, profile, binary):
     # guess into a miss used to keep the guess's score, rank on it, and
     # crash reading the fit it no longer had
     c.fit = c.shape = c.q = c.why = None
-    if c.repo and not same_model(c.inv, qm, c.node):
-        c.reject = ("impostor", impostor(c.inv, qm, c.node))
+    problem = header_problem(c.inv, qm, c.node, card=bool(c.repo))
+    if problem:
+        c.reject = problem
         return
     # a preset that names its own build is judged by that build: a fork
     # made for an arch upstream lacks must not be turned away for it
@@ -455,6 +469,26 @@ def local_cands(models, qm, decisions=None):
     return out, links
 
 
+def _fetch_all(cands, cache_only, spin):
+    """Each candidate's own header, in parallel; the number that failed."""
+    failed = 0
+    with concurrent.futures.ThreadPoolExecutor(WORKERS) as pool:
+        jobs = {pool.submit(fetch, c, cache_only): c for c in cands}
+        for n, job in enumerate(concurrent.futures.as_completed(jobs), 1):
+            if spin:
+                spin.label = ("reading model headers from the Hub: %d of %d"
+                              % (n, len(jobs)))
+            c = jobs[job]
+            try:
+                c.inv = job.result()
+                c.exact = c.inv is not None
+            except (remote.RemoteError, gguf.NotGGUF, gguf.Truncated,
+                    ValueError, OSError) as e:
+                c.reject = ("header", " ".join(str(e).splitlines()))
+                failed += 1
+    return failed
+
+
 def fit_all(cands, qm, mach, opts, profile, binary, cache_only, notes,
             spin=None):
     """Headers for one quant per model (in parallel), the rest sized
@@ -470,34 +504,27 @@ def fit_all(cands, qm, mach, opts, profile, binary, cache_only, notes,
         if (c.base and c.base[0] == c.repo and c.base[1] != c.key
                 and remote.stored(c.repo, c.key, c.shards) is None):
             inv = remote.stored(*c.base)
-            if inv is not None and same_model(inv, qm, c.node):
+            if inv is not None and not header_problem(inv, qm, c.node):
                 c.inv = rescale(inv, c.size, "hf:%s/%s" % (c.repo, c.key))
-    failed = 0
-    with concurrent.futures.ThreadPoolExecutor(WORKERS) as pool:
-        jobs = {pool.submit(fetch, c, cache_only): c for c in first.values()
-                if c.inv is None}
-        for n, job in enumerate(concurrent.futures.as_completed(jobs), 1):
-            if spin:
-                spin.label = ("reading model headers from the Hub: %d of %d"
-                              % (n, len(jobs)))
-            c = jobs[job]
-            try:
-                c.inv = job.result()
-                c.exact = c.inv is not None
-            except (remote.RemoteError, gguf.NotGGUF, gguf.Truncated,
-                    ValueError, OSError) as e:
-                c.reject = ("header", " ".join(str(e).splitlines()))
-                failed += 1
+    failed = _fetch_all([c for c in first.values() if c.inv is None],
+                        cache_only, spin)
+    # a head or a draft read first says nothing of the files beside it,
+    # which are likely the model: each reads its own
+    failed += _fetch_all([c for c in cands if c.inv is None
+                          and c.reject is None and c.node in first
+                          and first[c.node].inv is not None
+                          and first[c.node].inv.partial], cache_only, spin)
     for c in cands:
         base = first.get(c.node)
-        # a sibling sized from an impostor's header would inherit its lie
-        if (c.inv is None and base and base.inv
-                and same_model(base.inv, qm, c.node)):
-            base = first[c.node]
+        # a sibling sized from an impostor's header, or a head's, would
+        # inherit its lie
+        problem = (header_problem(base.inv, qm, c.node)
+                   if base and base.inv else None)
+        if c.inv is None and base and base.inv and not problem:
             c.inv = rescale(base.inv, c.size, "hf:%s/%s" % (c.repo, c.key))
         if c.inv is None and c.reject is None:
-            if base and base.inv and not same_model(base.inv, qm, c.node):
-                c.reject = ("impostor", impostor(base.inv, qm, c.node))
+            if problem and problem[0] != "auxiliary":   # a head's own reason
+                c.reject = problem
             else:
                 c.reject = (base.reject if base and base.reject else
                             ("header", "header not cached (--no-fetch)"

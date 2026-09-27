@@ -4,6 +4,16 @@ Notable changes. Dates are ISO; versions follow [semver](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- `mdl find` no longer suggests an MTP head as the model. A GGUF whose
+  header holds under half the layers it declares (a head or draft
+  exported with its model's metadata) is turned away whatever its name,
+  and the files beside it read their own headers instead of being sized
+  from it. A 2.9 GB head of a 27B was offered at F16 and 256K context.
+  `mdl ui` drops such picks saved by an earlier run and runs `find`
+  again.
+
 ## [0.14.0] - 2026-09-28
 
 A frontier tier for `mdl eval`, editing a model's config from its page

@@ -266,6 +266,12 @@ check("nothing to stop", pull.stop("going"), False)
 # -- find's picks as recipes for a card's Config -----------------------------------
 snapshot.picks_path().parent.mkdir(parents=True, exist_ok=True)
 snapshot.picks_path().write_text(json.dumps({"rows": [
+    # saved by a find that took an MTP head for the model, at F16
+    {"spec": "hf:aj9o9/Qwen3.8-27B-Escha-W2-GGUF:F16",
+     "model": "aj9o9/Qwen3.8-27B-Escha-W2-GGUF",
+     "repo": "aj9o9/Qwen3.8-27B-Escha-W2-GGUF",
+     "file": "Escha-Qwen3.8-27B-W2-MTP-F16-headQ4.gguf", "quant": "F16",
+     "size": 2926418048, "ctx": 262144},
     {"spec": "hf:other/Qwen3-8B-GGUF:Q4_K_M", "model": "Qwen/Qwen3-8B",
      "repo": "other/Qwen3-8B-GGUF", "file": "Qwen3-8B-Q4_K_M.gguf",
      "quant": "Q4_K_M", "size": 5 * 2 ** 30, "ctx": 131072},
@@ -278,7 +284,8 @@ snapshot.picks_path().write_text(json.dumps({"rows": [
     {"spec": "C:/models/local.gguf", "model": "local", "repo": None,
      "file": None, "quant": "Q4_K_M", "size": 1, "ctx": 4096}]}))
 ms = snapshot.build()["kinds"][0]["models"]
-check("Config offers find's picks after your own: one a repo, none pulled",
+check("Config offers find's picks after your own: one a repo, none pulled, "
+      "and no head a stale run took for a model",
       [(m["id"], m.get("pull", False)) for m in ms],
       [("demo", False), ("cached", False),
        ("hf:other/Qwen3-8B-GGUF:Qwen3-8B-Q4_K_M.gguf", True)])

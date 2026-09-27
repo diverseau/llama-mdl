@@ -135,8 +135,13 @@ def auxiliary(name):
     if "imatrix" in flat and not any(QUANT_WORD.match(w)
                                      for ws in words for w in ws):
         return True
-    # "mtp-X-Q4_0.gguf" and "MTP/..." are the head alone; "X-Q4_0-mtp.gguf"
-    # is the whole model with its MTP layers kept, and is a quant.
+    # "mtp-X-Q4_0.gguf" and "MTP/..." are the head alone, and so is
+    # "X-MTP-F16-headQ4.gguf"; "X-Q4_0-mtp.gguf" is the whole model with
+    # its MTP layers kept, and is a quant. Names past these are caught by
+    # their headers (gguf.Inventory.partial).
+    if "mtp" in flat and any(w.startswith("head") for ws in words
+                             for w in ws):
+        return True
     return any(ws[0] == "mtp" for ws in words)
 
 
